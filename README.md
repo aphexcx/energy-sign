@@ -1,3 +1,5 @@
+http://nilhcem.com/android-things/bluetooth-low-energy
+
 # Bluetooth GATT Server Sample (Kotlin)
 
 This application demonstrates accessing the `BluetoothGattServer` Android API
