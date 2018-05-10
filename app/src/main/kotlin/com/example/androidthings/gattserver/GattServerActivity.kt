@@ -17,19 +17,10 @@
 package com.example.androidthings.gattserver
 
 import android.app.Activity
-import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothDevice
-import android.bluetooth.BluetoothGatt
-import android.bluetooth.BluetoothGattCharacteristic
-import android.bluetooth.BluetoothGattDescriptor
-import android.bluetooth.BluetoothGattServer
-import android.bluetooth.BluetoothGattServerCallback
-import android.bluetooth.BluetoothManager
-import android.bluetooth.BluetoothProfile
+import android.bluetooth.*
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
-import android.bluetooth.le.BluetoothLeAdvertiser
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -41,9 +32,7 @@ import android.text.format.DateFormat
 import android.util.Log
 import android.view.WindowManager
 import android.widget.TextView
-
-import java.util.Arrays
-import java.util.Date
+import java.util.*
 
 private const val TAG = "GattServerActivity"
 
@@ -109,6 +98,7 @@ class GattServerActivity : Activity() {
         }
     }
 
+    private var currentString: ByteArray = byteArrayOf()
     /**
      * Callback to handle incoming requests to the GATT server.
      * All read/write requests for characteristics and descriptors are handled here.
@@ -125,11 +115,41 @@ class GattServerActivity : Activity() {
             }
         }
 
+        override fun onCharacteristicWriteRequest(device: BluetoothDevice?,
+                                                  requestId: Int,
+                                                  characteristic: BluetoothGattCharacteristic,
+                                                  preparedWrite: Boolean,
+                                                  responseNeeded: Boolean,
+                                                  offset: Int,
+                                                  value: ByteArray?) {
+            when (characteristic.uuid) {
+                TimeProfile.CHARACTERISTIC_INTERACTOR_UUID -> {
+                    Log.i(TAG, "Write Interactor String! Value: [${String(value!!)}]")
+                    currentString = value!!
+                    bluetoothGattServer?.sendResponse(device,
+                            requestId,
+                            BluetoothGatt.GATT_SUCCESS,
+                            0,
+                            currentString)
+                }
+                else -> {
+                    // Invalid characteristic
+                    Log.w(TAG, "Invalid Characteristic Read: " + characteristic.uuid)
+                    bluetoothGattServer?.sendResponse(device,
+                            requestId,
+                            BluetoothGatt.GATT_FAILURE,
+                            0,
+                            null)
+                }
+            }
+
+        }
+
         override fun onCharacteristicReadRequest(device: BluetoothDevice, requestId: Int, offset: Int,
                                                  characteristic: BluetoothGattCharacteristic) {
             val now = System.currentTimeMillis()
-            when {
-                TimeProfile.CURRENT_TIME == characteristic.uuid -> {
+            when (characteristic.uuid) {
+                TimeProfile.CURRENT_TIME -> {
                     Log.i(TAG, "Read CurrentTime")
                     bluetoothGattServer?.sendResponse(device,
                             requestId,
@@ -137,13 +157,29 @@ class GattServerActivity : Activity() {
                             0,
                             TimeProfile.getExactTime(now, TimeProfile.ADJUST_NONE))
                 }
-                TimeProfile.LOCAL_TIME_INFO == characteristic.uuid -> {
+                TimeProfile.LOCAL_TIME_INFO -> {
                     Log.i(TAG, "Read LocalTimeInfo")
                     bluetoothGattServer?.sendResponse(device,
                             requestId,
                             BluetoothGatt.GATT_SUCCESS,
                             0,
                             TimeProfile.getLocalTimeInfo(now))
+                }
+                TimeProfile.CHARACTERISTIC_READER_UUID -> {
+                    Log.i(TAG, "Read String")
+                    bluetoothGattServer?.sendResponse(device,
+                            requestId,
+                            BluetoothGatt.GATT_SUCCESS,
+                            0,
+                            currentString)
+                }
+                TimeProfile.CHARACTERISTIC_INTERACTOR_UUID -> {
+                    Log.i(TAG, "Read Interactor String???")
+                    bluetoothGattServer?.sendResponse(device,
+                            requestId,
+                            BluetoothGatt.GATT_SUCCESS,
+                            0,
+                            currentString)
                 }
                 else -> {
                     // Invalid characteristic
@@ -159,7 +195,7 @@ class GattServerActivity : Activity() {
 
         override fun onDescriptorReadRequest(device: BluetoothDevice, requestId: Int, offset: Int,
                                              descriptor: BluetoothGattDescriptor) {
-            if (TimeProfile.CLIENT_CONFIG == descriptor.uuid) {
+            if (TimeProfile.CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR == descriptor.uuid) {
                 Log.d(TAG, "Config descriptor read")
                 val returnValue = if (registeredDevices.contains(device)) {
                     BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
@@ -187,7 +223,7 @@ class GattServerActivity : Activity() {
                                               responseNeeded: Boolean,
                                               offset: Int,
                                               value: ByteArray) {
-            if (TimeProfile.CLIENT_CONFIG == descriptor.uuid) {
+            if (TimeProfile.CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR == descriptor.uuid) {
                 if (Arrays.equals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE, value)) {
                     Log.d(TAG, "Subscribe device to notifications: $device")
                     registeredDevices.add(device)
@@ -225,7 +261,7 @@ class GattServerActivity : Activity() {
 
         bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         val bluetoothAdapter = bluetoothManager.adapter
-        bluetoothAdapter.name = "SuperGATT!!!"
+        bluetoothAdapter.name = "Aphex!"
         // We can't continue without proper Bluetooth support
         if (!checkBluetoothSupport(bluetoothAdapter)) {
             finish()
@@ -297,10 +333,7 @@ class GattServerActivity : Activity() {
      * and supports the Current Time Service.
      */
     private fun startAdvertising() {
-        val bluetoothLeAdvertiser: BluetoothLeAdvertiser? =
-                bluetoothManager.adapter.bluetoothLeAdvertiser
-
-        bluetoothLeAdvertiser?.let {
+        bluetoothManager.adapter.bluetoothLeAdvertiser?.let {
             val settings = AdvertiseSettings.Builder()
                     .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
                     .setConnectable(true)
@@ -311,7 +344,8 @@ class GattServerActivity : Activity() {
             val data = AdvertiseData.Builder()
                     .setIncludeDeviceName(true)
                     .setIncludeTxPowerLevel(false)
-                    .addServiceUuid(ParcelUuid(TimeProfile.TIME_SERVICE))
+//                    .addServiceUuid(ParcelUuid(TimeProfile.TIME_SERVICE))
+                    .addServiceUuid(ParcelUuid(TimeProfile.STRING_SERVICE_UUID))
                     .build()
 
             it.startAdvertising(settings, data, advertiseCallback)
@@ -322,9 +356,7 @@ class GattServerActivity : Activity() {
      * Stop Bluetooth advertisements.
      */
     private fun stopAdvertising() {
-        val bluetoothLeAdvertiser: BluetoothLeAdvertiser? =
-                bluetoothManager.adapter.bluetoothLeAdvertiser
-        bluetoothLeAdvertiser?.let {
+        bluetoothManager.adapter.bluetoothLeAdvertiser?.let {
             it.stopAdvertising(advertiseCallback)
         } ?: Log.w(TAG, "Failed to create advertiser")
     }
@@ -336,7 +368,9 @@ class GattServerActivity : Activity() {
     private fun startServer() {
         bluetoothGattServer = bluetoothManager.openGattServer(this, gattServerCallback)
 
-        bluetoothGattServer?.addService(TimeProfile.createTimeService())
+        bluetoothGattServer
+//                ?.addService(TimeProfile.createTimeService())
+                ?.addService(TimeProfile.createStringService())
                 ?: Log.w(TAG, "Unable to create GATT server")
 
         // Initialize the local UI
