@@ -256,6 +256,8 @@ class GattServerActivity : Activity() {
 
         localTimeView = findViewById(R.id.text_time)
 
+        // create Uart device
+
         // Devices with a display should not go to sleep
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
