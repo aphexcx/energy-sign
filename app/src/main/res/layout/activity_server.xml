@@ -20,13 +20,31 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
-    <TextView
-        android:id="@+id/text_time"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="center"
-        android:gravity="center"
-        android:textSize="56dp"
-        tools:text="01/01/1970\n12:00"/>
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical">
 
+        <TextView
+            android:id="@+id/text_time"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="right"
+            android:gravity="right"
+            android:textSize="16sp"
+            tools:text="01/01/1970 12:00"/>
+
+        <ListView
+            android:id="@+id/log_list"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_gravity="left"
+            android:fontFamily="monospace"
+            android:gravity="left"
+            android:textSize="14sp"
+            tools:listitem="@android:layout/simple_list_item_1"
+            tools:text="Log Lines\nLines"/>
+
+
+    </LinearLayout>
 </FrameLayout>

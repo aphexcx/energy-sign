@@ -42,9 +42,9 @@ object TimeProfile {
     /* Mandatory Client Characteristic Config Descriptor */
     val CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
-    val STRING_SERVICE_UUID = UUID.fromString("795090c7-420d-4048-a24e-18e60180e23c");
-    val CHARACTERISTIC_READER_UUID = UUID.fromString("31517c58-66bf-470c-b662-e352a6c80cba");
-    val CHARACTERISTIC_INTERACTOR_UUID = UUID.fromString("0b89d2d4-0ea6-4141-86bb-0c5fb91ab14a");
+    val STRING_SERVICE_UUID: UUID = UUID.fromString("795090c7-420d-4048-a24e-18e60180e23c");
+    val CHARACTERISTIC_READER_UUID: UUID = UUID.fromString("31517c58-66bf-470c-b662-e352a6c80cba");
+    val CHARACTERISTIC_INTERACTOR_UUID: UUID = UUID.fromString("0b89d2d4-0ea6-4141-86bb-0c5fb91ab14a");
 
     // Adjustment Flags
     const val ADJUST_NONE: Byte = 0x0
