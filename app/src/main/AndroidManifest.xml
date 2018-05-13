@@ -20,8 +20,12 @@
     <uses-permission android:name="android.permission.BLUETOOTH"/>
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"/>
 
+    <uses-permission android:name="com.google.android.things.permission.USE_PERIPHERAL_IO"/>
+
 
     <application android:label="@string/app_name">
+        <uses-library android:name="com.google.android.things"/>
+
         <activity android:name=".GattServerActivity">
 
             <!-- Launch as default from Android Studio -->

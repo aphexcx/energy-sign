@@ -37,6 +37,11 @@ import android.view.WindowManager
 import android.widget.ArrayAdapter
 import android.widget.ListView
 import android.widget.TextView
+import com.google.android.things.pio.PeripheralManager
+import com.google.android.things.pio.UartDevice
+import com.google.android.things.pio.UartDeviceCallback
+import java.io.IOException
+import java.lang.RuntimeException
 import java.util.*
 
 
@@ -44,16 +49,72 @@ private const val TAG = "GattServerActivity"
 
 class GattServerActivity : Activity() {
 
+    private var currentStringNeedsWrite: Boolean = true
+    private var currentString: ByteArray = "TRONCE".toByteArray()
+        set(value) {
+            field = value
+            currentStringNeedsWrite = true
+            stringView.post { stringView.text = STRING_PREFIX + String(value) }
+        }
+
     /* Local UI */
     private lateinit var localTimeView: TextView
     private lateinit var stringView: TextView
     private lateinit var logList: ListView
+
+    private lateinit var uartDevice: UartDevice
 
     /* Bluetooth API */
     private lateinit var bluetoothManager: BluetoothManager
     private var bluetoothGattServer: BluetoothGattServer? = null
     /* Collection of notification subscribers */
     private val registeredDevices = mutableSetOf<BluetoothDevice>()
+
+
+    private val uartCallback: UartDeviceCallback = object : UartDeviceCallback {
+        override fun onUartDeviceDataAvailable(uart: UartDevice): Boolean {
+            logD("Data available on ${uart.name}! Reading...")
+            // Read available data from the UART device
+            try {
+                val bytes = ByteArray(280)
+                val count = uart.read(bytes, bytes.size)
+                logD("Read $count bytes from ${uart.name}: [${String(bytes)}]")
+            } catch (e: IOException) {
+                logW("Unable to read from UART device ${uart.name}: $e")
+            }
+
+            if (currentStringNeedsWrite) {
+                logD("Writing currentString [${String(currentString)}] to ${uart.name}...")
+
+                try {
+                    uartDevice.write(currentString)
+                    currentStringNeedsWrite = true //TODO change to false to not write every time
+                } catch (e: Exception) {
+                    logW("Unable to write to UART device ${uart.name}: $e")
+                }
+            }
+            // Continue listening for more interrupts
+            return true
+        }
+
+        override fun onUartDeviceError(uart: UartDevice, error: Int) {
+            logW("$uart: Error event $error")
+        }
+
+    }
+
+    override fun onStart() {
+        super.onStart()
+        logD("Uart device $UART_DEVICE_NAME callback registered")
+        uartDevice.registerUartDeviceCallback(uartCallback)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        logD("Uart device $UART_DEVICE_NAME callback unregistered")
+        uartDevice.unregisterUartDeviceCallback(uartCallback)
+
+    }
 
     /**
      * Listens for Bluetooth adapter events to enable/disable
@@ -110,11 +171,6 @@ class GattServerActivity : Activity() {
         }
     }
 
-    private var currentString: ByteArray = byteArrayOf()
-        set(value) {
-            field = value
-            stringView.post { stringView.text = STRING_PREFIX + String(value) }
-        }
     /**
      * Callback to handle incoming requests to the GATT server.
      * All read/write requests for characteristics and descriptors are handled here.
@@ -142,7 +198,7 @@ class GattServerActivity : Activity() {
             when (characteristic.uuid) {
                 TimeProfile.CHARACTERISTIC_INTERACTOR_UUID -> {
                     logD("Write Interactor String! Value: [${String(value!!)}]")
-                    currentString = value!!
+                    currentString = value
                     bluetoothGattServer?.sendResponse(device,
                             requestId,
                             BluetoothGatt.GATT_SUCCESS,
@@ -279,7 +335,7 @@ class GattServerActivity : Activity() {
         stringView = findViewById(R.id.text_string)
         logList = findViewById(R.id.log_list)
 
-        logAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, logStrings)
+        logAdapter = ArrayAdapter(this, R.layout.item_log, logStrings)
         logList.adapter = logAdapter
 
         // create Uart device
@@ -292,8 +348,12 @@ class GattServerActivity : Activity() {
         // We can't continue without proper Bluetooth support
         if (!checkBluetoothSupport(bluetoothAdapter)) {
             logD("No bluetooth support, exiting")
-            finish()
+            fatal()
         }
+
+        // UART
+        uartDevice = configureUart() ?: fatal()
+        logD("UART device $UART_DEVICE_NAME opened and configured!")
 
         // Register for system Bluetooth events
         val filter = IntentFilter(ACTION_STATE_CHANGED)
@@ -308,18 +368,57 @@ class GattServerActivity : Activity() {
         }
     }
 
+    private fun fatal(): Nothing {
+        finish()
+        throw RuntimeException("Fatal")
+    }
+
+    fun configureUart(): UartDevice? {
+        try {
+            val manager = PeripheralManager.getInstance()
+            val deviceList = manager.uartDeviceList
+            if (deviceList.isEmpty()) {
+                logD("No UART port available on this device.")
+            } else {
+                logD("List of available UART devices: $deviceList")
+            }
+            logD("Opening UART device $UART_DEVICE_NAME")
+            val uart = manager.openUartDevice(UART_DEVICE_NAME)
+            logD("Configuring UART device $UART_DEVICE_NAME")
+            // Configure the UART port
+            uart.setBaudrate(UART_BAUD_RATE)
+            uart.setDataSize(8)
+            uart.setParity(UartDevice.PARITY_NONE)
+            uart.setStopBits(1)
+            return uart
+        } catch (e: IOException) {
+            logW("Unable to open/configure UART device: $e")
+        }
+        return null
+    }
+
+    fun UartDevice.write(buffer: ByteArray) {
+        val finalBuffer = buffer + '\r'.toByte()
+        val count = uartDevice.write(finalBuffer, finalBuffer.size)
+        logD("Wrote $count bytes to ${uartDevice.name}")
+    }
+
     private fun logD(s: String) {
         Log.d(TAG, s)
-        logList.post {
-            logAdapter.add(s)
-            logList.smoothScrollToPosition(logAdapter.count)
-        }
+        addToLog(s)
     }
 
     private fun logW(s: String) {
         Log.w(TAG, s)
+        addToLog("🚨W🚨 $s")
+    }
+
+    private fun addToLog(s: String) {
         logList.post {
-            logAdapter.add("W!: $s")
+            logAdapter.add(s)
+            if (logAdapter.count > 100) {
+                logAdapter.remove(logAdapter.getItem(0))
+            }
             logList.smoothScrollToPosition(logAdapter.count)
         }
     }
@@ -330,6 +429,12 @@ class GattServerActivity : Activity() {
         if (bluetoothAdapter.isEnabled) {
             stopServer()
             stopAdvertising()
+        }
+
+        try {
+            uartDevice.close()
+        } catch (e: IOException) {
+            Log.w(TAG, "Unable to close UART device", e)
         }
 
         unregisterReceiver(bluetoothReceiver)
@@ -419,10 +524,12 @@ class GattServerActivity : Activity() {
         val date = Date(timestamp)
         val displayDate = DateFormat.getMediumDateFormat(this).format(date)
         val displayTime = DateFormat.getTimeFormat(this).format(date)
-        localTimeView.text = "$displayDate    $displayTime"
+        localTimeView.text = "$displayDate 🕰 $displayTime"
     }
 
     companion object {
-        private val STRING_PREFIX: String = "🔠"
+        private const val STRING_PREFIX: String = "🔠"
+        private const val UART_DEVICE_NAME: String = "UART6"
+        private const val UART_BAUD_RATE: Int = 19200
     }
 }
