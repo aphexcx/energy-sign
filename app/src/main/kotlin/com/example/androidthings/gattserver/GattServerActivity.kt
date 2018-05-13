@@ -50,7 +50,7 @@ private const val TAG = "GattServerActivity"
 class GattServerActivity : Activity() {
 
     private var currentStringNeedsWrite: Boolean = true
-    private var currentString: ByteArray = "TRONCE".toByteArray()
+    private var currentString: ByteArray = byteArrayOf()
         set(value) {
             field = value
             currentStringNeedsWrite = true
@@ -61,8 +61,10 @@ class GattServerActivity : Activity() {
     private lateinit var localTimeView: TextView
     private lateinit var stringView: TextView
     private lateinit var logList: ListView
+    private lateinit var logAdapter: ArrayAdapter<String>
+    private lateinit var advertiserStatusView: TextView
 
-    private lateinit var uartDevice: UartDevice
+    private val logStrings: ArrayList<String> = arrayListOf()
 
     /* Bluetooth API */
     private lateinit var bluetoothManager: BluetoothManager
@@ -70,6 +72,7 @@ class GattServerActivity : Activity() {
     /* Collection of notification subscribers */
     private val registeredDevices = mutableSetOf<BluetoothDevice>()
 
+    private lateinit var uartDevice: UartDevice
 
     private val uartCallback: UartDeviceCallback = object : UartDeviceCallback {
         override fun onUartDeviceDataAvailable(uart: UartDevice): Boolean {
@@ -145,6 +148,7 @@ class GattServerActivity : Activity() {
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
             logD("LE Advertise Started! Name: ${bluetoothManager.adapter.name}")
+            advertiserStatusView.text = "💚${bluetoothManager.adapter.name}"
         }
 
         override fun onStartFailure(errorCode: Int) {
@@ -168,6 +172,7 @@ class GattServerActivity : Activity() {
                 else -> "Unknown Advertise Error, error code not part of the AdvertiseCallback enum "
             }
             logW(error)
+            advertiserStatusView.text = "💔$error"
         }
     }
 
@@ -323,17 +328,19 @@ class GattServerActivity : Activity() {
         }
     }
 
-    private val logStrings: ArrayList<String> = arrayListOf()
-
-    private lateinit var logAdapter: ArrayAdapter<String>
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_server)
 
+        timeFormat = DateFormat.getTimeFormat(this)
+        dateFormat = DateFormat.getMediumDateFormat(this)
+
         localTimeView = findViewById(R.id.text_time)
-        stringView = findViewById(R.id.text_string)
+        stringView = findViewById(R.id.current_string)
+        advertiserStatusView = findViewById(R.id.advertiser_status)
         logList = findViewById(R.id.log_list)
+
+        currentString = "TRONCE".toByteArray()
 
         logAdapter = ArrayAdapter(this, R.layout.item_log, logStrings)
         logList.adapter = logAdapter
@@ -414,11 +421,12 @@ class GattServerActivity : Activity() {
     }
 
     private fun addToLog(s: String) {
+        val time = timeFormat.format(Date())
         logList.post {
-            logAdapter.add(s)
-            if (logAdapter.count > 100) {
+            if (logAdapter.count > 101) {
                 logAdapter.remove(logAdapter.getItem(0))
             }
+            logAdapter.add("$time $s")
             logList.smoothScrollToPosition(logAdapter.count)
         }
     }
@@ -517,13 +525,16 @@ class GattServerActivity : Activity() {
         bluetoothGattServer?.close()
     }
 
+    private lateinit var timeFormat: java.text.DateFormat
+    private lateinit var dateFormat: java.text.DateFormat
+
     /**
      * Update graphical UI on devices that support it with the current time.
      */
     private fun updateLocalUi(timestamp: Long) {
         val date = Date(timestamp)
-        val displayDate = DateFormat.getMediumDateFormat(this).format(date)
-        val displayTime = DateFormat.getTimeFormat(this).format(date)
+        val displayDate = dateFormat.format(date)
+        val displayTime = timeFormat.format(date)
         localTimeView.text = "$displayDate 🕰 $displayTime"
     }
 

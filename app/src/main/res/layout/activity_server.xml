@@ -14,54 +14,68 @@
   See the License for the specific language governing permissions and
   limitations under the License.
   -->
-<FrameLayout
+<android.support.constraint.ConstraintLayout
+    android:id="@+id/rootLayout"
     xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:orientation="vertical">
 
-        <FrameLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content">
+    <TextView
+        android:id="@+id/current_string"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="8dp"
+        android:background="@android:drawable/editbox_dropdown_light_frame"
+        android:fontFamily="monospace"
+        android:gravity="left"
+        android:text="🔠"
+        android:textSize="16sp"
+        app:layout_constraintEnd_toStartOf="@+id/advertiser_status"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        tools:text="🔠Hello!"/>
 
-            <TextView
-                android:id="@+id/text_string"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_gravity="left"
-                android:fontFamily="serif-monospace"
-                android:gravity="left"
-                android:textSize="16sp"
-                android:text="🔠"
-                android:background="@android:drawable/editbox_dropdown_light_frame"
-                tools:text="🔠Hello!"/>
+    <TextView
+        android:id="@+id/advertiser_status"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="4dp"
+        android:fontFamily="serif-monospace"
+        android:gravity="center"
+        android:text="🔠"
+        android:textSize="16sp"
+        app:layout_constraintEnd_toStartOf="@+id/text_time"
+        app:layout_constraintTop_toTopOf="parent"
+        tools:text="✅G!"/>
 
-            <TextView
-                android:id="@+id/text_time"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_gravity="right"
-                android:gravity="right"
-                android:textSize="16sp"
-                tools:text="01/01/1970 12:00"/>
-        </FrameLayout>
-
-        <ListView
-            android:id="@+id/log_list"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:layout_gravity="left"
-            android:fontFamily="monospace"
-            android:gravity="left"
-            android:textSize="14sp"
-            tools:listitem="@android:layout/simple_list_item_1"
-            tools:text="Log Lines\nLines"/>
+    <TextView
+        android:id="@+id/text_time"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="4dp"
+        android:gravity="right"
+        android:textSize="16sp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toTopOf="@+id/current_string"
+        tools:text="01/01/1970 12:00"/>
 
 
-    </LinearLayout>
-</FrameLayout>
+    <ListView
+        android:id="@+id/log_list"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:fontFamily="monospace"
+        android:gravity="left"
+        android:textSize="14sp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@+id/current_string"
+        tools:listitem="@android:layout/simple_list_item_1"
+        tools:text="Log Lines\nLines"/>
+
+
+</android.support.constraint.ConstraintLayout>
