@@ -61,13 +61,15 @@ class GattServerActivity : Activity() {
     private val bluetoothReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.STATE_OFF)
-
+            logD("bluetoothReceiver: received intent: $state")
             when (state) {
                 BluetoothAdapter.STATE_ON -> {
+                    logD("bluetoothReceiver: STATE_ON")
                     startAdvertising()
                     startServer()
                 }
                 BluetoothAdapter.STATE_OFF -> {
+                    logD("bluetoothReceiver: STATE_OFF")
                     stopServer()
                     stopAdvertising()
                 }
@@ -80,11 +82,30 @@ class GattServerActivity : Activity() {
      */
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
-            logD("LE Advertise Started.")
+            logD("LE Advertise Started! Name: ${bluetoothManager.adapter.name}")
         }
 
         override fun onStartFailure(errorCode: Int) {
-            Log.w(TAG, "LE Advertise Failed: $errorCode")
+            logW("LE Advertise Failed: $errorCode")
+            val error = when (errorCode) {
+                AdvertiseCallback.ADVERTISE_FAILED_ALREADY_STARTED ->
+                    "ADVERTISE_FAILED_ALREADY_STARTED\n" +
+                            "Failed to start advertising as the advertising is already started."
+                AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE ->
+                    "ADVERTISE_FAILED_DATA_TOO_LARGE\n" +
+                            "Failed to start advertising as the advertise data to be broadcasted is larger than 31 bytes."
+                AdvertiseCallback.ADVERTISE_FAILED_FEATURE_UNSUPPORTED ->
+                    "ADVERTISE_FAILED_FEATURE_UNSUPPORTED\n" +
+                            "This feature is not supported on this platform."
+                AdvertiseCallback.ADVERTISE_FAILED_TOO_MANY_ADVERTISERS ->
+                    "ADVERTISE_FAILED_TOO_MANY_ADVERTISERS\n" +
+                            "Failed to start advertising because no advertising instance is available."
+                AdvertiseCallback.ADVERTISE_FAILED_INTERNAL_ERROR ->
+                    "ADVERTISE_FAILED_INTERNAL_ERROR\n" +
+                            "Operation failed due to an internal error."
+                else -> "Unknown Advertise Error, error code not part of the AdvertiseCallback enum "
+            }
+            logW(error)
         }
     }
 
@@ -125,7 +146,7 @@ class GattServerActivity : Activity() {
                 }
                 else -> {
                     // Invalid characteristic
-                    Log.w(TAG, "Invalid Characteristic Read: " + characteristic.uuid)
+                    logW("Invalid Characteristic Read: " + characteristic.uuid)
                     bluetoothGattServer?.sendResponse(device,
                             requestId,
                             BluetoothGatt.GATT_FAILURE,
@@ -250,7 +271,6 @@ class GattServerActivity : Activity() {
         setContentView(R.layout.activity_server)
 
         localTimeView = findViewById(R.id.text_time)
-//        logView = findViewById(R.id.text_log)
         logList = findViewById(R.id.log_list)
 
         logAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, logStrings)
@@ -263,9 +283,10 @@ class GattServerActivity : Activity() {
 
         bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         val bluetoothAdapter = bluetoothManager.adapter
-        bluetoothAdapter.name = "Aphex"
+        bluetoothAdapter.name = "G!"
         // We can't continue without proper Bluetooth support
         if (!checkBluetoothSupport(bluetoothAdapter)) {
+            logD("No bluetooth support, exiting")
             finish()
         }
 
@@ -335,6 +356,7 @@ class GattServerActivity : Activity() {
      */
     private fun startAdvertising() {
         bluetoothManager.adapter.bluetoothLeAdvertiser?.let {
+            logD("Bluetooth LE: Start Advertiser")
             val settings = AdvertiseSettings.Builder()
                     .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
                     .setConnectable(true)
