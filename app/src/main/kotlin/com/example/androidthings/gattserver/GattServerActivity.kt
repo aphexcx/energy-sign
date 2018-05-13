@@ -46,6 +46,7 @@ class GattServerActivity : Activity() {
 
     /* Local UI */
     private lateinit var localTimeView: TextView
+    private lateinit var stringView: TextView
     private lateinit var logList: ListView
 
     /* Bluetooth API */
@@ -110,6 +111,10 @@ class GattServerActivity : Activity() {
     }
 
     private var currentString: ByteArray = byteArrayOf()
+        set(value) {
+            field = value
+            stringView.post { stringView.text = STRING_PREFIX + String(value) }
+        }
     /**
      * Callback to handle incoming requests to the GATT server.
      * All read/write requests for characteristics and descriptors are handled here.
@@ -271,6 +276,7 @@ class GattServerActivity : Activity() {
         setContentView(R.layout.activity_server)
 
         localTimeView = findViewById(R.id.text_time)
+        stringView = findViewById(R.id.text_string)
         logList = findViewById(R.id.log_list)
 
         logAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, logStrings)
@@ -283,7 +289,6 @@ class GattServerActivity : Activity() {
 
         bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         val bluetoothAdapter = bluetoothManager.adapter
-        bluetoothAdapter.name = "G!"
         // We can't continue without proper Bluetooth support
         if (!checkBluetoothSupport(bluetoothAdapter)) {
             logD("No bluetooth support, exiting")
@@ -355,6 +360,7 @@ class GattServerActivity : Activity() {
      * and supports the Current Time Service.
      */
     private fun startAdvertising() {
+        bluetoothManager.adapter.name = "G!"
         bluetoothManager.adapter.bluetoothLeAdvertiser?.let {
             logD("Bluetooth LE: Start Advertiser")
             val settings = AdvertiseSettings.Builder()
@@ -414,5 +420,9 @@ class GattServerActivity : Activity() {
         val displayDate = DateFormat.getMediumDateFormat(this).format(date)
         val displayTime = DateFormat.getTimeFormat(this).format(date)
         localTimeView.text = "$displayDate    $displayTime"
+    }
+
+    companion object {
+        private val STRING_PREFIX: String = "🔠"
     }
 }
