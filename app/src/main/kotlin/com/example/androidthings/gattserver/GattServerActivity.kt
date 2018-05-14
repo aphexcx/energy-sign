@@ -79,7 +79,7 @@ class GattServerActivity : Activity() {
             logD("Data available on ${uart.name}! Reading...")
             // Read available data from the UART device
             try {
-                val bytes = ByteArray(280)
+                val bytes = ByteArray(ARDUINO_STRING_LEN)
                 val count = uart.read(bytes, bytes.size)
                 logD("Read $count bytes from ${uart.name}: [${String(bytes)}]")
             } catch (e: IOException) {
@@ -181,6 +181,9 @@ class GattServerActivity : Activity() {
      * All read/write requests for characteristics and descriptors are handled here.
      */
     private val gattServerCallback = object : BluetoothGattServerCallback() {
+        override fun onMtuChanged(device: BluetoothDevice?, mtu: Int) {
+            logD("MTU Changed! New MTU: $mtu")
+        }
 
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             when (newState) {
@@ -421,6 +424,8 @@ class GattServerActivity : Activity() {
     }
 
     private fun addToLog(s: String) {
+        //TODO do this on an interval, not whenever there's a log line, but this is fine for now
+        updateTimeView(System.currentTimeMillis())
         val time = timeFormat.format(Date())
         logList.post {
             if (logAdapter.count > 101) {
@@ -515,7 +520,7 @@ class GattServerActivity : Activity() {
                 ?: logW("Unable to create GATT server")
 
         // Initialize the local UI
-        updateLocalUi(System.currentTimeMillis())
+        updateTimeView(System.currentTimeMillis())
     }
 
     /**
@@ -531,8 +536,8 @@ class GattServerActivity : Activity() {
     /**
      * Update graphical UI on devices that support it with the current time.
      */
-    private fun updateLocalUi(timestamp: Long) {
-        val date = Date(timestamp)
+    private fun updateTimeView(timeMillis: Long) {
+        val date = Date(timeMillis)
         val displayDate = dateFormat.format(date)
         val displayTime = timeFormat.format(date)
         localTimeView.text = "$displayDate 🕰 $displayTime"
@@ -542,5 +547,6 @@ class GattServerActivity : Activity() {
         private const val STRING_PREFIX: String = "🔠"
         private const val UART_DEVICE_NAME: String = "UART6"
         private const val UART_BAUD_RATE: Int = 19200
+        private const val ARDUINO_STRING_LEN: Int = 512
     }
 }
