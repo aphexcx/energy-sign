@@ -116,7 +116,6 @@ class GattServerActivity : Activity() {
         super.onStop()
         logD("Uart device $UART_DEVICE_NAME callback unregistered")
         uartDevice.unregisterUartDeviceCallback(uartCallback)
-
     }
 
     /**
@@ -204,7 +203,7 @@ class GattServerActivity : Activity() {
                                                   offset: Int,
                                                   value: ByteArray?) {
             when (characteristic.uuid) {
-                TimeProfile.CHARACTERISTIC_INTERACTOR_UUID -> {
+                StringServiceProfile.CHARACTERISTIC_INTERACTOR_UUID -> {
                     logD("Write Interactor String! Value: [${String(value!!)}]")
                     currentString = value
                     bluetoothGattServer?.sendResponse(device,
@@ -230,23 +229,7 @@ class GattServerActivity : Activity() {
                                                  characteristic: BluetoothGattCharacteristic) {
             val now = System.currentTimeMillis()
             when (characteristic.uuid) {
-                TimeProfile.CURRENT_TIME -> {
-                    logD("Read CurrentTime")
-                    bluetoothGattServer?.sendResponse(device,
-                            requestId,
-                            BluetoothGatt.GATT_SUCCESS,
-                            0,
-                            TimeProfile.getExactTime(now, TimeProfile.ADJUST_NONE))
-                }
-                TimeProfile.LOCAL_TIME_INFO -> {
-                    logD("Read LocalTimeInfo")
-                    bluetoothGattServer?.sendResponse(device,
-                            requestId,
-                            BluetoothGatt.GATT_SUCCESS,
-                            0,
-                            TimeProfile.getLocalTimeInfo(now))
-                }
-                TimeProfile.CHARACTERISTIC_READER_UUID -> {
+                StringServiceProfile.CHARACTERISTIC_READER_UUID -> {
                     logD("Read String")
                     bluetoothGattServer?.sendResponse(device,
                             requestId,
@@ -254,7 +237,7 @@ class GattServerActivity : Activity() {
                             0,
                             currentString)
                 }
-                TimeProfile.CHARACTERISTIC_INTERACTOR_UUID -> {
+                StringServiceProfile.CHARACTERISTIC_INTERACTOR_UUID -> {
                     logD("Read Interactor String???")
                     bluetoothGattServer?.sendResponse(device,
                             requestId,
@@ -276,7 +259,7 @@ class GattServerActivity : Activity() {
 
         override fun onDescriptorReadRequest(device: BluetoothDevice, requestId: Int, offset: Int,
                                              descriptor: BluetoothGattDescriptor) {
-            if (descriptor.uuid == TimeProfile.CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR) {
+            if (descriptor.uuid == StringServiceProfile.CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR) {
                 logD("Config descriptor read")
                 val returnValue = if (registeredDevices.contains(device)) {
                     BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
@@ -304,7 +287,7 @@ class GattServerActivity : Activity() {
                                               responseNeeded: Boolean,
                                               offset: Int,
                                               value: ByteArray) {
-            if (descriptor.uuid == TimeProfile.CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR) {
+            if (descriptor.uuid == StringServiceProfile.CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR) {
                 if (Arrays.equals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE, value)) {
                     logD("Subscribe device to notifications: $device")
                     registeredDevices.add(device)
@@ -393,14 +376,14 @@ class GattServerActivity : Activity() {
                 logD("List of available UART devices: $deviceList")
             }
             logD("Opening UART device $UART_DEVICE_NAME")
-            val uart = manager.openUartDevice(UART_DEVICE_NAME)
-            logD("Configuring UART device $UART_DEVICE_NAME")
-            // Configure the UART port
-            uart.setBaudrate(UART_BAUD_RATE)
-            uart.setDataSize(8)
-            uart.setParity(UartDevice.PARITY_NONE)
-            uart.setStopBits(1)
-            return uart
+            return manager.openUartDevice(UART_DEVICE_NAME).apply {
+                // Configure the UART port
+                logD("Configuring UART device $UART_DEVICE_NAME")
+                setBaudrate(UART_BAUD_RATE)
+                setDataSize(8)
+                setParity(UartDevice.PARITY_NONE)
+                setStopBits(1)
+            }
         } catch (e: IOException) {
             logW("Unable to open/configure UART device: $e")
         }
@@ -491,8 +474,7 @@ class GattServerActivity : Activity() {
             val data = AdvertiseData.Builder()
                     .setIncludeDeviceName(true)
                     .setIncludeTxPowerLevel(false)
-//                    .addServiceUuid(ParcelUuid(TimeProfile.TIME_SERVICE))
-                    .addServiceUuid(ParcelUuid(TimeProfile.STRING_SERVICE_UUID))
+                    .addServiceUuid(ParcelUuid(StringServiceProfile.STRING_SERVICE_UUID))
                     .build()
 
             it.startAdvertising(settings, data, advertiseCallback)
@@ -516,7 +498,7 @@ class GattServerActivity : Activity() {
         bluetoothGattServer = bluetoothManager.openGattServer(this, gattServerCallback)
 
         bluetoothGattServer
-                ?.addService(TimeProfile.createStringService())
+                ?.addService(StringServiceProfile.createStringService())
                 ?: logW("Unable to create GATT server")
 
         // Initialize the local UI

@@ -1,0 +1,63 @@
+/*
+ * Copyright 2018, The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.example.androidthings.gattserver
+
+import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattCharacteristic.PROPERTY_NOTIFY
+import android.bluetooth.BluetoothGattCharacteristic.PROPERTY_READ
+import android.bluetooth.BluetoothGattDescriptor
+import android.bluetooth.BluetoothGattDescriptor.PERMISSION_READ
+import android.bluetooth.BluetoothGattDescriptor.PERMISSION_WRITE
+import android.bluetooth.BluetoothGattService
+import android.bluetooth.BluetoothGattService.SERVICE_TYPE_PRIMARY
+import java.util.*
+
+
+/**
+ * Implementation of the Bluetooth GATT Time Profile.
+ * https://www.bluetooth.com/specifications/adopted-specifications
+ */
+object StringServiceProfile {
+
+    /* Mandatory Client Characteristic Config Descriptor */
+    val CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+
+    val STRING_SERVICE_UUID: UUID = UUID.fromString("deadbeef-420d-4048-a24e-18e60180e23c");
+    val CHARACTERISTIC_READER_UUID: UUID = UUID.fromString("31517c58-66bf-470c-b662-e352a6c80cba");
+    val CHARACTERISTIC_INTERACTOR_UUID: UUID = UUID.fromString("0b89d2d4-0ea6-4141-86bb-0c5fb91ab14a");
+
+    fun createStringService(): BluetoothGattService {
+        val service = BluetoothGattService(STRING_SERVICE_UUID, SERVICE_TYPE_PRIMARY)
+
+        // Counter characteristic (read-only, supports subscriptions)
+        val reader = BluetoothGattCharacteristic(CHARACTERISTIC_READER_UUID,
+                PROPERTY_READ or PROPERTY_NOTIFY, PERMISSION_READ)
+        val readerConfig = BluetoothGattDescriptor(CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR,
+                PERMISSION_READ or PERMISSION_WRITE)
+        reader.addDescriptor(readerConfig)
+
+        // Interactor characteristic
+        val interactor = BluetoothGattCharacteristic(CHARACTERISTIC_INTERACTOR_UUID,
+                BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE,
+                BluetoothGattCharacteristic.PERMISSION_WRITE)
+
+        service.addCharacteristic(reader)
+        service.addCharacteristic(interactor)
+        return service
+    }
+
+}
