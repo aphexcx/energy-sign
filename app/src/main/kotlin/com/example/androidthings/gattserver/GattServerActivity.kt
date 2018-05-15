@@ -42,6 +42,7 @@ import com.google.android.things.pio.UartDevice
 import com.google.android.things.pio.UartDeviceCallback
 import java.io.IOException
 import java.lang.RuntimeException
+import java.text.SimpleDateFormat
 import java.util.*
 
 
@@ -54,7 +55,7 @@ class GattServerActivity : Activity() {
         set(value) {
             field = value
             currentStringNeedsWrite = true
-            stringView.post { stringView.text = STRING_PREFIX + String(value) }
+            runOnUiThread { stringView.text = STRING_PREFIX + String(value) }
         }
 
     /* Local UI */
@@ -63,6 +64,8 @@ class GattServerActivity : Activity() {
     private lateinit var logList: ListView
     private lateinit var logAdapter: ArrayAdapter<String>
     private lateinit var advertiserStatusView: TextView
+    private lateinit var mtuStatusView: TextView
+    private lateinit var deviceStatusView: TextView
 
     private val logStrings: ArrayList<String> = arrayListOf()
 
@@ -90,7 +93,7 @@ class GattServerActivity : Activity() {
                 logD("Writing currentString [${String(currentString)}] to ${uart.name}...")
 
                 try {
-                    uartDevice.write(currentString)
+                    uartDevice.write(TEMPORARY_PAD + currentString)
                     currentStringNeedsWrite = true //TODO change to false to not write every time
                 } catch (e: Exception) {
                     logW("Unable to write to UART device ${uart.name}: $e")
@@ -147,7 +150,7 @@ class GattServerActivity : Activity() {
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
             logD("LE Advertise Started! Name: ${bluetoothManager.adapter.name}")
-            advertiserStatusView.text = "💚${bluetoothManager.adapter.name}"
+            advertiserStatusView.text = "💚${bluetoothManager.adapter.name}" // 🏠${bluetoothManager.adapter.address}"
         }
 
         override fun onStartFailure(errorCode: Int) {
@@ -175,22 +178,59 @@ class GattServerActivity : Activity() {
         }
     }
 
+
+    private fun updateMtuView(mtu: Int) {
+        logD("MTU Changed! New MTU: $mtu")
+        runOnUiThread {
+            mtuStatusView.text = "Ⓜ️$mtu"
+        }
+    }
+
     /**
      * Callback to handle incoming requests to the GATT server.
      * All read/write requests for characteristics and descriptors are handled here.
      */
     private val gattServerCallback = object : BluetoothGattServerCallback() {
         override fun onMtuChanged(device: BluetoothDevice?, mtu: Int) {
-            logD("MTU Changed! New MTU: $mtu")
+            updateMtuView(mtu)
         }
 
-        override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
+        override fun onConnectionStateChange(bluetoothDevice: BluetoothDevice, status: Int, newState: Int) {
             when (newState) {
-                STATE_CONNECTED -> logD("BluetoothDevice CONNECTED: $device")
+                STATE_CONNECTED -> {
+                    logD("BluetoothDevice CONNECTED: $bluetoothDevice")
+                    bluetoothDevice
+                            .connectGatt(this@GattServerActivity, true, object : BluetoothGattCallback() {
+                                override fun onMtuChanged(gatt: BluetoothGatt?, mtu: Int, status: Int) {
+                                    super.onMtuChanged(gatt, mtu, status)
+                                    updateMtuView(mtu)
+                                }
+
+                                override fun onConnectionStateChange(gatt: BluetoothGatt?, status: Int, newState: Int) {
+                                    super.onConnectionStateChange(gatt, status, newState)
+                                    when (newState) {
+                                        STATE_CONNECTED -> {
+                                            logD("Connected to remote device ${gatt?.device?.name
+                                                    ?: ""}, requesting MTU=512...")
+                                            gatt?.requestMtu(512)
+                                        }
+                                    }
+                                }
+                            })
+
+                    runOnUiThread {
+                        deviceStatusView.text = "📲${bluetoothDevice.name ?: ""}$bluetoothDevice"
+                        mtuStatusView.text = "Ⓜ️20?"
+                    }
+                }
                 STATE_DISCONNECTED -> {
-                    logD("BluetoothDevice DISCONNECTED: $device")
-                    //Remove device from any active subscriptions
-                    registeredDevices.remove(device)
+                    logD("BluetoothDevice DISCONNECTED: $bluetoothDevice")
+                    //Remove bluetoothDevice from any active subscriptions
+                    registeredDevices.remove(bluetoothDevice)
+                    runOnUiThread {
+                        deviceStatusView.text = "📴"
+                        mtuStatusView.text = ""
+                    }
                 }
             }
         }
@@ -318,12 +358,14 @@ class GattServerActivity : Activity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_server)
 
-        timeFormat = DateFormat.getTimeFormat(this)
+        timeFormat = SimpleDateFormat("HH:mm:ss")
         dateFormat = DateFormat.getMediumDateFormat(this)
 
         localTimeView = findViewById(R.id.text_time)
         stringView = findViewById(R.id.current_string)
         advertiserStatusView = findViewById(R.id.advertiser_status)
+        mtuStatusView = findViewById(R.id.mtu_status)
+        deviceStatusView = findViewById(R.id.device_status)
         logList = findViewById(R.id.log_list)
 
         currentString = "TRONCE".toByteArray()
@@ -408,13 +450,15 @@ class GattServerActivity : Activity() {
 
     private fun addToLog(s: String) {
         //TODO do this on an interval, not whenever there's a log line, but this is fine for now
-        updateTimeView(System.currentTimeMillis())
-        val time = timeFormat.format(Date())
-        logList.post {
+        val time: Long = System.currentTimeMillis()
+        runOnUiThread {
+            updateTimeView(time)
+            val timestamp = timeFormat.format(Date(time))
+
             if (logAdapter.count > 101) {
                 logAdapter.remove(logAdapter.getItem(0))
             }
-            logAdapter.add("$time $s")
+            logAdapter.add("$timestamp $s")
             logList.smoothScrollToPosition(logAdapter.count)
         }
     }
@@ -530,5 +574,7 @@ class GattServerActivity : Activity() {
         private const val UART_DEVICE_NAME: String = "UART6"
         private const val UART_BAUD_RATE: Int = 19200
         private const val ARDUINO_STRING_LEN: Int = 512
+        private val TEMPORARY_PAD = "            ".toByteArray() //TODO remove and do this on the arduino side
+
     }
 }

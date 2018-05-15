@@ -32,10 +32,34 @@
         android:gravity="left"
         android:text="💟"
         android:textSize="16sp"
-        app:layout_constraintEnd_toStartOf="@id/text_time"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent"
         tools:text="✅G!"/>
+
+    <TextView
+        android:id="@+id/device_status"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="4dp"
+        android:fontFamily="monospace"
+        android:gravity="left"
+        android:text="📴"
+        android:textSize="16sp"
+        app:layout_constraintStart_toEndOf="@id/advertiser_status"
+        app:layout_constraintTop_toTopOf="parent"
+        tools:text="📲d0:91:BC:FF:00:AA"/>
+
+    <TextView
+        android:id="@+id/mtu_status"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="4dp"
+        android:layout_marginStart="4dp"
+        android:text=""
+        android:textSize="16sp"
+        app:layout_constraintStart_toEndOf="@id/device_status"
+        app:layout_constraintTop_toTopOf="parent"
+        tools:text="Ⓜ️512"/>
 
     <TextView
         android:id="@+id/text_time"
@@ -45,9 +69,8 @@
         android:gravity="right"
         android:textSize="16sp"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toEndOf="@id/advertiser_status"
         app:layout_constraintTop_toTopOf="parent"
-        tools:text="01/01/1970 12:00"/>
+        tools:text="01/01/1970 🕰 12:00"/>
 
     <TextView
         android:id="@+id/current_string"
@@ -62,7 +85,7 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintTop_toBottomOf="@id/advertiser_status"
-        tools:text="🔠Hello!"/>
+        tools:text="🔠TRONCE"/>
 
     <ListView
         android:id="@+id/log_list"
