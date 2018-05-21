@@ -33,7 +33,6 @@ import android.os.Bundle
 import android.os.ParcelUuid
 import android.text.format.DateFormat
 import android.util.Log
-import android.view.WindowManager
 import android.widget.ArrayAdapter
 import android.widget.ListView
 import android.widget.TextView
@@ -94,7 +93,7 @@ class GattServerActivity : Activity() {
 
                 try {
                     uartDevice.write(TEMPORARY_PAD + currentString)
-                    currentStringNeedsWrite = true //TODO change to false to not write every time
+                    currentStringNeedsWrite = false //TODO change to false to not write every time
                 } catch (e: Exception) {
                     logW("Unable to write to UART device ${uart.name}: $e")
                 }
@@ -376,7 +375,7 @@ class GattServerActivity : Activity() {
         // create Uart device
 
         // Devices with a display should not go to sleep
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+//        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         val bluetoothAdapter = bluetoothManager.adapter
@@ -574,7 +573,7 @@ class GattServerActivity : Activity() {
         private const val UART_DEVICE_NAME: String = "UART6"
         private const val UART_BAUD_RATE: Int = 19200
         private const val ARDUINO_STRING_LEN: Int = 512
-        private val TEMPORARY_PAD = "            ".toByteArray() //TODO remove and do this on the arduino side
+        private val TEMPORARY_PAD = "                    ".toByteArray() //TODO remove and do this on the arduino side
 
     }
 }
