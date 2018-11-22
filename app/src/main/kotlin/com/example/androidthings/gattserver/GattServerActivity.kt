@@ -36,11 +36,14 @@ import android.util.Log
 import android.widget.ArrayAdapter
 import android.widget.ListView
 import android.widget.TextView
+import com.chibatching.kotpref.Kotpref
+import com.example.androidthings.gattserver.StringServiceProfile.CHARACTERISTIC_INTERACTOR_UUID
+import com.example.androidthings.gattserver.StringServiceProfile.CHARACTERISTIC_READER_UUID
 import com.google.android.things.pio.PeripheralManager
 import com.google.android.things.pio.UartDevice
 import com.google.android.things.pio.UartDeviceCallback
+import java.io.File
 import java.io.IOException
-import java.lang.RuntimeException
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -49,13 +52,18 @@ private const val TAG = "GattServerActivity"
 
 class GattServerActivity : Activity() {
 
-    private var currentStringNeedsWrite: Boolean = true
+    private var showNewStringAlert: Boolean = true
     private var currentString: ByteArray = byteArrayOf()
         set(value) {
             field = value
-            currentStringNeedsWrite = true
+//            showNewStringAlert = true
             runOnUiThread { stringView.text = STRING_PREFIX + String(value) }
         }
+
+    private var currentStringIdx: Int = 0
+
+    private val signStrings: MutableList<String> = loadStrings()
+
 
     /* Local UI */
     private lateinit var localTimeView: TextView
@@ -63,19 +71,27 @@ class GattServerActivity : Activity() {
     private lateinit var logList: ListView
     private lateinit var logAdapter: ArrayAdapter<String>
     private lateinit var advertiserStatusView: TextView
+
     private lateinit var mtuStatusView: TextView
+
     private lateinit var deviceStatusView: TextView
 
     private val logStrings: ArrayList<String> = arrayListOf()
 
     /* Bluetooth API */
     private lateinit var bluetoothManager: BluetoothManager
+
     private var bluetoothGattServer: BluetoothGattServer? = null
     /* Collection of notification subscribers */
     private val registeredDevices = mutableSetOf<BluetoothDevice>()
 
     private lateinit var uartDevice: UartDevice
 
+    /**
+     * When
+     * new string alert -> display new string alert and write next string from list
+     * else -> write next string from list
+     */
     private val uartCallback: UartDeviceCallback = object : UartDeviceCallback {
         override fun onUartDeviceDataAvailable(uart: UartDevice): Boolean {
             logD("Data available on ${uart.name}! Reading...")
@@ -88,16 +104,25 @@ class GattServerActivity : Activity() {
                 logW("Unable to read from UART device ${uart.name}: $e")
             }
 
-            if (currentStringNeedsWrite) {
-                logD("Writing currentString [${String(currentString)}] to ${uart.name}...")
-
-                try {
-                    uartDevice.write(TEMPORARY_PAD + currentString)
-                    currentStringNeedsWrite = false //TODO change to false to not write every time
-                } catch (e: Exception) {
-                    logW("Unable to write to UART device ${uart.name}: $e")
-                }
+//            if (showNewStringAlert) {
+//                currentString = NEW_MSG_ALERT
+//                showNewStringAlert = false
+//                //TODO may need to send the alert with the string for display nicety rather than instead of the string
+//            } else {
+            currentString = if (showNewStringAlert) {
+                "$BEL${signStrings[currentStringIdx]}".toByteArray()
+            } else {
+                signStrings[currentStringIdx].toByteArray()
             }
+            logD("Writing currentString [${String(currentString)}] to ${uart.name}...")
+
+            try {
+                uartDevice.write(TEMPORARY_PAD + currentString)
+            } catch (e: Exception) {
+                logW("Unable to write to UART device ${uart.name}: $e")
+            }
+//            }
+
             // Continue listening for more interrupts
             return true
         }
@@ -105,7 +130,6 @@ class GattServerActivity : Activity() {
         override fun onUartDeviceError(uart: UartDevice, error: Int) {
             logW("$uart: Error event $error")
         }
-
     }
 
     override fun onStart() {
@@ -177,13 +201,13 @@ class GattServerActivity : Activity() {
         }
     }
 
-
     private fun updateMtuView(mtu: Int) {
         logD("MTU Changed! New MTU: $mtu")
         runOnUiThread {
             mtuStatusView.text = "Ⓜ️$mtu"
         }
     }
+
 
     /**
      * Callback to handle incoming requests to the GATT server.
@@ -242,9 +266,9 @@ class GattServerActivity : Activity() {
                                                   offset: Int,
                                                   value: ByteArray?) {
             when (characteristic.uuid) {
-                StringServiceProfile.CHARACTERISTIC_INTERACTOR_UUID -> {
+                CHARACTERISTIC_INTERACTOR_UUID -> {
                     logD("Write Interactor String! Value: [${String(value!!)}]")
-                    currentString = value
+                    processNewReceivedString(value)
                     bluetoothGattServer?.sendResponse(device,
                             requestId,
                             BluetoothGatt.GATT_SUCCESS,
@@ -268,7 +292,7 @@ class GattServerActivity : Activity() {
                                                  characteristic: BluetoothGattCharacteristic) {
             val now = System.currentTimeMillis()
             when (characteristic.uuid) {
-                StringServiceProfile.CHARACTERISTIC_READER_UUID -> {
+                CHARACTERISTIC_READER_UUID -> {
                     logD("Read String")
                     bluetoothGattServer?.sendResponse(device,
                             requestId,
@@ -276,7 +300,7 @@ class GattServerActivity : Activity() {
                             0,
                             currentString)
                 }
-                StringServiceProfile.CHARACTERISTIC_INTERACTOR_UUID -> {
+                CHARACTERISTIC_INTERACTOR_UUID -> {
                     logD("Read Interactor String???")
                     bluetoothGattServer?.sendResponse(device,
                             requestId,
@@ -353,9 +377,46 @@ class GattServerActivity : Activity() {
         }
     }
 
+    private fun processNewReceivedString(value: ByteArray) {
+        String(value).split("++").filter { it.isNotBlank() }.reversed().forEach {
+            pushStringOnList(it)
+        }
+
+        showNewStringAlert = true
+        currentStringIdx = 0
+    }
+
+    /** Pushes a string onto the top of the signStrings list. */
+    private fun pushStringOnList(value: String) {
+        signStrings.add(0, value)
+    }
+
+    /** Return the
+     * //TODO last [MAX_SIGN_STRINGS]
+     * strings from the sign strings file. */
+    private fun loadStrings(): MutableList<String> =
+            File(SIGN_STRINGS_FILE_NAME).run {
+                when (createNewFile()) {
+                    true -> logD("$SIGN_STRINGS_FILE_NAME does not exist; created new.")
+                    else -> logD("$SIGN_STRINGS_FILE_NAME exists. Reading...")
+                }
+
+                bufferedReader().use {
+                    it.lineSequence()
+//                            .take(MAX_SIGN_STRINGS)
+                            .toMutableList().asReversed() //TODO check if asreversed is doing the right thing here
+                }
+            }
+
+    /** Write out the list of strings to the file */
+    private fun saveStrings(strings: List<String>) {
+        strings.reversed().toFile(File(SIGN_STRINGS_FILE_NAME))
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_server)
+        Kotpref.init(applicationContext)
 
         timeFormat = SimpleDateFormat("HH:mm:ss")
         dateFormat = DateFormat.getMediumDateFormat(this)
@@ -367,7 +428,10 @@ class GattServerActivity : Activity() {
         deviceStatusView = findViewById(R.id.device_status)
         logList = findViewById(R.id.log_list)
 
-        currentString = "TRONCE".toByteArray()
+        currentString = when {
+            signStrings.isNotEmpty() -> signStrings.first()
+            else -> "TRONCE"
+        }.toByteArray()
 
         logAdapter = ArrayAdapter(this, R.layout.item_log, logStrings)
         logList.adapter = logAdapter
@@ -574,6 +638,10 @@ class GattServerActivity : Activity() {
         private const val UART_BAUD_RATE: Int = 19200
         private const val ARDUINO_STRING_LEN: Int = 512
         private val TEMPORARY_PAD = "                    ".toByteArray() //TODO remove and do this on the arduino side
+        private const val SIGN_STRINGS_FILE_NAME = "signstrings.txt"
+        private const val MAX_SIGN_STRINGS: Int = 1000
+        private val NEW_MSG_ALERT: ByteArray = "~NEWMSGALERT".toByteArray()
+        private const val BEL: Byte = 2
 
     }
 }

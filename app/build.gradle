@@ -42,4 +42,8 @@ dependencies {
 
     implementation 'com.android.support.constraint:constraint-layout:1.1.0'
 
+    ext.ver_kotpref = "2.6.0"
+    implementation "com.chibatching.kotpref:kotpref:$ver_kotpref"
+//    implementation "com.chibatching.kotpref:gson-support:$ver_kotpref"
+
 }
