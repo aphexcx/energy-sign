@@ -22,7 +22,7 @@
 
     <uses-permission android:name="com.google.android.things.permission.USE_PERIPHERAL_IO"/>
 
-    <uses-permission android:name="android.permission.LOCAL_MAC_ADDRESS"/>
+    <!--<uses-permission android:name="android.permission.LOCAL_MAC_ADDRESS"/>-->
 
     <application android:label="@string/app_name">
         <uses-library android:name="com.google.android.things"/>

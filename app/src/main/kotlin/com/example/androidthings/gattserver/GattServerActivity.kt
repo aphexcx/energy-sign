@@ -62,7 +62,7 @@ class GattServerActivity : Activity() {
 
     private var currentStringIdx: Int = 0
 
-    private val signStrings: MutableList<String> = loadStrings()
+    private lateinit var signStrings: MutableList<String>
 
 
     /* Local UI */
@@ -110,17 +110,21 @@ class GattServerActivity : Activity() {
 //                //TODO may need to send the alert with the string for display nicety rather than instead of the string
 //            } else {
             currentString = if (showNewStringAlert) {
-                "$BEL${signStrings[currentStringIdx]}".toByteArray()
+                showNewStringAlert = false
+                logD("The next string will show the new string alert!")
+                byteArrayOf(BEL) + signStrings[currentStringIdx].toByteArray()
             } else {
                 signStrings[currentStringIdx].toByteArray()
             }
-            logD("Writing currentString [${String(currentString)}] to ${uart.name}...")
+            logD("Writing signStrings[$currentStringIdx] >${String(currentString)}< to ${uart.name}...")
 
             try {
-                uartDevice.write(TEMPORARY_PAD + currentString)
+                uartDevice.write(currentString)
             } catch (e: Exception) {
                 logW("Unable to write to UART device ${uart.name}: $e")
             }
+
+            currentStringIdx = if (currentStringIdx < signStrings.size - 1) currentStringIdx + 1 else 0
 //            }
 
             // Continue listening for more interrupts
@@ -382,6 +386,7 @@ class GattServerActivity : Activity() {
             pushStringOnList(it)
         }
 
+        saveStrings(signStrings)
         showNewStringAlert = true
         currentStringIdx = 0
     }
@@ -395,7 +400,7 @@ class GattServerActivity : Activity() {
      * //TODO last [MAX_SIGN_STRINGS]
      * strings from the sign strings file. */
     private fun loadStrings(): MutableList<String> =
-            File(SIGN_STRINGS_FILE_NAME).run {
+            File(filesDir, SIGN_STRINGS_FILE_NAME).run {
                 when (createNewFile()) {
                     true -> logD("$SIGN_STRINGS_FILE_NAME does not exist; created new.")
                     else -> logD("$SIGN_STRINGS_FILE_NAME exists. Reading...")
@@ -405,12 +410,18 @@ class GattServerActivity : Activity() {
                     it.lineSequence()
 //                            .take(MAX_SIGN_STRINGS)
                             .toMutableList().asReversed() //TODO check if asreversed is doing the right thing here
+                }.also {
+                    logD("Read ${it.size} lines from $SIGN_STRINGS_FILE_NAME! Here are the first 10: [${it.take(10).joinToString(", ")}]")
                 }
             }
 
     /** Write out the list of strings to the file */
     private fun saveStrings(strings: List<String>) {
-        strings.reversed().toFile(File(SIGN_STRINGS_FILE_NAME))
+        try {
+            strings.reversed().toFile(File(filesDir, SIGN_STRINGS_FILE_NAME))
+        } catch (e: Throwable) {
+            logW("Exception when saving $SIGN_STRINGS_FILE_NAME! ${e.message}")
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -428,13 +439,15 @@ class GattServerActivity : Activity() {
         deviceStatusView = findViewById(R.id.device_status)
         logList = findViewById(R.id.log_list)
 
+        logAdapter = ArrayAdapter(this, R.layout.item_log, logStrings)
+        logList.adapter = logAdapter
+
+        signStrings = loadStrings()
+
         currentString = when {
             signStrings.isNotEmpty() -> signStrings.first()
             else -> "TRONCE"
         }.toByteArray()
-
-        logAdapter = ArrayAdapter(this, R.layout.item_log, logStrings)
-        logList.adapter = logAdapter
 
         // create Uart device
 
@@ -637,11 +650,10 @@ class GattServerActivity : Activity() {
         private const val UART_DEVICE_NAME: String = "UART6"
         private const val UART_BAUD_RATE: Int = 19200
         private const val ARDUINO_STRING_LEN: Int = 512
-        private val TEMPORARY_PAD = "                    ".toByteArray() //TODO remove and do this on the arduino side
         private const val SIGN_STRINGS_FILE_NAME = "signstrings.txt"
         private const val MAX_SIGN_STRINGS: Int = 1000
         private val NEW_MSG_ALERT: ByteArray = "~NEWMSGALERT".toByteArray()
-        private const val BEL: Byte = 2
+        private const val BEL: Byte = 7
 
     }
 }
