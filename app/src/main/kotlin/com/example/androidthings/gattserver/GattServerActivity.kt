@@ -37,7 +37,6 @@ import android.widget.ArrayAdapter
 import android.widget.ListView
 import android.widget.TextView
 import com.chibatching.kotpref.Kotpref
-import com.example.androidthings.gattserver.NordicUartServiceProfile.NORDIC_UART_RX_UUID
 import com.example.androidthings.gattserver.NordicUartServiceProfile.NORDIC_UART_TX_UUID
 import com.example.androidthings.gattserver.StringServiceProfile.CHARACTERISTIC_INTERACTOR_UUID
 import com.example.androidthings.gattserver.StringServiceProfile.CHARACTERISTIC_READER_UUID
@@ -282,9 +281,8 @@ class GattServerActivity : Activity() {
                             0,
                             currentString)
                 }
-
-                NORDIC_UART_RX_UUID -> {
-                    logD("Uart RX characteristic write: [${String(value!!)}]")
+                NORDIC_UART_TX_UUID -> {
+                    logD("Uart TX characteristic write: [${String(value!!)}]")
                     processUartCommand(value)
                     bluetoothGattServer?.sendResponse(device,
                             requestId,
@@ -294,7 +292,7 @@ class GattServerActivity : Activity() {
                 }
                 else -> {
                     // Invalid characteristic
-                    logW("Invalid Characteristic Read: " + characteristic.uuid)
+                    logW("Invalid Characteristic Write: " + characteristic.uuid)
                     bluetoothGattServer?.sendResponse(device,
                             requestId,
                             BluetoothGatt.GATT_FAILURE,
@@ -346,24 +344,32 @@ class GattServerActivity : Activity() {
 
         override fun onDescriptorReadRequest(device: BluetoothDevice, requestId: Int, offset: Int,
                                              descriptor: BluetoothGattDescriptor) {
-            if (descriptor.uuid == StringServiceProfile.CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR) {
-                logD("Config descriptor read")
-                val returnValue = if (registeredDevices.contains(device)) {
-                    BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                } else {
-                    BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+            when (descriptor.uuid) {
+                CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR -> {
+                    logD("Config descriptor read")
+                    val returnValue = if (registeredDevices.contains(device)) {
+                        BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                    } else {
+                        BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+                    }
+                    bluetoothGattServer?.sendResponse(device,
+                            requestId,
+                            BluetoothGatt.GATT_SUCCESS,
+                            0,
+                            returnValue)
                 }
-                bluetoothGattServer?.sendResponse(device,
-                        requestId,
-                        BluetoothGatt.GATT_SUCCESS,
-                        0,
-                        returnValue)
-            } else {
-                logW("Unknown descriptor read request")
-                bluetoothGattServer?.sendResponse(device,
-                        requestId,
-                        BluetoothGatt.GATT_FAILURE,
-                        0, null)
+//                USER_DESCRIPTION_DESCRIPTOR -> bluetoothGattServer?.sendResponse(device,
+//                        requestId,
+//                        BluetoothGatt.GATT_SUCCESS,
+//                        0,
+//                        descriptor.value)
+                else -> {
+                    logW("Unknown descriptor read request")
+                    bluetoothGattServer?.sendResponse(device,
+                            requestId,
+                            BluetoothGatt.GATT_FAILURE,
+                            0, null)
+                }
             }
         }
 
@@ -374,7 +380,7 @@ class GattServerActivity : Activity() {
                                               responseNeeded: Boolean,
                                               offset: Int,
                                               value: ByteArray) {
-            if (descriptor.uuid == StringServiceProfile.CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR) {
+            if (descriptor.uuid == CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR) {
                 if (Arrays.equals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE, value)) {
                     logD("Subscribe device to notifications: $device")
                     registeredDevices.add(device)
@@ -402,30 +408,30 @@ class GattServerActivity : Activity() {
     }
 
     private fun processUartCommand(value: ByteArray) {
-        logD(String(value))
-        when (val cmd = String(value)) {
-            "!choose" -> {
-                TODO()
-            }
-            "!prev" -> {
-                TODO()
-            }
-            "!next" -> {
-                TODO()
-            }
-            "!first" -> {
-                TODO()
-            }
-            "!last" -> {
-                TODO()
-            }
-            "!delete" -> {
-                TODO()
-            }
-            "!endchoose" -> {
-                TODO()
-            }
-        }
+        logD("Procesing Uart command ${String(value)}")
+//        when (val cmd = String(value)) {
+//            "!choose" -> {
+//                TODO()
+//            }
+//            "!prev" -> {
+//                TODO()
+//            }
+//            "!next" -> {
+//                TODO()
+//            }
+//            "!first" -> {
+//                TODO()
+//            }
+//            "!last" -> {
+//                TODO()
+//            }
+//            "!delete" -> {
+//                TODO()
+//            }
+//            "!endchoose" -> {
+//                TODO()
+//            }
+//        }
     }
 
     private fun processNewReceivedString(value: ByteArray) {

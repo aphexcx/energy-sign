@@ -30,11 +30,15 @@ import java.util.*
  * Implementation of the Bluetooth GATT Time Profile.
  * https://www.bluetooth.com/specifications/adopted-specifications
  */
+
+
+val SERVER_CHARACTERISTIC_CONFIG_DESCRIPTOR: UUID = UUID.fromString("00002903-0000-1000-8000-00805f9b34fb")
+/* Mandatory Client Characteristic Config Descriptor */
+val CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+//val USER_DESCRIPTION_DESCRIPTOR: UUID = UUID.fromString("00002901-0000-1000-8000-00805f9b34fb")
+
+
 object StringServiceProfile {
-
-    /* Mandatory Client Characteristic Config Descriptor */
-    val CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-
     val STRING_SERVICE_UUID: UUID = UUID.fromString("deadbeef-420d-4048-a24e-18e60180e23c")
     val CHARACTERISTIC_READER_UUID: UUID = UUID.fromString("31517c58-66bf-470c-b662-e352a6c80cba")
     val CHARACTERISTIC_INTERACTOR_UUID: UUID = UUID.fromString("0b89d2d4-0ea6-4141-86bb-0c5fb91ab14a")
@@ -44,14 +48,21 @@ object StringServiceProfile {
 
         // String read characteristic (read-only, supports subscriptions)
         val reader = BluetoothGattCharacteristic(CHARACTERISTIC_READER_UUID,
-                PROPERTY_READ or PROPERTY_NOTIFY, PERMISSION_READ)
-        val readerConfig = BluetoothGattDescriptor(CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR,
-                PERMISSION_READ or PERMISSION_WRITE)
-        reader.addDescriptor(readerConfig)
+                PROPERTY_READ or PROPERTY_NOTIFY, PERMISSION_READ).apply {
+            addDescriptor(BluetoothGattDescriptor(CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR,
+                    PERMISSION_READ or PERMISSION_WRITE))
+//            addDescriptor(BluetoothGattDescriptor(USER_DESCRIPTION_DESCRIPTOR, PERMISSION_READ).apply {
+//                value = "String Service".toByteArray()
+//            })
+        }
+
 
         // Interactor characteristic
         val interactor = BluetoothGattCharacteristic(CHARACTERISTIC_INTERACTOR_UUID,
                 PROPERTY_WRITE_NO_RESPONSE, PERMISSION_WRITE)
+        val interactorConfig = BluetoothGattDescriptor(CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR,
+                PERMISSION_READ or PERMISSION_WRITE)
+        interactor.addDescriptor(interactorConfig)
 
         service.addCharacteristic(reader)
         service.addCharacteristic(interactor)
@@ -61,10 +72,6 @@ object StringServiceProfile {
 }
 
 object NordicUartServiceProfile {
-
-    /* Mandatory Client Characteristic Config Descriptor */
-    val CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-
     val NORDIC_UART_SERVICE_UUID: UUID = UUID.fromString("6e400001-b5a3-f393-e0a9-e50e24dcca9e")
     val NORDIC_UART_TX_UUID: UUID = UUID.fromString("6e400002-b5a3-f393-e0a9-e50e24dcca9e")
     val NORDIC_UART_RX_UUID: UUID = UUID.fromString("6e400003-b5a3-f393-e0a9-e50e24dcca9e")
@@ -72,7 +79,7 @@ object NordicUartServiceProfile {
     fun createNordicUartService(): BluetoothGattService {
         val service = BluetoothGattService(NORDIC_UART_SERVICE_UUID, SERVICE_TYPE_PRIMARY)
 
-        // Uart RX characteristic (read-only, supports subscriptions)
+        // Uart RX characteristic
         val uartRx = BluetoothGattCharacteristic(NORDIC_UART_RX_UUID,
                 PROPERTY_READ or PROPERTY_NOTIFY, PERMISSION_READ)
         val readerConfig = BluetoothGattDescriptor(CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR,
@@ -81,7 +88,10 @@ object NordicUartServiceProfile {
 
         // Uart TX characteristic
         val uartTx = BluetoothGattCharacteristic(NORDIC_UART_TX_UUID,
-                PROPERTY_WRITE_NO_RESPONSE, PERMISSION_WRITE)
+                PROPERTY_WRITE, PERMISSION_WRITE)
+        val writerConfig = BluetoothGattDescriptor(CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR,
+                PERMISSION_READ or PERMISSION_WRITE)
+        uartTx.addDescriptor(writerConfig)
 
         service.addCharacteristic(uartRx)
         service.addCharacteristic(uartTx)
