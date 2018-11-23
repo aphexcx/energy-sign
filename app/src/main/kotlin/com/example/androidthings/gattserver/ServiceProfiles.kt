@@ -88,7 +88,7 @@ object NordicUartServiceProfile {
 
         // Uart TX characteristic
         val uartTx = BluetoothGattCharacteristic(NORDIC_UART_TX_UUID,
-                PROPERTY_WRITE, PERMISSION_WRITE)
+                PROPERTY_WRITE_NO_RESPONSE, PERMISSION_WRITE)
         val writerConfig = BluetoothGattDescriptor(CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR,
                 PERMISSION_READ or PERMISSION_WRITE)
         uartTx.addDescriptor(writerConfig)
