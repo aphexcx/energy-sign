@@ -37,6 +37,8 @@ import android.widget.ArrayAdapter
 import android.widget.ListView
 import android.widget.TextView
 import com.chibatching.kotpref.Kotpref
+import com.example.androidthings.gattserver.NordicUartServiceProfile.NORDIC_UART_RX_UUID
+import com.example.androidthings.gattserver.NordicUartServiceProfile.NORDIC_UART_TX_UUID
 import com.example.androidthings.gattserver.StringServiceProfile.CHARACTERISTIC_INTERACTOR_UUID
 import com.example.androidthings.gattserver.StringServiceProfile.CHARACTERISTIC_READER_UUID
 import com.google.android.things.pio.PeripheralManager
@@ -109,6 +111,7 @@ class GattServerActivity : Activity() {
 //                showNewStringAlert = false
 //                //TODO may need to send the alert with the string for display nicety rather than instead of the string
 //            } else {
+            //TODO maybe enqueue strings to be sent instead of deriving them here
             currentString = if (showNewStringAlert) {
                 showNewStringAlert = false
                 logD("The next string will show the new string alert!")
@@ -279,6 +282,16 @@ class GattServerActivity : Activity() {
                             0,
                             currentString)
                 }
+
+                NORDIC_UART_RX_UUID -> {
+                    logD("Uart RX characteristic write: [${String(value!!)}]")
+                    processUartCommand(value)
+                    bluetoothGattServer?.sendResponse(device,
+                            requestId,
+                            BluetoothGatt.GATT_SUCCESS,
+                            0,
+                            "Uart Write response???".toByteArray())
+                }
                 else -> {
                     // Invalid characteristic
                     logW("Invalid Characteristic Read: " + characteristic.uuid)
@@ -294,7 +307,6 @@ class GattServerActivity : Activity() {
 
         override fun onCharacteristicReadRequest(device: BluetoothDevice, requestId: Int, offset: Int,
                                                  characteristic: BluetoothGattCharacteristic) {
-            val now = System.currentTimeMillis()
             when (characteristic.uuid) {
                 CHARACTERISTIC_READER_UUID -> {
                     logD("Read String")
@@ -311,6 +323,14 @@ class GattServerActivity : Activity() {
                             BluetoothGatt.GATT_SUCCESS,
                             0,
                             currentString)
+                }
+                NORDIC_UART_TX_UUID -> {
+                    logD("Read String")
+                    bluetoothGattServer?.sendResponse(device,
+                            requestId,
+                            BluetoothGatt.GATT_SUCCESS,
+                            0,
+                            "Uart response???".toByteArray())
                 }
                 else -> {
                     // Invalid characteristic
@@ -377,6 +397,33 @@ class GattServerActivity : Activity() {
                             BluetoothGatt.GATT_FAILURE,
                             0, null)
                 }
+            }
+        }
+    }
+
+    private fun processUartCommand(value: ByteArray) {
+        logD(String(value))
+        when (val cmd = String(value)) {
+            "!choose" -> {
+                TODO()
+            }
+            "!prev" -> {
+                TODO()
+            }
+            "!next" -> {
+                TODO()
+            }
+            "!first" -> {
+                TODO()
+            }
+            "!last" -> {
+                TODO()
+            }
+            "!delete" -> {
+                TODO()
+            }
+            "!endchoose" -> {
+                TODO()
             }
         }
     }
@@ -617,9 +664,10 @@ class GattServerActivity : Activity() {
     private fun startServer() {
         bluetoothGattServer = bluetoothManager.openGattServer(this, gattServerCallback)
 
-        bluetoothGattServer
-                ?.addService(StringServiceProfile.createStringService())
-                ?: logW("Unable to create GATT server")
+        bluetoothGattServer?.apply {
+            addService(StringServiceProfile.createStringService())
+            addService(NordicUartServiceProfile.createNordicUartService())
+        } ?: logW("Unable to create GATT server")
 
         // Initialize the local UI
         updateTimeView(System.currentTimeMillis())
