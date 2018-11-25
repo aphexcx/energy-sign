@@ -247,12 +247,9 @@ class GattServerActivity : Activity() {
                                     super.onConnectionStateChange(gatt, status, newState)
                                     when (newState) {
                                         STATE_CONNECTED -> {
-                                            mtuStatusView.postDelayed({
-                                                //FIXME BAD HACK LOL
-                                                logD("Connected to remote device ${gatt?.device?.name
-                                                        ?: ""}, requesting MTU=512...")
-                                                gatt?.requestMtu(512)
-                                            }, 3000) //because I need to delay the mtu setting to let the uart thingie subscribe first
+                                            logD("Connected to remote device ${gatt?.device?.name
+                                                    ?: ""}, requesting MTU=512...")
+                                            gatt?.requestMtu(512)
                                         }
                                     }
                                 }
@@ -434,15 +431,19 @@ class GattServerActivity : Activity() {
             }
             "!prev" -> {
                 chooserIdx = if (chooserIdx > 0) chooserIdx - 1 else 0
+                currentStringIdx = if (currentStringIdx > 0) currentStringIdx - 1 else 0
             }
             "!next" -> {
                 chooserIdx = if (chooserIdx < signStrings.lastIndex) chooserIdx + 1 else signStrings.lastIndex
+                currentStringIdx = if (currentStringIdx < signStrings.lastIndex) currentStringIdx + 1 else signStrings.lastIndex
             }
             "!first" -> {
                 chooserIdx = 0
+                currentStringIdx = chooserIdx
             }
             "!last" -> {
                 chooserIdx = signStrings.lastIndex
+                currentStringIdx = chooserIdx
             }
             "!delete" -> {
                 signStrings.removeAt(chooserIdx)
