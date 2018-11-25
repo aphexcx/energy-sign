@@ -37,6 +37,7 @@ import android.widget.ArrayAdapter
 import android.widget.ListView
 import android.widget.TextView
 import com.chibatching.kotpref.Kotpref
+import com.example.androidthings.gattserver.NordicUartServiceProfile.NORDIC_UART_RX_UUID
 import com.example.androidthings.gattserver.NordicUartServiceProfile.NORDIC_UART_TX_UUID
 import com.example.androidthings.gattserver.StringServiceProfile.CHARACTERISTIC_INTERACTOR_UUID
 import com.example.androidthings.gattserver.StringServiceProfile.CHARACTERISTIC_READER_UUID
@@ -53,15 +54,19 @@ private const val TAG = "GattServerActivity"
 
 class GattServerActivity : Activity() {
 
-    private var showNewStringAlert: Boolean = true
+    private var shouldShowNewStringAlert: Boolean = true
+    private var isChooserModeEnabled: Boolean = false
+    private var isPaused: Boolean = false
+
     private var currentString: ByteArray = byteArrayOf()
         set(value) {
             field = value
-//            showNewStringAlert = true
+//            shouldShowNewStringAlert = true
             runOnUiThread { stringView.text = STRING_PREFIX + String(value) }
         }
 
     private var currentStringIdx: Int = 0
+    private var chooserIdx: Int = 0
 
     private lateinit var signStrings: MutableList<String>
 
@@ -105,28 +110,31 @@ class GattServerActivity : Activity() {
                 logW("Unable to read from UART device ${uart.name}: $e")
             }
 
-//            if (showNewStringAlert) {
+//            if (shouldShowNewStringAlert) {
 //                currentString = NEW_MSG_ALERT
-//                showNewStringAlert = false
+//                shouldShowNewStringAlert = false
 //                //TODO may need to send the alert with the string for display nicety rather than instead of the string
 //            } else {
             //TODO maybe enqueue strings to be sent instead of deriving them here
-            currentString = if (showNewStringAlert) {
-                showNewStringAlert = false
-                logD("The next string will show the new string alert!")
-                byteArrayOf(BEL) + signStrings[currentStringIdx].toByteArray()
-            } else {
-                signStrings[currentStringIdx].toByteArray()
+            currentString = when {
+                shouldShowNewStringAlert -> {
+                    shouldShowNewStringAlert = false
+                    logD("The next string will show the new string alert!")
+                    byteArrayOf(BEL) + signStrings[currentStringIdx].toByteArray()
+                }
+                isChooserModeEnabled -> {
+                    logD("The next string will show as chooser!")
+                    byteArrayOf(SOH) + signStrings[chooserIdx].toByteArray()
+                }
+                else -> signStrings[currentStringIdx].toByteArray()
             }
             logD("Writing signStrings[$currentStringIdx] >${String(currentString)}< to ${uart.name}...")
 
-            try {
-                uartDevice.write(currentString)
-            } catch (e: Exception) {
-                logW("Unable to write to UART device ${uart.name}: $e")
-            }
+            uartDevice.write(currentString)
 
-            currentStringIdx = if (currentStringIdx < signStrings.size - 1) currentStringIdx + 1 else 0
+            if (!isPaused) { //if not paused, advance index
+                currentStringIdx = if (currentStringIdx < signStrings.lastIndex) currentStringIdx + 1 else 0
+            }
 //            }
 
             // Continue listening for more interrupts
@@ -239,9 +247,12 @@ class GattServerActivity : Activity() {
                                     super.onConnectionStateChange(gatt, status, newState)
                                     when (newState) {
                                         STATE_CONNECTED -> {
-                                            logD("Connected to remote device ${gatt?.device?.name
-                                                    ?: ""}, requesting MTU=512...")
-                                            gatt?.requestMtu(512)
+                                            mtuStatusView.postDelayed({
+                                                //FIXME BAD HACK LOL
+                                                logD("Connected to remote device ${gatt?.device?.name
+                                                        ?: ""}, requesting MTU=512...")
+                                                gatt?.requestMtu(512)
+                                            }, 3000) //because I need to delay the mtu setting to let the uart thingie subscribe first
                                         }
                                     }
                                 }
@@ -272,23 +283,27 @@ class GattServerActivity : Activity() {
                                                   offset: Int,
                                                   value: ByteArray?) {
             when (characteristic.uuid) {
-                CHARACTERISTIC_INTERACTOR_UUID -> {
-                    logD("Write Interactor String! Value: [${String(value!!)}]")
-                    processNewReceivedString(value)
-                    bluetoothGattServer?.sendResponse(device,
-                            requestId,
-                            BluetoothGatt.GATT_SUCCESS,
-                            0,
-                            currentString)
-                }
+//                CHARACTERISTIC_INTERACTOR_UUID -> {
+//                    logD("Write Interactor String! Value: [${String(value!!)}]")
+//                    processNewReceivedString(value)
+//                    bluetoothGattServer?.sendResponse(device,
+//                            requestId,
+//                            BluetoothGatt.GATT_SUCCESS,
+//                            0,
+//                            currentString)
+//                }
                 NORDIC_UART_TX_UUID -> {
                     logD("Uart TX characteristic write: [${String(value!!)}]")
-                    processUartCommand(value)
+                    if (String(value).startsWith("!")) { //TODO workaround for services getting jumbled up, just use one service for now
+                        processUartCommand(value)
+                    } else {
+                        processNewReceivedString(value)
+                    }
                     bluetoothGattServer?.sendResponse(device,
                             requestId,
                             BluetoothGatt.GATT_SUCCESS,
                             0,
-                            "Uart Write response???".toByteArray())
+                            "Uart Write response".toByteArray())
                 }
                 else -> {
                     // Invalid characteristic
@@ -322,13 +337,13 @@ class GattServerActivity : Activity() {
                             0,
                             currentString)
                 }
-                NORDIC_UART_TX_UUID -> {
-                    logD("Read String")
+                NORDIC_UART_RX_UUID -> {
+                    logD("Uart RX characteristic read")
                     bluetoothGattServer?.sendResponse(device,
                             requestId,
                             BluetoothGatt.GATT_SUCCESS,
                             0,
-                            "Uart response???".toByteArray())
+                            signStrings[currentStringIdx].toByteArray())
                 }
                 else -> {
                     // Invalid characteristic
@@ -347,11 +362,14 @@ class GattServerActivity : Activity() {
             when (descriptor.uuid) {
                 CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR -> {
                     logD("Config descriptor read")
-                    val returnValue = if (registeredDevices.contains(device)) {
-                        BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                    } else {
-                        BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
-                    }
+                    val returnValue =
+//                            BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                            if (registeredDevices.contains(device)) {
+                                BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                            } else {
+                                BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+                            }
+
                     bluetoothGattServer?.sendResponse(device,
                             requestId,
                             BluetoothGatt.GATT_SUCCESS,
@@ -393,7 +411,7 @@ class GattServerActivity : Activity() {
                     bluetoothGattServer?.sendResponse(device,
                             requestId,
                             BluetoothGatt.GATT_SUCCESS,
-                            0, null)
+                            0, value) //TODO Right response here?
                 }
             } else {
                 logW("Unknown descriptor write request")
@@ -409,29 +427,39 @@ class GattServerActivity : Activity() {
 
     private fun processUartCommand(value: ByteArray) {
         logD("Procesing Uart command ${String(value)}")
-//        when (val cmd = String(value)) {
-//            "!choose" -> {
-//                TODO()
-//            }
-//            "!prev" -> {
-//                TODO()
-//            }
-//            "!next" -> {
-//                TODO()
-//            }
-//            "!first" -> {
-//                TODO()
-//            }
-//            "!last" -> {
-//                TODO()
-//            }
-//            "!delete" -> {
-//                TODO()
-//            }
-//            "!endchoose" -> {
-//                TODO()
-//            }
-//        }
+        when (val cmd = String(value)) {
+            "!choose" -> {
+                chooserIdx = currentStringIdx
+                isChooserModeEnabled = true
+            }
+            "!prev" -> {
+                chooserIdx = if (chooserIdx > 0) chooserIdx - 1 else 0
+            }
+            "!next" -> {
+                chooserIdx = if (chooserIdx < signStrings.lastIndex) chooserIdx + 1 else signStrings.lastIndex
+            }
+            "!first" -> {
+                chooserIdx = 0
+            }
+            "!last" -> {
+                chooserIdx = signStrings.lastIndex
+            }
+            "!delete" -> {
+                signStrings.removeAt(chooserIdx)
+                //clamp //TODO
+                chooserIdx = if (chooserIdx >= signStrings.lastIndex) signStrings.lastIndex else chooserIdx
+            }
+            "!endchoose" -> {
+                currentStringIdx = chooserIdx
+                isChooserModeEnabled = false
+            }
+            "!pause" -> {
+                isPaused = true
+            }
+            "!unpause" -> {
+                isPaused = false
+            }
+        }
     }
 
     private fun processNewReceivedString(value: ByteArray) {
@@ -440,7 +468,7 @@ class GattServerActivity : Activity() {
         }
 
         saveStrings(signStrings)
-        showNewStringAlert = true
+        shouldShowNewStringAlert = true
         currentStringIdx = 0
     }
 
@@ -562,9 +590,13 @@ class GattServerActivity : Activity() {
     }
 
     fun UartDevice.write(buffer: ByteArray) {
-        val finalBuffer = buffer + '\r'.toByte()
-        val count = uartDevice.write(finalBuffer, finalBuffer.size)
-        logD("Wrote $count bytes to ${uartDevice.name}")
+        try {
+            val finalBuffer = buffer + '\r'.toByte()
+            val count = write(finalBuffer, finalBuffer.size)
+            logD("Wrote $count bytes to $name")
+        } catch (e: Exception) {
+            logW("Unable to write to UART device $name: $e")
+        }
     }
 
     private fun logD(s: String) {
@@ -671,7 +703,7 @@ class GattServerActivity : Activity() {
         bluetoothGattServer = bluetoothManager.openGattServer(this, gattServerCallback)
 
         bluetoothGattServer?.apply {
-            addService(StringServiceProfile.createStringService())
+            //            addService(StringServiceProfile.createStringService())
             addService(NordicUartServiceProfile.createNordicUartService())
         } ?: logW("Unable to create GATT server")
 
@@ -708,6 +740,8 @@ class GattServerActivity : Activity() {
         private const val MAX_SIGN_STRINGS: Int = 1000
         private val NEW_MSG_ALERT: ByteArray = "~NEWMSGALERT".toByteArray()
         private const val BEL: Byte = 7
+        private const val SOH: Byte = 1
+        private const val EOT: Byte = 4
 
     }
 }

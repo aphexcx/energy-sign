@@ -79,22 +79,26 @@ object NordicUartServiceProfile {
     fun createNordicUartService(): BluetoothGattService {
         val service = BluetoothGattService(NORDIC_UART_SERVICE_UUID, SERVICE_TYPE_PRIMARY)
 
-        // Uart RX characteristic
-        val uartRx = BluetoothGattCharacteristic(NORDIC_UART_RX_UUID,
-                PROPERTY_READ or PROPERTY_NOTIFY, PERMISSION_READ)
-        val readerConfig = BluetoothGattDescriptor(CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR,
+        val config = BluetoothGattDescriptor(CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR,
                 PERMISSION_READ or PERMISSION_WRITE)
-        uartRx.addDescriptor(readerConfig)
 
-        // Uart TX characteristic
+
+        // Uart TX characteristic 6e400002
         val uartTx = BluetoothGattCharacteristic(NORDIC_UART_TX_UUID,
                 PROPERTY_WRITE_NO_RESPONSE, PERMISSION_WRITE)
         val writerConfig = BluetoothGattDescriptor(CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR,
                 PERMISSION_READ or PERMISSION_WRITE)
         uartTx.addDescriptor(writerConfig)
 
-        service.addCharacteristic(uartRx)
+        // Uart RX characteristic 6e400003
+        val uartRx = BluetoothGattCharacteristic(NORDIC_UART_RX_UUID,
+                PROPERTY_READ or PROPERTY_NOTIFY, PERMISSION_READ or PERMISSION_WRITE)
+        val readerConfig = BluetoothGattDescriptor(CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR,
+                PERMISSION_READ or PERMISSION_WRITE)
+        uartRx.addDescriptor(readerConfig)
+
         service.addCharacteristic(uartTx)
+        service.addCharacteristic(uartRx)
         return service
     }
 }
