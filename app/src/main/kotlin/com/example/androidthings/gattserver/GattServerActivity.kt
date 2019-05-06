@@ -181,6 +181,42 @@ class GattServerActivity : Activity() {
         }
     }
 
+    val BLE_PIN: String = "123456"
+    /**
+     * Listens for Bluetooth pairing requests and bond state changes
+     */
+    private val bondStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val bluetoothDevice = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
+            val type = intent.getIntExtra(BluetoothDevice.EXTRA_PAIRING_VARIANT, BluetoothDevice.ERROR)
+            // type appears to be 3 which is [PAIRING_VARIANT_CONSENT]
+
+            when (intent.action) {
+                BluetoothDevice.ACTION_PAIRING_REQUEST -> {
+                    logD("Auto-entering pin: $BLE_PIN...")
+                    val pinHasBeenSet = bluetoothDevice.setPin(BLE_PIN.toByteArray())
+//                    abortBroadcast()
+//                    val bondingWillBegin = bluetoothDevice.createBond()
+//                    logD("Starting bond=$bondingWillBegin")
+                    logD("PIN entered result: $pinHasBeenSet")
+                }
+                BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
+                    when (bluetoothDevice.bondState) {
+                        BluetoothDevice.BOND_BONDING -> {
+                            logD("Bonding with remote device ${bluetoothDevice.address}...")
+                        }
+                        BluetoothDevice.BOND_BONDED -> {
+                            logD("BONDED with remote device ${bluetoothDevice.address}!")
+                        }
+                        BluetoothDevice.BOND_NONE -> {
+                            logD("Remote device ${bluetoothDevice.address} is no longer bonded.")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /**
      * Callback to receive information about the advertisement process.
      */
@@ -359,6 +395,8 @@ class GattServerActivity : Activity() {
             when (descriptor.uuid) {
                 CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR -> {
                     logD("Config descriptor read")
+                    logD("Creating bond with remote device ${device.address}...")
+                    device.createBond()
                     val returnValue =
 //                            BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
                             if (registeredDevices.contains(device)) {
@@ -549,8 +587,15 @@ class GattServerActivity : Activity() {
         logD("UART device $UART_DEVICE_NAME opened and configured!")
 
         // Register for system Bluetooth events
-        val filter = IntentFilter(ACTION_STATE_CHANGED)
-        registerReceiver(bluetoothReceiver, filter)
+        registerReceiver(bluetoothReceiver, IntentFilter(ACTION_STATE_CHANGED))
+
+        registerReceiver(bondStateReceiver,
+                IntentFilter().apply {
+                    addAction(BluetoothDevice.ACTION_PAIRING_REQUEST)
+                    addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+                    priority = IntentFilter.SYSTEM_HIGH_PRIORITY
+                })
+
         if (!bluetoothAdapter.isEnabled) {
             logD("Bluetooth is currently disabled...enabling")
             bluetoothAdapter.enable()
@@ -674,13 +719,13 @@ class GattServerActivity : Activity() {
                     .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
                     .setConnectable(true)
                     .setTimeout(0)
-                    .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
+                    .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
                     .build()
 
             val data = AdvertiseData.Builder()
                     .setIncludeDeviceName(true)
                     .setIncludeTxPowerLevel(false)
-                    .addServiceUuid(ParcelUuid(StringServiceProfile.STRING_SERVICE_UUID))
+                    .addServiceUuid(ParcelUuid(NordicUartServiceProfile.NORDIC_UART_SERVICE_UUID))
                     .build()
 
             it.startAdvertising(settings, data, advertiseCallback)
