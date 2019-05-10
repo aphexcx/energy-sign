@@ -395,8 +395,13 @@ class GattServerActivity : Activity() {
             when (descriptor.uuid) {
                 CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR -> {
                     logD("Config descriptor read")
-                    logD("Creating bond with remote device ${device.address}...")
-                    device.createBond()
+                    val result = device.createBond()
+                    if (result) {
+                        logD("Creating bond with remote device ${device.address}...")
+                    } else {
+                        logW("Immediate error when attempting to create a bond with remote device ${device.address} :(")
+                    }
+
                     val returnValue =
 //                            BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
                             if (registeredDevices.contains(device)) {
