@@ -57,6 +57,8 @@ class GattServerActivity : Activity() {
     private var shouldShowNewStringAlert: Boolean = true
     private var isChooserModeEnabled: Boolean = false
     private var isPaused: Boolean = false
+    private var isMicOn: Boolean = true
+    private var sendMicChange: Boolean = false
 
     private var currentString: ByteArray = byteArrayOf()
         set(value) {
@@ -125,6 +127,16 @@ class GattServerActivity : Activity() {
                 isChooserModeEnabled -> {
                     logD("The next string will show as chooser!")
                     byteArrayOf(SOH) + signStrings[chooserIdx].toByteArray()
+                }
+                sendMicChange -> {
+                    sendMicChange = false
+                    if (isMicOn) {
+                        logD("Enabling beat detector microphone!")
+                        byteArrayOf(STX) + signStrings[currentStringIdx].toByteArray()
+                    } else {
+                        logD("Disabling beat detector microphone!")
+                        byteArrayOf(ETX) + signStrings[currentStringIdx].toByteArray()
+                    }
                 }
                 else -> signStrings[currentStringIdx].toByteArray()
             }
@@ -490,6 +502,7 @@ class GattServerActivity : Activity() {
             }
             "!delete" -> {
                 signStrings.removeAt(chooserIdx)
+                saveStrings(signStrings)
                 //clamp //TODO
                 chooserIdx = if (chooserIdx >= signStrings.lastIndex) signStrings.lastIndex else chooserIdx
             }
@@ -502,6 +515,14 @@ class GattServerActivity : Activity() {
             }
             "!unpause" -> {
                 isPaused = false
+            }
+            "!micOn" -> {
+                isMicOn = true
+                sendMicChange = true
+            }
+            "!micOff" -> {
+                isMicOn = false
+                sendMicChange = true
             }
         }
     }
@@ -793,6 +814,8 @@ class GattServerActivity : Activity() {
         private const val BEL: Byte = 7
         private const val SOH: Byte = 1
         private const val EOT: Byte = 4
+        private const val STX: Byte = 2
+        private const val ETX: Byte = 3
 
     }
 }
