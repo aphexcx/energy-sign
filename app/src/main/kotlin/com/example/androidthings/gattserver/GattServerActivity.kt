@@ -33,6 +33,8 @@ import android.os.Bundle
 import android.os.ParcelUuid
 import android.text.format.DateFormat
 import android.util.Log
+import android.view.KeyEvent
+import android.view.KeyEvent.ACTION_DOWN
 import android.widget.ArrayAdapter
 import android.widget.ListView
 import android.widget.TextView
@@ -56,6 +58,7 @@ class GattServerActivity : Activity() {
 
     private var shouldShowNewStringAlert: Boolean = true
     private var isChooserModeEnabled: Boolean = false
+    private var isCurrentlyInKeyboardInput: Boolean = false
     private var isPaused: Boolean = false
     private var isMicOn: Boolean = true
     private var sendMicChange: Boolean = false
@@ -72,6 +75,7 @@ class GattServerActivity : Activity() {
 
     private lateinit var signStrings: MutableList<String>
 
+    private var keyboardStringBuilder: StringBuilder = StringBuilder()
 
     /* Local UI */
     private lateinit var localTimeView: TextView
@@ -119,6 +123,10 @@ class GattServerActivity : Activity() {
 //            } else {
             //TODO maybe enqueue strings to be sent instead of deriving them here
             currentString = when {
+                isCurrentlyInKeyboardInput -> {
+                    byteArrayOf(SOH) + keyboardStringBuilder.toString().toByteArray()
+                }
+                signStrings.isEmpty() -> byteArrayOf()
                 shouldShowNewStringAlert -> {
                     shouldShowNewStringAlert = false
                     logD("The next string will show the new string alert!")
@@ -138,9 +146,12 @@ class GattServerActivity : Activity() {
                         byteArrayOf(ETX) + signStrings[currentStringIdx].toByteArray()
                     }
                 }
-                else -> signStrings[currentStringIdx].toByteArray()
+                else -> {
+                    logD("Reading signStrings[$currentStringIdx]")
+                    signStrings[currentStringIdx].toByteArray()
+                }
             }
-            logD("Writing signStrings[$currentStringIdx] >${String(currentString)}< to ${uart.name}...")
+            logD("Writing >${String(currentString)}< to ${uart.name}...")
 
             uartDevice.write(currentString)
 
@@ -198,7 +209,9 @@ class GattServerActivity : Activity() {
      * Listens for Bluetooth pairing requests and bond state changes
      */
     private val bondStateReceiver = object : BroadcastReceiver() {
+
         override fun onReceive(context: Context, intent: Intent) {
+
             val bluetoothDevice = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
             val type = intent.getIntExtra(BluetoothDevice.EXTRA_PAIRING_VARIANT, BluetoothDevice.ERROR)
             // type appears to be 3 which is [PAIRING_VARIANT_CONSENT]
@@ -225,6 +238,14 @@ class GattServerActivity : Activity() {
                         }
                     }
                 }
+                BluetoothDevice.ACTION_FOUND -> {
+                    val device: BluetoothDevice = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+                    // MAC address
+                    logD("Bluetooth device found!")
+                    logD("Device Name: >${device.name}<")
+                    logD("deviceHardwareAddress >${device.address}<")
+                }
+
             }
         }
     }
@@ -619,6 +640,7 @@ class GattServerActivity : Activity() {
                 IntentFilter().apply {
                     addAction(BluetoothDevice.ACTION_PAIRING_REQUEST)
                     addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+                    addAction(BluetoothDevice.ACTION_FOUND) //when new devices are discovered
                     priority = IntentFilter.SYSTEM_HIGH_PRIORITY
                 })
 
@@ -630,11 +652,49 @@ class GattServerActivity : Activity() {
             startAdvertising()
             startServer()
         }
+
+//        val profileManager = BluetoothProfileManager.getInstance()
+//        val enabledProfiles = profileManager.enabledProfiles
+//        bluetoothAdapter.startDiscovery()
     }
 
     private fun fatal(): Nothing {
         finish()
         throw RuntimeException("Fatal")
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val key: Char = event.keyCharacterMap.get(event.keyCode, event.metaState).toChar()
+        if (event.action == ACTION_DOWN) {
+            logD("Keypress! ${key}")
+            when {
+                event.keyCode == KeyEvent.KEYCODE_ENTER -> submitKeyboardInput()
+                event.keyCode == KeyEvent.KEYCODE_DEL -> deleteKey()
+                event.keyCode == KeyEvent.KEYCODE_SPACE -> processNewKeyboardKey(' ')
+                event.isPrintingKey -> processNewKeyboardKey(key)
+                else -> return true // super.dispatchKeyEvent(event)
+            }
+        }
+        return true
+    }
+
+    private fun processNewKeyboardKey(key: Char) {
+        isCurrentlyInKeyboardInput = true
+        keyboardStringBuilder.append(key)
+    }
+
+    private fun deleteKey() {
+        if (keyboardStringBuilder.isEmpty()) {
+            isCurrentlyInKeyboardInput = false
+        } else {
+            keyboardStringBuilder.deleteCharAt(keyboardStringBuilder.lastIndex)
+        }
+    }
+
+    private fun submitKeyboardInput() {
+        isCurrentlyInKeyboardInput = false
+        processNewReceivedString(keyboardStringBuilder.toString().toByteArray())
+        keyboardStringBuilder.clear()
     }
 
     fun configureUart(): UartDevice? {
@@ -790,7 +850,7 @@ class GattServerActivity : Activity() {
         bluetoothGattServer?.close()
     }
 
-    private lateinit var timeFormat: java.text.DateFormat
+    private lateinit var timeFormat: SimpleDateFormat
     private lateinit var dateFormat: java.text.DateFormat
 
     /**
