@@ -58,7 +58,7 @@ class GattServerActivity : Activity() {
 
     private var shouldShowNewStringAlert: Boolean = true
     private var isChooserModeEnabled: Boolean = false
-    private var isCurrentlyInKeyboardInput: Boolean = false
+    private var keyboardInputStartedAtMs: Long = 0
     private var isPaused: Boolean = false
     private var isMicOn: Boolean = true
     private var sendMicChange: Boolean = false
@@ -122,9 +122,20 @@ class GattServerActivity : Activity() {
 //                //TODO may need to send the alert with the string for display nicety rather than instead of the string
 //            } else {
             //TODO maybe enqueue strings to be sent instead of deriving them here
+
+            val keyboardInputTimeElapsed = System.currentTimeMillis() - keyboardInputStartedAtMs
+            if (keyboardInputTimeElapsed > KEYBOARD_INPUT_TIMEOUT_MS) {
+                keyboardStringBuilder.clear()
+            }
+
             currentString = when {
-                isCurrentlyInKeyboardInput -> {
-                    byteArrayOf(ENQ) + keyboardStringBuilder.toString().plus('_').toByteArray()
+                keyboardInputTimeElapsed < KEYBOARD_INPUT_TIMEOUT_MS -> {
+                    if (keyboardInputTimeElapsed > (KEYBOARD_INPUT_TIMEOUT_MS - KEYBOARD_INPUT_WARNING_MS)) {
+                        // Running out of input time! Display this in input warning mode.
+                        byteArrayOf(EOT) + keyboardStringBuilder.toString().plus('_').toByteArray()
+                    } else {
+                        byteArrayOf(ENQ) + keyboardStringBuilder.toString().plus('_').toByteArray()
+                    }
                 }
                 signStrings.isEmpty() -> byteArrayOf()
                 shouldShowNewStringAlert -> {
@@ -679,20 +690,20 @@ class GattServerActivity : Activity() {
     }
 
     private fun processNewKeyboardKey(key: Char) {
-        isCurrentlyInKeyboardInput = true
+        keyboardInputStartedAtMs = System.currentTimeMillis()
         keyboardStringBuilder.append(key)
     }
 
     private fun deleteKey() {
         if (keyboardStringBuilder.isEmpty()) {
-            isCurrentlyInKeyboardInput = false
+            keyboardInputStartedAtMs = -1
         } else {
             keyboardStringBuilder.deleteCharAt(keyboardStringBuilder.lastIndex)
         }
     }
 
     private fun submitKeyboardInput() {
-        isCurrentlyInKeyboardInput = false
+        keyboardInputStartedAtMs = -1
         processNewReceivedString(keyboardStringBuilder.toString().toByteArray())
         keyboardStringBuilder.clear()
     }
@@ -870,12 +881,14 @@ class GattServerActivity : Activity() {
         private const val ARDUINO_STRING_LEN: Int = 512
         private const val SIGN_STRINGS_FILE_NAME = "signstrings.txt"
         private const val MAX_SIGN_STRINGS: Int = 1000
+        private const val KEYBOARD_INPUT_TIMEOUT_MS: Int = 30_000
+        private const val KEYBOARD_INPUT_WARNING_MS: Int = 7_000
         private val NEW_MSG_ALERT: ByteArray = "~NEWMSGALERT".toByteArray()
         private const val BEL: Byte = 7
         private const val SOH: Byte = 1
-        private const val EOT: Byte = 4
         private const val STX: Byte = 2
         private const val ETX: Byte = 3
+        private const val EOT: Byte = 4
         private const val ENQ: Byte = 5
 
     }
