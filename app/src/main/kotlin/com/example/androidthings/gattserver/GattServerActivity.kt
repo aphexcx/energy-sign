@@ -124,7 +124,7 @@ class GattServerActivity : Activity() {
             //TODO maybe enqueue strings to be sent instead of deriving them here
             currentString = when {
                 isCurrentlyInKeyboardInput -> {
-                    byteArrayOf(SOH) + keyboardStringBuilder.toString().toByteArray()
+                    byteArrayOf(ENQ) + keyboardStringBuilder.toString().plus('_').toByteArray()
                 }
                 signStrings.isEmpty() -> byteArrayOf()
                 shouldShowNewStringAlert -> {
@@ -876,6 +876,7 @@ class GattServerActivity : Activity() {
         private const val EOT: Byte = 4
         private const val STX: Byte = 2
         private const val ETX: Byte = 3
+        private const val ENQ: Byte = 5
 
     }
 }
