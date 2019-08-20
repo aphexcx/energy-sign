@@ -704,8 +704,10 @@ class GattServerActivity : Activity() {
 
     private fun submitKeyboardInput() {
         keyboardInputStartedAtMs = -1
-        processNewReceivedString(keyboardStringBuilder.toString().toByteArray())
-        keyboardStringBuilder.clear()
+        if (keyboardStringBuilder.isNotBlank()) {
+            processNewReceivedString(keyboardStringBuilder.toString().toByteArray())
+            keyboardStringBuilder.clear()
+        }
     }
 
     fun configureUart(): UartDevice? {
