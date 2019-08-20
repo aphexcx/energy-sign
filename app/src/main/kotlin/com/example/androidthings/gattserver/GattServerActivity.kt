@@ -691,14 +691,17 @@ class GattServerActivity : Activity() {
     }
 
     private fun processNewKeyboardKey(key: Char) {
+        if (key.toInt() == 0) {
+            logD("Invalid key!")
+            return
+        }
         keyboardInputStartedAtMs = System.currentTimeMillis()
         keyboardStringBuilder.append(key)
     }
 
     private fun deleteKey() {
-        if (keyboardStringBuilder.isEmpty()) {
-            keyboardInputStartedAtMs = -1
-        } else {
+        if (keyboardStringBuilder.isNotEmpty()) {
+            keyboardInputStartedAtMs = System.currentTimeMillis()
             keyboardStringBuilder.deleteCharAt(keyboardStringBuilder.lastIndex)
         }
     }
