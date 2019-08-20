@@ -145,7 +145,8 @@ class GattServerActivity : Activity() {
                 }
                 isChooserModeEnabled -> {
                     logD("The next string will show as chooser!")
-                    byteArrayOf(SOH) + signStrings[chooserIdx].toByteArray()
+                    byteArrayOf(SOH) + "$chooserIdx/${signStrings.lastIndex}".toByteArray() +
+                            byteArrayOf(DLE) + signStrings[chooserIdx].toByteArray()
                 }
                 sendMicChange -> {
                     sendMicChange = false
@@ -892,6 +893,7 @@ class GattServerActivity : Activity() {
         private const val ETX: Byte = 3
         private const val EOT: Byte = 4
         private const val ENQ: Byte = 5
+        private const val DLE: Byte = 10
 
     }
 }
