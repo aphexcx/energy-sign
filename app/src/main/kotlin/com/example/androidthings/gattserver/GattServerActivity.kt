@@ -59,6 +59,7 @@ class GattServerActivity : Activity() {
     private var shouldShowNewStringAlert: Boolean = true
     private var isChooserModeEnabled: Boolean = false
     private var keyboardInputStartedAtMs: Long = 0
+    private var lastKeyboardInputReceivedAtMs: Long = 0
     private var isPaused: Boolean = false
     private var isMicOn: Boolean = true
     private var sendMicChange: Boolean = false
@@ -123,14 +124,14 @@ class GattServerActivity : Activity() {
 //            } else {
             //TODO maybe enqueue strings to be sent instead of deriving them here
 
-            val keyboardInputTimeElapsed = System.currentTimeMillis() - keyboardInputStartedAtMs
-            if (keyboardInputTimeElapsed > KEYBOARD_INPUT_TIMEOUT_MS) {
+            val timeElapsedSinceLastInput = System.currentTimeMillis() - lastKeyboardInputReceivedAtMs
+            if (timeElapsedSinceLastInput > KEYBOARD_INPUT_TIMEOUT_MS) {
                 keyboardStringBuilder.clear()
             }
 
             currentString = when {
-                keyboardInputTimeElapsed < KEYBOARD_INPUT_TIMEOUT_MS -> {
-                    if (keyboardInputTimeElapsed > (KEYBOARD_INPUT_TIMEOUT_MS - KEYBOARD_INPUT_WARNING_MS)) {
+                timeElapsedSinceLastInput < KEYBOARD_INPUT_TIMEOUT_MS -> {
+                    if (timeElapsedSinceLastInput > (KEYBOARD_INPUT_TIMEOUT_MS - KEYBOARD_INPUT_WARNING_MS)) {
                         // Running out of input time! Display this in input warning mode.
                         byteArrayOf(EOT) + keyboardStringBuilder.toString().plus('_').toByteArray()
                     } else {
@@ -695,20 +696,32 @@ class GattServerActivity : Activity() {
             logD("Invalid key!")
             return
         }
-        keyboardInputStartedAtMs = System.currentTimeMillis()
+        if (keyboardStringBuilder.isEmpty()) {
+            keyboardInputStartedAtMs = System.currentTimeMillis()
+        }
+        lastKeyboardInputReceivedAtMs = System.currentTimeMillis()
         keyboardStringBuilder.append(key)
     }
 
     private fun deleteKey() {
         if (keyboardStringBuilder.isNotEmpty()) {
-            keyboardInputStartedAtMs = System.currentTimeMillis()
+            lastKeyboardInputReceivedAtMs = System.currentTimeMillis()
             keyboardStringBuilder.deleteCharAt(keyboardStringBuilder.lastIndex)
         }
     }
 
     private fun submitKeyboardInput() {
-        keyboardInputStartedAtMs = -1
-        if (keyboardStringBuilder.isNotBlank()) {
+        val totalKeyboardInputTimeElapsed = System.currentTimeMillis() - keyboardInputStartedAtMs
+//        if (keyboardStringBuilder.length < 4) {
+//            // LONGER!\
+//
+//
+//        } else if (keyboardStringBuilder.toString().split(' ').any { it in Dictionary.ENGLISH_DICT })
+        // else if ! any words are in dict
+        // NO SPAM!
+        if (totalKeyboardInputTimeElapsed > MINIMUM_INPUT_ENTRY_PERIOD
+                && keyboardStringBuilder.isNotBlank()) {
+            lastKeyboardInputReceivedAtMs = -1
             processNewReceivedString(keyboardStringBuilder.toString().toByteArray())
             keyboardStringBuilder.clear()
         }
@@ -889,6 +902,7 @@ class GattServerActivity : Activity() {
         private const val MAX_SIGN_STRINGS: Int = 1000
         private const val KEYBOARD_INPUT_TIMEOUT_MS: Int = 30_000
         private const val KEYBOARD_INPUT_WARNING_MS: Int = 7_000
+        private const val MINIMUM_INPUT_ENTRY_PERIOD: Int = 5_000
         private val NEW_MSG_ALERT: ByteArray = "~NEWMSGALERT".toByteArray()
         private const val BEL: Byte = 7
         private const val SOH: Byte = 1
