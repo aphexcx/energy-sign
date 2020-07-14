@@ -14,8 +14,7 @@
   See the License for the specific language governing permissions and
   limitations under the License.
   -->
-<android.support.constraint.ConstraintLayout
-    android:id="@+id/rootLayout"
+<androidx.constraintlayout.widget.ConstraintLayout android:id="@+id/rootLayout"
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
@@ -99,7 +98,7 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@+id/current_string"
         tools:listitem="@android:layout/simple_list_item_1"
-        tools:text="Log Lines\nLines"/>
+        tools:text="Log Lines\nLines" />
 
 
-</android.support.constraint.ConstraintLayout>
+</androidx.constraintlayout.widget.ConstraintLayout>

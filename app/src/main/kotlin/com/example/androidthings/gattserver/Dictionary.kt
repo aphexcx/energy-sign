@@ -1,5 +1,5 @@
 package com.example.androidthings.gattserver
-
+/*
 object Dictionary {
     val ENGLISH_DICT = """
     a
@@ -370107,3 +370107,5 @@ zwitterion
 zwitterionic
 """.trimIndent().lines().toSet()
 }
+
+*/
