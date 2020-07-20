@@ -45,6 +45,10 @@ android {
     kotlinOptions {
         jvmTarget = "1.8"
     }
+
+    packagingOptions {
+        exclude 'META-INF/*'
+    }
 }
 
 dependencies {
@@ -56,5 +60,16 @@ dependencies {
     ext.ver_kotpref = "2.11.0"
     implementation "com.chibatching.kotpref:kotpref:$ver_kotpref"
 //    implementation "com.chibatching.kotpref:gson-support:$ver_kotpref"
+
+    ext.ver_ktor = "1.3.1"
+
+    implementation "io.ktor:ktor:$ver_ktor"
+    implementation "io.ktor:ktor-server-netty:$ver_ktor"
+    implementation "io.ktor:ktor-gson:$ver_ktor"
+
+    ext.ver_rxjava = '3.0.3'
+    ext.ver_rxandroid = "3.0.0"
+    implementation "io.reactivex.rxjava3:rxjava:$ver_rxjava"
+    implementation "io.reactivex.rxjava3:rxandroid:$ver_rxandroid"
 
 }

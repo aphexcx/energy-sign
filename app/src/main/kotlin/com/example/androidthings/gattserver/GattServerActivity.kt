@@ -24,12 +24,10 @@ import android.bluetooth.BluetoothProfile.STATE_DISCONNECTED
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
+import android.content.*
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.IBinder
 import android.os.ParcelUuid
 import android.text.format.DateFormat
 import android.util.Log
@@ -43,9 +41,11 @@ import com.example.androidthings.gattserver.NordicUartServiceProfile.NORDIC_UART
 import com.example.androidthings.gattserver.NordicUartServiceProfile.NORDIC_UART_TX_UUID
 import com.example.androidthings.gattserver.StringServiceProfile.CHARACTERISTIC_INTERACTOR_UUID
 import com.example.androidthings.gattserver.StringServiceProfile.CHARACTERISTIC_READER_UUID
+import com.example.androidthings.gattserver.beatlinkdata.DnsSdAnnouncerService
 import com.google.android.things.pio.PeripheralManager
 import com.google.android.things.pio.UartDevice
 import com.google.android.things.pio.UartDeviceCallback
+import io.reactivex.rxjava3.disposables.Disposable
 import java.io.File
 import java.io.IOException
 import java.text.SimpleDateFormat
@@ -60,7 +60,7 @@ class GattServerActivity : Activity() {
     private var isChooserModeEnabled: Boolean = false
     private var keyboardInputStartedAtMs: Long = 0
     private var lastKeyboardInputReceivedAtMs: Long = 0
-    private var isPaused: Boolean = false
+    private var isPaused: Boolean = true
     private var isMicOn: Boolean = true
     private var sendMicChange: Boolean = false
 
@@ -95,6 +95,7 @@ class GattServerActivity : Activity() {
     private lateinit var bluetoothManager: BluetoothManager
 
     private var bluetoothGattServer: BluetoothGattServer? = null
+
     /* Collection of notification subscribers */
     private val registeredDevices = mutableSetOf<BluetoothDevice>()
 
@@ -124,7 +125,8 @@ class GattServerActivity : Activity() {
 //            } else {
             //TODO maybe enqueue strings to be sent instead of deriving them here
 
-            val timeElapsedSinceLastInput = System.currentTimeMillis() - lastKeyboardInputReceivedAtMs
+            val timeElapsedSinceLastInput =
+                System.currentTimeMillis() - lastKeyboardInputReceivedAtMs
             if (timeElapsedSinceLastInput > KEYBOARD_INPUT_TIMEOUT_MS) {
                 keyboardStringBuilder.clear()
             }
@@ -169,7 +171,8 @@ class GattServerActivity : Activity() {
             uartDevice.write(currentString)
 
             if (!isPaused) { //if not paused, advance index
-                currentStringIdx = if (currentStringIdx < signStrings.lastIndex) currentStringIdx + 1 else 0
+                currentStringIdx =
+                    if (currentStringIdx < signStrings.lastIndex) currentStringIdx + 1 else 0
             }
 //            }
 
@@ -218,6 +221,7 @@ class GattServerActivity : Activity() {
     }
 
     val BLE_PIN: String = "123456"
+
     /**
      * Listens for Bluetooth pairing requests and bond state changes
      */
@@ -225,8 +229,10 @@ class GattServerActivity : Activity() {
 
         override fun onReceive(context: Context, intent: Intent) {
 
-            val bluetoothDevice = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
-            val type = intent.getIntExtra(BluetoothDevice.EXTRA_PAIRING_VARIANT, BluetoothDevice.ERROR)
+            val bluetoothDevice =
+                intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
+            val type =
+                intent.getIntExtra(BluetoothDevice.EXTRA_PAIRING_VARIANT, BluetoothDevice.ERROR)
             // type appears to be 3 which is [PAIRING_VARIANT_CONSENT]
 
             when (intent.action) {
@@ -252,7 +258,8 @@ class GattServerActivity : Activity() {
                     }
                 }
                 BluetoothDevice.ACTION_FOUND -> {
-                    val device: BluetoothDevice = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+                    val device: BluetoothDevice =
+                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
                     // MAC address
                     logD("Bluetooth device found!")
                     logD("Device Name: >${device.name}<")
@@ -269,7 +276,8 @@ class GattServerActivity : Activity() {
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
             logD("LE Advertise Started! Name: ${bluetoothManager.adapter.name}")
-            advertiserStatusView.text = "💚${bluetoothManager.adapter.name}" // 🏠${bluetoothManager.adapter.address}"
+            advertiserStatusView.text =
+                "💚${bluetoothManager.adapter.name}" // 🏠${bluetoothManager.adapter.address}"
         }
 
         override fun onStartFailure(errorCode: Int) {
@@ -314,23 +322,40 @@ class GattServerActivity : Activity() {
             updateMtuView(mtu)
         }
 
-        override fun onConnectionStateChange(bluetoothDevice: BluetoothDevice, status: Int, newState: Int) {
+        override fun onConnectionStateChange(
+            bluetoothDevice: BluetoothDevice,
+            status: Int,
+            newState: Int
+        ) {
             when (newState) {
                 STATE_CONNECTED -> {
                     logD("BluetoothDevice CONNECTED: $bluetoothDevice")
                     bluetoothDevice
-                            .connectGatt(this@GattServerActivity, true, object : BluetoothGattCallback() {
-                                override fun onMtuChanged(gatt: BluetoothGatt?, mtu: Int, status: Int) {
+                        .connectGatt(
+                            this@GattServerActivity,
+                            true,
+                            object : BluetoothGattCallback() {
+                                override fun onMtuChanged(
+                                    gatt: BluetoothGatt?,
+                                    mtu: Int,
+                                    status: Int
+                                ) {
                                     super.onMtuChanged(gatt, mtu, status)
                                     updateMtuView(mtu)
                                 }
 
-                                override fun onConnectionStateChange(gatt: BluetoothGatt?, status: Int, newState: Int) {
+                                override fun onConnectionStateChange(
+                                    gatt: BluetoothGatt?,
+                                    status: Int,
+                                    newState: Int
+                                ) {
                                     super.onConnectionStateChange(gatt, status, newState)
                                     when (newState) {
                                         STATE_CONNECTED -> {
-                                            logD("Connected to remote device ${gatt?.device?.name
-                                                    ?: ""}, requesting MTU=512...")
+                                            logD(
+                                                "Connected to remote device ${gatt?.device?.name
+                                                    ?: ""}, requesting MTU=512..."
+                                            )
                                             gatt?.requestMtu(512)
                                         }
                                     }
@@ -354,13 +379,15 @@ class GattServerActivity : Activity() {
             }
         }
 
-        override fun onCharacteristicWriteRequest(device: BluetoothDevice?,
-                                                  requestId: Int,
-                                                  characteristic: BluetoothGattCharacteristic,
-                                                  preparedWrite: Boolean,
-                                                  responseNeeded: Boolean,
-                                                  offset: Int,
-                                                  value: ByteArray?) {
+        override fun onCharacteristicWriteRequest(
+            device: BluetoothDevice?,
+            requestId: Int,
+            characteristic: BluetoothGattCharacteristic,
+            preparedWrite: Boolean,
+            responseNeeded: Boolean,
+            offset: Int,
+            value: ByteArray?
+        ) {
             when (characteristic.uuid) {
 //                CHARACTERISTIC_INTERACTOR_UUID -> {
 //                    logD("Write Interactor String! Value: [${String(value!!)}]")
@@ -378,66 +405,82 @@ class GattServerActivity : Activity() {
                     } else {
                         processNewReceivedString(value)
                     }
-                    bluetoothGattServer?.sendResponse(device,
-                            requestId,
-                            BluetoothGatt.GATT_SUCCESS,
-                            0,
-                            "Uart Write response".toByteArray())
+                    bluetoothGattServer?.sendResponse(
+                        device,
+                        requestId,
+                        BluetoothGatt.GATT_SUCCESS,
+                        0,
+                        "Uart Write response".toByteArray()
+                    )
                 }
                 else -> {
                     // Invalid characteristic
                     logW("Invalid Characteristic Write: " + characteristic.uuid)
-                    bluetoothGattServer?.sendResponse(device,
-                            requestId,
-                            BluetoothGatt.GATT_FAILURE,
-                            0,
-                            null)
+                    bluetoothGattServer?.sendResponse(
+                        device,
+                        requestId,
+                        BluetoothGatt.GATT_FAILURE,
+                        0,
+                        null
+                    )
                 }
             }
 
         }
 
-        override fun onCharacteristicReadRequest(device: BluetoothDevice, requestId: Int, offset: Int,
-                                                 characteristic: BluetoothGattCharacteristic) {
+        override fun onCharacteristicReadRequest(
+            device: BluetoothDevice, requestId: Int, offset: Int,
+            characteristic: BluetoothGattCharacteristic
+        ) {
             when (characteristic.uuid) {
                 CHARACTERISTIC_READER_UUID -> {
                     logD("Read String")
-                    bluetoothGattServer?.sendResponse(device,
-                            requestId,
-                            BluetoothGatt.GATT_SUCCESS,
-                            0,
-                            currentString)
+                    bluetoothGattServer?.sendResponse(
+                        device,
+                        requestId,
+                        BluetoothGatt.GATT_SUCCESS,
+                        0,
+                        currentString
+                    )
                 }
                 CHARACTERISTIC_INTERACTOR_UUID -> {
                     logD("Read Interactor String???")
-                    bluetoothGattServer?.sendResponse(device,
-                            requestId,
-                            BluetoothGatt.GATT_SUCCESS,
-                            0,
-                            currentString)
+                    bluetoothGattServer?.sendResponse(
+                        device,
+                        requestId,
+                        BluetoothGatt.GATT_SUCCESS,
+                        0,
+                        currentString
+                    )
                 }
                 NORDIC_UART_RX_UUID -> {
                     logD("Uart RX characteristic read")
-                    bluetoothGattServer?.sendResponse(device,
-                            requestId,
-                            BluetoothGatt.GATT_SUCCESS,
-                            0,
-                            signStrings[currentStringIdx].toByteArray())
+                    bluetoothGattServer?.sendResponse(
+                        device,
+                        requestId,
+                        BluetoothGatt.GATT_SUCCESS,
+                        0,
+                        signStrings[currentStringIdx].toByteArray()
+                    )
                 }
                 else -> {
                     // Invalid characteristic
                     logW("Invalid Characteristic Read: " + characteristic.uuid)
-                    bluetoothGattServer?.sendResponse(device,
-                            requestId,
-                            BluetoothGatt.GATT_FAILURE,
-                            0,
-                            null)
+                    bluetoothGattServer?.sendResponse(
+                        device,
+                        requestId,
+                        BluetoothGatt.GATT_FAILURE,
+                        0,
+                        null
+                    )
                 }
             }
         }
 
-        override fun onDescriptorReadRequest(device: BluetoothDevice, requestId: Int, offset: Int,
-                                             descriptor: BluetoothGattDescriptor) {
+        override fun onDescriptorReadRequest(
+            device: BluetoothDevice, requestId: Int, offset: Int,
+            descriptor: BluetoothGattDescriptor
+        ) {
             when (descriptor.uuid) {
                 CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR -> {
                     logD("Config descriptor read")
@@ -450,17 +493,19 @@ class GattServerActivity : Activity() {
 
                     val returnValue =
 //                            BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                            if (registeredDevices.contains(device)) {
-                                BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                            } else {
-                                BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
-                            }
+                        if (registeredDevices.contains(device)) {
+                            BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                        } else {
+                            BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+                        }
 
-                    bluetoothGattServer?.sendResponse(device,
-                            requestId,
-                            BluetoothGatt.GATT_SUCCESS,
-                            0,
-                            returnValue)
+                    bluetoothGattServer?.sendResponse(
+                        device,
+                        requestId,
+                        BluetoothGatt.GATT_SUCCESS,
+                        0,
+                        returnValue
+                    )
                 }
 //                USER_DESCRIPTION_DESCRIPTOR -> bluetoothGattServer?.sendResponse(device,
 //                        requestId,
@@ -469,43 +514,55 @@ class GattServerActivity : Activity() {
 //                        descriptor.value)
                 else -> {
                     logW("Unknown descriptor read request")
-                    bluetoothGattServer?.sendResponse(device,
-                            requestId,
-                            BluetoothGatt.GATT_FAILURE,
-                            0, null)
+                    bluetoothGattServer?.sendResponse(
+                        device,
+                        requestId,
+                        BluetoothGatt.GATT_FAILURE,
+                        0, null
+                    )
                 }
             }
         }
 
-        override fun onDescriptorWriteRequest(device: BluetoothDevice,
-                                              requestId: Int,
-                                              descriptor: BluetoothGattDescriptor,
-                                              preparedWrite: Boolean,
-                                              responseNeeded: Boolean,
-                                              offset: Int,
-                                              value: ByteArray) {
+        override fun onDescriptorWriteRequest(
+            device: BluetoothDevice,
+            requestId: Int,
+            descriptor: BluetoothGattDescriptor,
+            preparedWrite: Boolean,
+            responseNeeded: Boolean,
+            offset: Int,
+            value: ByteArray
+        ) {
             if (descriptor.uuid == CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR) {
                 if (Arrays.equals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE, value)) {
                     logD("Subscribe device to notifications: $device")
                     registeredDevices.add(device)
-                } else if (Arrays.equals(BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE, value)) {
+                } else if (Arrays.equals(
+                        BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE,
+                        value
+                    )
+                ) {
                     logD("Unsubscribe device from notifications: $device")
                     registeredDevices.remove(device)
                 }
 
                 if (responseNeeded) {
-                    bluetoothGattServer?.sendResponse(device,
-                            requestId,
-                            BluetoothGatt.GATT_SUCCESS,
-                            0, value) //TODO Right response here?
+                    bluetoothGattServer?.sendResponse(
+                        device,
+                        requestId,
+                        BluetoothGatt.GATT_SUCCESS,
+                        0, value
+                    ) //TODO Right response here?
                 }
             } else {
                 logW("Unknown descriptor write request")
                 if (responseNeeded) {
-                    bluetoothGattServer?.sendResponse(device,
-                            requestId,
-                            BluetoothGatt.GATT_FAILURE,
-                            0, null)
+                    bluetoothGattServer?.sendResponse(
+                        device,
+                        requestId,
+                        BluetoothGatt.GATT_FAILURE,
+                        0, null
+                    )
                 }
             }
         }
@@ -523,8 +580,10 @@ class GattServerActivity : Activity() {
                 currentStringIdx = if (currentStringIdx > 0) currentStringIdx - 1 else 0
             }
             "!next" -> {
-                chooserIdx = if (chooserIdx < signStrings.lastIndex) chooserIdx + 1 else signStrings.lastIndex
-                currentStringIdx = if (currentStringIdx < signStrings.lastIndex) currentStringIdx + 1 else signStrings.lastIndex
+                chooserIdx =
+                    if (chooserIdx < signStrings.lastIndex) chooserIdx + 1 else signStrings.lastIndex
+                currentStringIdx =
+                    if (currentStringIdx < signStrings.lastIndex) currentStringIdx + 1 else signStrings.lastIndex
             }
             "!first" -> {
                 chooserIdx = 0
@@ -538,7 +597,8 @@ class GattServerActivity : Activity() {
                 signStrings.removeAt(chooserIdx)
                 saveStrings(signStrings)
                 //clamp //TODO
-                chooserIdx = if (chooserIdx >= signStrings.lastIndex) signStrings.lastIndex else chooserIdx
+                chooserIdx =
+                    if (chooserIdx >= signStrings.lastIndex) signStrings.lastIndex else chooserIdx
             }
             "!endchoose" -> {
                 currentStringIdx = chooserIdx
@@ -563,7 +623,7 @@ class GattServerActivity : Activity() {
 
     private fun processNewReceivedString(value: ByteArray) {
         String(value).split("++").filter { it.isNotBlank() }.reversed().forEach {
-            pushStringOnList(it)
+            pushStringOnList(it.replace('•', '*'))
         }
 
         saveStrings(signStrings)
@@ -580,20 +640,25 @@ class GattServerActivity : Activity() {
      * //TODO last [MAX_SIGN_STRINGS]
      * strings from the sign strings file. */
     private fun loadStrings(): MutableList<String> =
-            File(filesDir, SIGN_STRINGS_FILE_NAME).run {
-                when (createNewFile()) {
-                    true -> logD("$SIGN_STRINGS_FILE_NAME does not exist; created new.")
-                    else -> logD("$SIGN_STRINGS_FILE_NAME exists. Reading...")
-                }
-
-                bufferedReader().use {
-                    it.lineSequence()
-//                            .take(MAX_SIGN_STRINGS)
-                            .toMutableList().asReversed() //TODO check if asreversed is doing the right thing here
-                }.also {
-                    logD("Read ${it.size} lines from $SIGN_STRINGS_FILE_NAME! Here are the first 10: [${it.take(10).joinToString(", ")}]")
-                }
+        File(filesDir, SIGN_STRINGS_FILE_NAME).run {
+            when (createNewFile()) {
+                true -> logD("$SIGN_STRINGS_FILE_NAME does not exist; created new.")
+                else -> logD("$SIGN_STRINGS_FILE_NAME exists. Reading...")
             }
+
+            bufferedReader().use {
+                it.lineSequence()
+//                            .take(MAX_SIGN_STRINGS)
+                    .toMutableList()
+                    .asReversed() //TODO check if asreversed is doing the right thing here
+            }.also {
+                logD(
+                    "Read ${it.size} lines from $SIGN_STRINGS_FILE_NAME! Here are the first 10: [${it.take(
+                        10
+                    ).joinToString(", ")}]"
+                )
+            }
+        }
 
     /** Write out the list of strings to the file */
     private fun saveStrings(strings: List<String>) {
@@ -650,12 +715,12 @@ class GattServerActivity : Activity() {
         registerReceiver(bluetoothReceiver, IntentFilter(ACTION_STATE_CHANGED))
 
         registerReceiver(bondStateReceiver,
-                IntentFilter().apply {
-                    addAction(BluetoothDevice.ACTION_PAIRING_REQUEST)
-                    addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
-                    addAction(BluetoothDevice.ACTION_FOUND) //when new devices are discovered
-                    priority = IntentFilter.SYSTEM_HIGH_PRIORITY
-                })
+            IntentFilter().apply {
+                addAction(BluetoothDevice.ACTION_PAIRING_REQUEST)
+                addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+                addAction(BluetoothDevice.ACTION_FOUND) //when new devices are discovered
+                priority = IntentFilter.SYSTEM_HIGH_PRIORITY
+            })
 
         if (!bluetoothAdapter.isEnabled) {
             logD("Bluetooth is currently disabled...enabling")
@@ -666,9 +731,43 @@ class GattServerActivity : Activity() {
             startServer()
         }
 
+        val dnsSdService = DnsSdAnnouncerService(
+            this
+        )
+
+        dnsSdService.start()
+
+//        Intent(this, KtorServerService::class.java).also { intent ->
+//            startService(intent)
+//        }
+
+        Intent(this, BeatLinkDataConsumerServerService::class.java).also { intent ->
+            bindService(intent, connection, Context.BIND_AUTO_CREATE)
+        }
+
+
 //        val profileManager = BluetoothProfileManager.getInstance()
 //        val enabledProfiles = profileManager.enabledProfiles
 //        bluetoothAdapter.startDiscovery()
+    }
+
+    var nowPlayingTrackSubscription: Disposable? = null
+
+    /** Defines callbacks for service binding, passed to bindService()  */
+    private val connection = object : ServiceConnection {
+
+        override fun onServiceConnected(className: ComponentName, service: IBinder) {
+            // We've bound to LocalService, cast the IBinder and get LocalService instance
+            val binder = service as BeatLinkDataConsumerServerService.ServerBinder
+            nowPlayingTrackSubscription = binder.getService().nowPlayingTrack
+                .subscribe { track ->
+                    processNewReceivedString("${track.artist} - ${track.title}".toByteArray())
+                }
+        }
+
+        override fun onServiceDisconnected(arg0: ComponentName) {
+            nowPlayingTrackSubscription?.dispose()
+        }
     }
 
     private fun fatal(): Nothing {
@@ -720,7 +819,8 @@ class GattServerActivity : Activity() {
         // else if ! any words are in dict
         // NO SPAM!
         if (totalKeyboardInputTimeElapsed > MINIMUM_INPUT_ENTRY_PERIOD
-                && keyboardStringBuilder.isNotBlank()) {
+            && keyboardStringBuilder.isNotBlank()
+        ) {
             lastKeyboardInputReceivedAtMs = -1
             processNewReceivedString(keyboardStringBuilder.toString().toByteArray())
             keyboardStringBuilder.clear()
@@ -832,17 +932,17 @@ class GattServerActivity : Activity() {
         bluetoothManager.adapter.bluetoothLeAdvertiser?.let {
             logD("Bluetooth LE: Start Advertiser")
             val settings = AdvertiseSettings.Builder()
-                    .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
-                    .setConnectable(true)
-                    .setTimeout(0)
-                    .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
-                    .build()
+                .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
+                .setConnectable(true)
+                .setTimeout(0)
+                .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
+                .build()
 
             val data = AdvertiseData.Builder()
-                    .setIncludeDeviceName(true)
-                    .setIncludeTxPowerLevel(false)
-                    .addServiceUuid(ParcelUuid(NordicUartServiceProfile.NORDIC_UART_SERVICE_UUID))
-                    .build()
+                .setIncludeDeviceName(true)
+                .setIncludeTxPowerLevel(false)
+                .addServiceUuid(ParcelUuid(NordicUartServiceProfile.NORDIC_UART_SERVICE_UUID))
+                .build()
 
             it.startAdvertising(settings, data, advertiseCallback)
         } ?: logW("Failed to create advertiser")
