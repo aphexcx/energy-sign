@@ -14,7 +14,7 @@
   See the License for the specific language governing permissions and
   limitations under the License.
   -->
-<manifest package="com.example.androidthings.gattserver"
+<manifest package="cx.aphex.energysign"
     xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.BLUETOOTH" />
@@ -54,6 +54,6 @@
                         </intent-filter>
             -->
         </activity>
-        <service android:name=".BeatLinkDataConsumerServerService" />
+        <service android:name=".beatlinkdata.BeatLinkDataConsumerServerService" />
     </application>
 </manifest>

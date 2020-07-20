@@ -1,10 +1,9 @@
-package com.example.androidthings.gattserver
+package cx.aphex.energysign.beatlinkdata
 
 import android.app.Service
 import android.content.Intent
 import android.os.Binder
 import android.os.IBinder
-import com.example.androidthings.gattserver.beatlinkdata.BeatLinkTrack
 import io.ktor.application.call
 import io.ktor.application.install
 import io.ktor.features.ContentNegotiation

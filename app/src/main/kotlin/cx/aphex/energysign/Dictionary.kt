@@ -1,4 +1,4 @@
-package com.example.androidthings.gattserver
+package cx.aphex.energysign
 /*
 object Dictionary {
     val ENGLISH_DICT = """

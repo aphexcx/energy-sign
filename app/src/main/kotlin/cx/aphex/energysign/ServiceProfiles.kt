@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.example.androidthings.gattserver
+package cx.aphex.energysign
 
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattCharacteristic.*

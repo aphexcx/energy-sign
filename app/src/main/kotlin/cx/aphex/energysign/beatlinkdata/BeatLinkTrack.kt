@@ -1,4 +1,4 @@
-package com.example.androidthings.gattserver.beatlinkdata
+package cx.aphex.energysign.beatlinkdata
 
 data class BeatLinkTrack(
     val id: Int,

@@ -1,4 +1,4 @@
-package com.example.androidthings.gattserver.beatlinkdata
+package cx.aphex.energysign.beatlinkdata
 
 import android.content.Context
 import android.net.nsd.NsdManager
@@ -10,7 +10,7 @@ import java.net.ServerSocket
  * Announces that we are a beat-link data consumer and want to get POSTED updates
  * from any beat-link data providers on the network.
  */
-class DnsSdAnnouncerService(val context: Context) : NsdManager.RegistrationListener {
+class DnsSdAnnouncer(val context: Context) : NsdManager.RegistrationListener {
 
     private lateinit var nsdManager: NsdManager
     var localPort: Int = -1
@@ -36,7 +36,7 @@ class DnsSdAnnouncerService(val context: Context) : NsdManager.RegistrationListe
         }
 
         nsdManager = (context.getSystemService(Context.NSD_SERVICE) as NsdManager).apply {
-            registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, this@DnsSdAnnouncerService)
+            registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, this@DnsSdAnnouncer)
         }
     }
 

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.example.androidthings.gattserver
+package cx.aphex.energysign
 
 import android.app.Activity
 import android.bluetooth.*
@@ -37,14 +37,15 @@ import android.widget.ArrayAdapter
 import android.widget.ListView
 import android.widget.TextView
 import com.chibatching.kotpref.Kotpref
-import com.example.androidthings.gattserver.NordicUartServiceProfile.NORDIC_UART_RX_UUID
-import com.example.androidthings.gattserver.NordicUartServiceProfile.NORDIC_UART_TX_UUID
-import com.example.androidthings.gattserver.StringServiceProfile.CHARACTERISTIC_INTERACTOR_UUID
-import com.example.androidthings.gattserver.StringServiceProfile.CHARACTERISTIC_READER_UUID
-import com.example.androidthings.gattserver.beatlinkdata.DnsSdAnnouncerService
 import com.google.android.things.pio.PeripheralManager
 import com.google.android.things.pio.UartDevice
 import com.google.android.things.pio.UartDeviceCallback
+import cx.aphex.energysign.NordicUartServiceProfile.NORDIC_UART_RX_UUID
+import cx.aphex.energysign.NordicUartServiceProfile.NORDIC_UART_TX_UUID
+import cx.aphex.energysign.StringServiceProfile.CHARACTERISTIC_INTERACTOR_UUID
+import cx.aphex.energysign.StringServiceProfile.CHARACTERISTIC_READER_UUID
+import cx.aphex.energysign.beatlinkdata.BeatLinkDataConsumerServerService
+import cx.aphex.energysign.beatlinkdata.DnsSdAnnouncer
 import io.reactivex.rxjava3.disposables.Disposable
 import java.io.File
 import java.io.IOException
@@ -731,7 +732,7 @@ class GattServerActivity : Activity() {
             startServer()
         }
 
-        val dnsSdService = DnsSdAnnouncerService(
+        val dnsSdService = DnsSdAnnouncer(
             this
         )
 
