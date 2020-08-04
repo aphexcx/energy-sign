@@ -98,6 +98,7 @@ class EnergySignUartManager(val viewModel: MainViewModel) : UartDeviceCallback {
 
     fun write(value: ByteArray) {
         logD("Writing >${String(value)}< to ${uartDevice.name}...")
+        logD("Bytes: >${value.asList()}<")
 
         uartDevice.write(value)
     }

@@ -2,14 +2,14 @@ package cx.aphex.energysign.bluetooth
 
 import android.bluetooth.*
 import android.content.Context
-import com.jakewharton.rxrelay3.BehaviorRelay
+import com.jakewharton.rxrelay3.PublishRelay
 import cx.aphex.energysign.MainViewModel
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
 import java.util.*
 
 
-data class BluetoothStatusUpdate(val btDeviceName: String?, val mtu: Int?)
+data class BluetoothStatusUpdate(val btDevice: BluetoothDevice?, val mtu: Int?)
 
 /** Gatt Server, plus callbacks to handle incoming requests to the GATT server.
  * All read/write requests for characteristics and descriptors are handled here.
@@ -21,10 +21,9 @@ class EnergySignBluetoothGattServer(
 ) : BluetoothGattServerCallback() {
 
     private var gattServer: BluetoothGattServer? = null
-    val receivedBytes: BehaviorRelay<ByteArray> = BehaviorRelay.createDefault(byteArrayOf())
+    val receivedBytes: PublishRelay<ByteArray> = PublishRelay.create()
 
-    val bluetoothStatusUpdates: BehaviorRelay<BluetoothStatusUpdate> =
-        BehaviorRelay.createDefault(BluetoothStatusUpdate(null, null))
+    val bluetoothStatusUpdates: PublishRelay<BluetoothStatusUpdate> = PublishRelay.create()
 
     /* Collection of notification subscribers */
     private val registeredDevices = mutableSetOf<BluetoothDevice>()
@@ -42,7 +41,12 @@ class EnergySignBluetoothGattServer(
     override fun onMtuChanged(device: BluetoothDevice?, mtu: Int) {
         logD("MTU Changed! New MTU: $mtu")
 //        viewModel.onBtStatusUpdate(it)
-        bluetoothStatusUpdates.accept(bluetoothStatusUpdates.value.copy(mtu = mtu))
+        bluetoothStatusUpdates.accept(
+            BluetoothStatusUpdate(
+                btDevice = device,
+                mtu = mtu
+            )
+        )
     }
 
     override fun onConnectionStateChange(
@@ -87,11 +91,9 @@ class EnergySignBluetoothGattServer(
                                 }
                             }
                         })
-
-//                viewModel.onBtStatusUpdate(
                 bluetoothStatusUpdates.accept(
                     BluetoothStatusUpdate(
-                        btDeviceName = "📲${bluetoothDevice.name ?: ""}$bluetoothDevice",
+                        btDevice = bluetoothDevice,
                         mtu = null
                     )
                 )
@@ -100,10 +102,9 @@ class EnergySignBluetoothGattServer(
                 logD("BluetoothDevice DISCONNECTED: $bluetoothDevice")
                 //Remove bluetoothDevice from any active subscriptions
                 registeredDevices.remove(bluetoothDevice)
-//                viewModel.onBtStatusUpdate(
                 bluetoothStatusUpdates.accept(
                     BluetoothStatusUpdate(
-                        btDeviceName = "📴",
+                        btDevice = bluetoothDevice,
                         mtu = null
                     )
                 )
@@ -169,7 +170,7 @@ class EnergySignBluetoothGattServer(
                     requestId,
                     BluetoothGatt.GATT_SUCCESS,
                     0,
-                    receivedBytes.value
+                    viewModel.currentBytes.value
                 )
             }
             StringServiceProfile.CHARACTERISTIC_INTERACTOR_UUID -> {
@@ -179,7 +180,7 @@ class EnergySignBluetoothGattServer(
                     requestId,
                     BluetoothGatt.GATT_SUCCESS,
                     0,
-                    receivedBytes.value
+                    viewModel.currentBytes.value
                 )
             }
             NordicUartServiceProfile.NORDIC_UART_RX_UUID -> {
@@ -298,3 +299,4 @@ class EnergySignBluetoothGattServer(
     }
 
 }
+

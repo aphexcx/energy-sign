@@ -40,6 +40,7 @@ val CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR: UUID =
     UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 //val USER_DESCRIPTION_DESCRIPTOR: UUID = UUID.fromString("00002901-0000-1000-8000-00805f9b34fb")
 
+//Services were getting jumbled up, just use one service (nordic) for now
 
 object StringServiceProfile {
     val STRING_SERVICE_UUID: UUID = UUID.fromString("deadbeef-420d-4048-a24e-18e60180e23c")

@@ -16,6 +16,7 @@
 
 package cx.aphex.energysign
 
+import android.bluetooth.BluetoothDevice
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -79,7 +80,7 @@ class GattServerActivity : AppCompatActivity() {
             advertiser_status.text = it
         }
         viewModel.btDeviceStatus.observeNonNull(this) {
-            device_status.text = it.btDeviceName
+            device_status.text = it.btDevice.toUiString()
             mtu_status.text = "Ⓜ️${it.mtu ?: "20?"}"
         }
 
@@ -107,7 +108,7 @@ class GattServerActivity : AppCompatActivity() {
             val binder = service as BeatLinkDataConsumerServerService.ServerBinder
             nowPlayingTrackSubscription = binder.getService().nowPlayingTrack
                 .subscribe { track ->
-                    viewModel.processNewReceivedString("${track.artist} - ${track.title}".toByteArray())
+                    viewModel.nowPlaying(track)
                 }
         }
 
@@ -129,6 +130,10 @@ class GattServerActivity : AppCompatActivity() {
             }
         }
         return true
+    }
+
+    private fun BluetoothDevice?.toUiString(): String {
+        return this?.let { "📲${it.name ?: ""}${it}" } ?: "📴"
     }
 
     private lateinit var timeFormat: SimpleDateFormat
