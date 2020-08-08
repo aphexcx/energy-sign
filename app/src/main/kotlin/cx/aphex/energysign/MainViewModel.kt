@@ -2,6 +2,7 @@ package cx.aphex.energysign
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
+import com.google.gson.Gson
 import cx.aphex.energysign.beatlinkdata.BeatLinkTrack
 import cx.aphex.energysign.beatlinkdata.DnsSdAnnouncer
 import cx.aphex.energysign.bluetooth.BluetoothStatusUpdate
@@ -11,8 +12,9 @@ import cx.aphex.energysign.uart.EnergySignUartManager
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val context = application.applicationContext
+    private val gson: Gson = Gson()
 
-    val currentBytes: NonNullMutableLiveData<ByteArray> = NonNullMutableLiveData(byteArrayOf())
+    val currentString: NonNullMutableLiveData<String> = NonNullMutableLiveData("")
 
     val btAdvertiseStatus: NonNullMutableLiveData<String> = NonNullMutableLiveData("")
     val btDeviceStatus: NonNullMutableLiveData<BluetoothStatusUpdate> =
@@ -45,8 +47,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onReadyForNextMessage() {
-        currentBytes.value = messageManager.getNextMessage().bytes
-        energySignUartManager.write(currentBytes.value)
+        val message: Message = messageManager.getNextMessage()
+        currentString.value = message.string
+
+        val jsonString = gson.toJson(message)
+
+        energySignUartManager.write(jsonString)
     }
 
     fun updateAdvertiseStatus(status: String) {

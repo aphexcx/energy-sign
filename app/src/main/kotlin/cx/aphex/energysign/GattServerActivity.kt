@@ -72,8 +72,8 @@ class GattServerActivity : AppCompatActivity() {
 //        val enabledProfiles = profileManager.enabledProfiles
 //        bluetoothAdapter.startDiscovery()
 
-        viewModel.currentBytes.observeNonNull(this) {
-            current_string.text = STRING_PREFIX + String(it)
+        viewModel.currentString.observeNonNull(this) {
+            current_string.text = STRING_PREFIX + it
         }
 
         viewModel.btAdvertiseStatus.observeNonNull(this) {

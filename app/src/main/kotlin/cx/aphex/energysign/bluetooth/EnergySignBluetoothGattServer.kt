@@ -170,7 +170,7 @@ class EnergySignBluetoothGattServer(
                     requestId,
                     BluetoothGatt.GATT_SUCCESS,
                     0,
-                    viewModel.currentBytes.value
+                    viewModel.currentString.value.toByteArray()
                 )
             }
             StringServiceProfile.CHARACTERISTIC_INTERACTOR_UUID -> {
@@ -180,7 +180,7 @@ class EnergySignBluetoothGattServer(
                     requestId,
                     BluetoothGatt.GATT_SUCCESS,
                     0,
-                    viewModel.currentBytes.value
+                    viewModel.currentString.value.toByteArray()
                 )
             }
             NordicUartServiceProfile.NORDIC_UART_RX_UUID -> {
@@ -190,7 +190,7 @@ class EnergySignBluetoothGattServer(
                     requestId,
                     BluetoothGatt.GATT_SUCCESS,
                     0,
-                    viewModel.currentBytes.value //TODO should not pass in viewmodel
+                    viewModel.currentString.value.toByteArray() //TODO should not pass in viewmodel
                     //FIXME this appears to not return the current string which is what we want
                 )
             }

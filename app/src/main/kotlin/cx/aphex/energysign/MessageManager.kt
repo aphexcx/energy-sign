@@ -43,7 +43,6 @@ class MessageManager(val context: Context) {
 //        }
 
         saveUserMessages()
-//        shouldShowNewStringAlert = true
     }
 
 
@@ -63,7 +62,6 @@ class MessageManager(val context: Context) {
 
         if (messages.isEmpty()) {
             advertise()
-//            return null
         }
 
         val currentMessage = messages[currentStringIdx]
@@ -77,10 +75,6 @@ class MessageManager(val context: Context) {
                     Message.KeyboardEcho.Input(keyboardStringBuilder.toString())
                 }
             }
-//            messages.isEmpty() -> {
-//                advertise()
-//                messages.first()
-//            }
             currentMessage is Message.ChonkySlide ||
                     currentMessage is Message.OneByOneMessage -> {
                 messages.removeAt(currentStringIdx)
@@ -107,7 +101,7 @@ class MessageManager(val context: Context) {
             currentMessage is Message.UserMessage -> {
                 if (isChooserModeEnabled) {
                     logD("The next string will show as chooser!")
-                    Message.UtilityMessage.Chooser(chooserIdx, messages.lastIndex, currentMessage)
+                    Message.Chooser(chooserIdx, messages.lastIndex, currentMessage)
                 } else {
                     logD("Sending messages[$currentStringIdx]")
                     currentMessage
@@ -138,10 +132,12 @@ class MessageManager(val context: Context) {
             Message.ChonkySlide("QUARAN", context.getColor(R.color.instagram)),
             Message.ChonkySlide("TRANCE", context.getColor(R.color.instagram)),
             Message.OneByOneMessage("INSTAGRAM:", context.getColor(R.color.instagram)),
-            Message.OneByOneMessage("@APHEXCX", context.getColor(R.color.instahandle))
+            Message.OneByOneMessage(
+                "@APHEXCX",
+                context.getColor(R.color.instahandle),
+                delayMs = 1000
+            )
         )
-        processNewUserMessage("Shalom!1".toByteArray())
-
     }
 
     private fun pushMessages(vararg messages: Message) {
@@ -213,11 +209,12 @@ class MessageManager(val context: Context) {
             }
 
             bufferedReader().use { reader ->
-                val list = reader.lineSequence() //.take(MAX_SIGN_STRINGS)
-                    .map { Message.UserMessage(it) }
-                    .filter { it.bytes.size > 1 }
-                    .toMutableList<Message.UserMessage>()
-                    .asReversed()
+                val list: MutableList<Message.UserMessage> =
+                    reader.lineSequence() //.take(MAX_SIGN_STRINGS)
+                        .map { Message.UserMessage(it) }
+                        .filter { it.string.isNotBlank() }
+                        .toMutableList()
+                        .asReversed()
 
                 logD(
                     "Read ${list.size} lines from ${SIGN_STRINGS_FILE_NAME}! Here are the first 10: [${list.take(
@@ -232,7 +229,10 @@ class MessageManager(val context: Context) {
     /** Write out the list of strings to the file */
     private fun saveUserMessages() {
         try {
-            messages.filterIsInstance<Message.UserMessage>().map { it.string }.reversed()
+            messages
+                .filterIsInstance<Message.UserMessage>()
+                .map { it.string }
+                .reversed()
                 .toFile(File(context.filesDir, SIGN_STRINGS_FILE_NAME))
         } catch (e: Throwable) {
             logW("Exception when saving ${SIGN_STRINGS_FILE_NAME}! ${e.message}")

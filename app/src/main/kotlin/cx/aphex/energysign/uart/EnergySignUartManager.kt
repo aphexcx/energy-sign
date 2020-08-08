@@ -45,7 +45,7 @@ class EnergySignUartManager(val viewModel: MainViewModel) : UartDeviceCallback {
         logD("Data available on ${uart.name}! Reading...")
         // Read available data from the UART device
         try {
-            val bytes = ByteArray(ARDUINO_STRING_LEN)
+            val bytes = ByteArray(ARDUINO_RECEVIED_STRING_LEN)
             val count = uart.read(bytes, bytes.size)
             logD("Read $count bytes from ${uart.name}: [${String(bytes)}]")
             viewModel.onReadyForNextMessage()
@@ -88,26 +88,34 @@ class EnergySignUartManager(val viewModel: MainViewModel) : UartDeviceCallback {
 
     private fun UartDevice.write(buffer: ByteArray) {
         try {
-            val finalBuffer = buffer + '\r'.toByte()
-            val count = write(finalBuffer, finalBuffer.size)
+            if (buffer.size > MAX_ARDUINO_JSON_SIZE) {
+                logE("JSON string (${buffer.size}) is bigger than the maximum size the arduino will accept ($MAX_ARDUINO_JSON_SIZE)! ")
+            }
+
+//            val finalBuffer = buffer + '\r'.toByte()
+//            val count = write(finalBuffer, finalBuffer.size)
+            val count = write(buffer, buffer.size)
             logD("Wrote $count bytes to $name")
         } catch (e: Exception) {
             logW("Unable to write to UART device $name: $e")
         }
     }
 
-    fun write(value: ByteArray) {
-        logD("Writing >${String(value)}< to ${uartDevice.name}...")
-        logD("Bytes: >${value.asList()}<")
+    fun write(value: String) {
+        logD("Writing >${value}< to ${uartDevice.name}...")
 
-        uartDevice.write(value)
+        val bytes = value.toByteArray()
+        logD("Bytes: >${bytes.asList()}<")
+
+        uartDevice.write(bytes)
     }
 
     companion object {
 
         private const val UART_DEVICE_NAME: String = "UART6"
-        private const val UART_BAUD_RATE: Int = 19200
-        private const val ARDUINO_STRING_LEN: Int = 512
+        private const val UART_BAUD_RATE: Int = 9600
+        private const val ARDUINO_RECEVIED_STRING_LEN: Int = 256
+        private const val MAX_ARDUINO_JSON_SIZE: Int = 900
 
     }
 }
