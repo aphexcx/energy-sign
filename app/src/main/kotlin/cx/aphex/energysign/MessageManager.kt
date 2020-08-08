@@ -76,6 +76,7 @@ class MessageManager(val context: Context) {
                 }
             }
             currentMessage is Message.ChonkySlide ||
+                    currentMessage is Message.Icon ||
                     currentMessage is Message.OneByOneMessage -> {
                 messages.removeAt(currentStringIdx)
                 currentMessage
@@ -136,7 +137,8 @@ class MessageManager(val context: Context) {
                 "@APHEXCX",
                 context.getColor(R.color.instahandle),
                 delayMs = 1000
-            )
+            ),
+            Message.Icon.Invaders
         )
     }
 
