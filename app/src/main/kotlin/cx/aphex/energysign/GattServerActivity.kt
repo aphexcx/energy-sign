@@ -99,6 +99,7 @@ class GattServerActivity : AppCompatActivity() {
     }
 
     var nowPlayingTrackSubscription: Disposable? = null
+    var newPostedUserMessageSubscription: Disposable? = null
 
     /** Defines callbacks for service binding, passed to bindService()  */
     private val connection = object : ServiceConnection {
@@ -109,6 +110,11 @@ class GattServerActivity : AppCompatActivity() {
             nowPlayingTrackSubscription = binder.getService().nowPlayingTrack
                 .subscribe { track ->
                     viewModel.nowPlaying(track)
+                }
+
+            newPostedUserMessageSubscription = binder.getService().newUserMessages
+                .subscribe { userMessage ->
+                    viewModel.newPostedUserMessage(userMessage)
                 }
         }
 

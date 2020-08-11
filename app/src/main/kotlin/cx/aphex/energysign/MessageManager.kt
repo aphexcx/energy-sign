@@ -9,9 +9,11 @@ import cx.aphex.energysign.ext.logW
 import java.io.File
 
 class MessageManager(val context: Context) {
+    private var nowPlayingTrack: Message.NowPlayingTrackMessage? = null
+
     private var messages: MutableList<Message> = mutableListOf()
 
-    private var currentStringIdx: Int = 0
+    private var currentIdx: Int = 0
 
     private var chooserIdx: Int = 0
 
@@ -32,10 +34,10 @@ class MessageManager(val context: Context) {
     }
 
     /** Pushes a new user message onto the top of the messages list. */
-    fun processNewUserMessage(value: ByteArray) {
-        currentStringIdx = 0
+    fun processNewUserMessage(userMessage: Message.UserMessage) {
+        currentIdx = 0
 
-        pushMessage(Message.UserMessage(String(value).replace('•', '*')))
+        pushMessage(userMessage)
         pushMessage(NewMessageAnnouncement)
 
 //        String(value).split("++").filter { it.isNotBlank() }.reversed().forEach {
@@ -48,7 +50,7 @@ class MessageManager(val context: Context) {
 
     /** Pushes a message into the messages list at the current index. */
     private fun pushMessage(message: Message) {
-        messages.add(currentStringIdx, message)
+        messages.add(currentIdx, message)
     }
 
 
@@ -64,7 +66,8 @@ class MessageManager(val context: Context) {
             advertise()
         }
 
-        val currentMessage = messages[currentStringIdx]
+        val currentMessage = messages[currentIdx]
+        logD("getNextMessage: currentMessage is now messages[$currentIdx] = $currentMessage")
 
         return when {
             timeElapsedSinceLastInput < KEYBOARD_INPUT_TIMEOUT_MS -> {
@@ -75,10 +78,17 @@ class MessageManager(val context: Context) {
                     Message.KeyboardEcho.Input(keyboardStringBuilder.toString())
                 }
             }
+            currentMessage is Message.NowPlayingTrackMessage -> {
+                if (!isPaused) { //if not paused, advance index
+                    advanceCurrentIdx()
+                }
+                currentMessage
+            }
             currentMessage is Message.ChonkySlide ||
                     currentMessage is Message.Icon ||
+//                    currentMessage is Message.NowPlayingTrackMessage ||
                     currentMessage is Message.OneByOneMessage -> {
-                messages.removeAt(currentStringIdx)
+                messages.removeAt(currentIdx)
                 currentMessage
             }
             currentMessage is Message.FlashingAnnouncement -> {
@@ -86,7 +96,7 @@ class MessageManager(val context: Context) {
                     NewMessageAnnouncement -> logD("Showing the new string alert!")
                     NowPlayingAnnouncement -> logD("Showing the now playing alert!")
                 }
-                messages.removeAt(currentStringIdx)
+                messages.removeAt(currentIdx)
                 currentMessage
             }
             sendMicChange -> { //TODO move out of here
@@ -99,12 +109,13 @@ class MessageManager(val context: Context) {
                     Message.UtilityMessage.DisableMic
                 }
             }
+
             currentMessage is Message.UserMessage -> {
                 if (isChooserModeEnabled) {
                     logD("The next string will show as chooser!")
                     Message.Chooser(chooserIdx, messages.lastIndex, currentMessage)
                 } else {
-                    logD("Sending messages[$currentStringIdx]")
+                    logD("Sending messages[$currentIdx]")
                     currentMessage
                 }.also {
                     if (!isPaused) { //if not paused, advance index
@@ -113,17 +124,17 @@ class MessageManager(val context: Context) {
                 }
             }
             else -> {
-                logW("Unhandled default, sending messages[$currentStringIdx]")
+                logW("Unhandled default, sending messages[$currentIdx] = ${messages[currentIdx]}")
                 currentMessage
             }
         }
     }
 
     private fun advanceCurrentIdx() {
-        if (currentStringIdx == messages.lastIndex) {
-            currentStringIdx = 0
+        if (currentIdx == messages.lastIndex) {
+            currentIdx = 0
         } else {
-            currentStringIdx += 1
+            currentIdx += 1
         }
     }
 
@@ -150,26 +161,26 @@ class MessageManager(val context: Context) {
         logD("Procesing Uart command ${String(value)}")
         when (val cmd = String(value)) {
             "!choose" -> {
-                chooserIdx = currentStringIdx
+                chooserIdx = currentIdx
                 isChooserModeEnabled = true
             }
             "!prev" -> {
                 chooserIdx = if (chooserIdx > 0) chooserIdx - 1 else 0
-                currentStringIdx = if (currentStringIdx > 0) currentStringIdx - 1 else 0
+                currentIdx = if (currentIdx > 0) currentIdx - 1 else 0
             }
             "!next" -> {
                 chooserIdx =
                     if (chooserIdx < messages.lastIndex) chooserIdx + 1 else messages.lastIndex
-                currentStringIdx =
-                    if (currentStringIdx < messages.lastIndex) currentStringIdx + 1 else messages.lastIndex
+                currentIdx =
+                    if (currentIdx < messages.lastIndex) currentIdx + 1 else messages.lastIndex
             }
             "!first" -> {
                 chooserIdx = 0
-                currentStringIdx = chooserIdx
+                currentIdx = chooserIdx
             }
             "!last" -> {
                 chooserIdx = messages.lastIndex
-                currentStringIdx = chooserIdx
+                currentIdx = chooserIdx
             }
             "!delete" -> {
                 messages.removeAt(chooserIdx)
@@ -179,7 +190,7 @@ class MessageManager(val context: Context) {
                     if (chooserIdx >= messages.lastIndex) messages.lastIndex else chooserIdx
             }
             "!endchoose" -> {
-                currentStringIdx = chooserIdx
+                currentIdx = chooserIdx
                 isChooserModeEnabled = false
             }
             "!pause" -> {
@@ -214,14 +225,14 @@ class MessageManager(val context: Context) {
                 val list: MutableList<Message.UserMessage> =
                     reader.lineSequence() //.take(MAX_SIGN_STRINGS)
                         .map { Message.UserMessage(it) }
-                        .filter { it.string.isNotBlank() }
+                        .filter { it.str.isNotBlank() }
                         .toMutableList()
                         .asReversed()
 
                 logD(
                     "Read ${list.size} lines from ${SIGN_STRINGS_FILE_NAME}! Here are the first 10: [${list.take(
                         10
-                    ).joinToString(", ") { it.string }}]"
+                    ).joinToString(", ") { it.str }}]"
                 )
                 return list
             }
@@ -233,7 +244,7 @@ class MessageManager(val context: Context) {
         try {
             messages
                 .filterIsInstance<Message.UserMessage>()
-                .map { it.string }
+                .map { it.str }
                 .reversed()
                 .toFile(File(context.filesDir, SIGN_STRINGS_FILE_NAME))
         } catch (e: Throwable) {
@@ -273,7 +284,7 @@ class MessageManager(val context: Context) {
             && keyboardStringBuilder.isNotBlank()
         ) {
             lastKeyboardInputReceivedAtMs = -1
-            processNewUserMessage(keyboardStringBuilder.toString().toByteArray())
+            processNewUserMessage(Message.UserMessage(keyboardStringBuilder.toString()))
             keyboardStringBuilder.clear()
         }
     }
@@ -282,13 +293,23 @@ class MessageManager(val context: Context) {
         if (String(value).startsWith("!")) {
             processUartCommand(value)
         } else {
-            processNewUserMessage(value)
+            processNewUserMessage(Message.UserMessage(String(value)))
         }
     }
 
     fun processNowPlayingTrack(track: BeatLinkTrack) {
-        pushMessage(Message.UserMessage("${track.artist} - ${track.title}"))
-        pushMessage(NowPlayingAnnouncement)
+        nowPlayingTrack?.let { messages.remove(it) }
+        messages.removeAll { it is Message.NowPlayingTrackMessage }
+
+        nowPlayingTrack =
+            Message.NowPlayingTrackMessage("${track.artist.replace('•', '*')} - ${track.title}")
+
+        pushMessages(
+//            Message.ChonkySlide(" NOW ", context.getColor(R.color.instagram)),
+//            Message.ChonkySlide("PLAYING", context.getColor(R.color.instagram)),
+            NowPlayingAnnouncement,
+            nowPlayingTrack!!
+        )
     }
 
     companion object {

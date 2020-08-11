@@ -48,7 +48,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onReadyForNextMessage() {
         val message: Message = messageManager.getNextMessage()
-        currentString.value = message.string
+        currentString.value = message.str
 
         val jsonString = gson.toJson(message)
 
@@ -77,5 +77,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun nowPlaying(track: BeatLinkTrack) {
         messageManager.processNowPlayingTrack(track)
+    }
+
+    fun newPostedUserMessage(userMessage: Message.UserMessage) {
+        messageManager.processNewUserMessage(userMessage)
     }
 }

@@ -89,7 +89,7 @@ class EnergySignUartManager(val viewModel: MainViewModel) : UartDeviceCallback {
     private fun UartDevice.write(buffer: ByteArray) {
         try {
             if (buffer.size > MAX_ARDUINO_JSON_SIZE) {
-                logE("JSON string (${buffer.size}) is bigger than the maximum size the arduino will accept ($MAX_ARDUINO_JSON_SIZE)! ")
+                logE("JSON string (${buffer.size}) is probably bigger than the maximum size the arduino will accept ($MAX_ARDUINO_JSON_SIZE)! ")
             }
 
 //            val finalBuffer = buffer + '\r'.toByte()
@@ -114,8 +114,8 @@ class EnergySignUartManager(val viewModel: MainViewModel) : UartDeviceCallback {
 
         private const val UART_DEVICE_NAME: String = "UART6"
         private const val UART_BAUD_RATE: Int = 9600
-        private const val ARDUINO_RECEVIED_STRING_LEN: Int = 256
-        private const val MAX_ARDUINO_JSON_SIZE: Int = 900
+        private const val ARDUINO_RECEVIED_STRING_LEN: Int = 512
+        private const val MAX_ARDUINO_JSON_SIZE: Int = 700
 
     }
 }
