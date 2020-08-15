@@ -1,5 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!--
+<?xml version="1.0" encoding="utf-8"?><!--
   Copyright (C) 2018 The Android Open Source Project
 
   Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,10 +13,10 @@
   See the License for the specific language governing permissions and
   limitations under the License.
   -->
-<androidx.constraintlayout.widget.ConstraintLayout android:id="@+id/rootLayout"
-    xmlns:android="http://schemas.android.com/apk/res/android"
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/rootLayout"
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
@@ -33,7 +32,7 @@
         android:textSize="16sp"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent"
-        tools:text="✅G!"/>
+        tools:text="✅G!" />
 
     <TextView
         android:id="@+id/device_status"
@@ -46,19 +45,19 @@
         android:textSize="16sp"
         app:layout_constraintStart_toEndOf="@id/advertiser_status"
         app:layout_constraintTop_toTopOf="parent"
-        tools:text="📲d0:91:BC:FF:00:AA"/>
+        tools:text="📲d0:91:BC:FF:00:AA" />
 
     <TextView
         android:id="@+id/mtu_status"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginEnd="4dp"
         android:layout_marginStart="4dp"
+        android:layout_marginEnd="4dp"
         android:text=""
         android:textSize="16sp"
         app:layout_constraintStart_toEndOf="@id/device_status"
         app:layout_constraintTop_toTopOf="parent"
-        tools:text="Ⓜ️512"/>
+        tools:text="Ⓜ️512" />
 
     <TextView
         android:id="@+id/local_time"
@@ -69,35 +68,33 @@
         android:textSize="16sp"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintTop_toTopOf="parent"
-        tools:text="01/01/1970 🕰 12:00"/>
+        tools:text="01/01/1970 🕰 12:00" />
 
     <TextView
         android:id="@+id/current_string"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:background="@android:drawable/editbox_dropdown_dark_frame"
-        android:fontFamily="monospace"
         android:ellipsize="marquee"
+        android:fontFamily="monospace"
         android:gravity="left"
         android:text="🔠"
         android:textSize="16sp"
-        app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@id/advertiser_status"
-        tools:text="🔠TRONCE"/>
+        tools:text="🔠TRONCE" />
 
-    <ListView
+    <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/log_list"
         android:layout_width="0dp"
         android:layout_height="0dp"
-        android:fontFamily="monospace"
-        android:gravity="left"
-        android:textSize="14sp"
+        app:layoutManager="androidx.recyclerview.widget.LinearLayoutManager"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@+id/current_string"
-        tools:listitem="@android:layout/simple_list_item_1"
+        tools:listitem="@layout/item_log"
         tools:text="Log Lines\nLines" />
 
 

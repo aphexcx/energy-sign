@@ -26,7 +26,6 @@ import android.os.IBinder
 import android.text.format.DateFormat
 import android.view.KeyEvent
 import android.view.KeyEvent.ACTION_DOWN
-import android.widget.ArrayAdapter
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
 import com.chibatching.kotpref.Kotpref
@@ -40,12 +39,11 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 class GattServerActivity : AppCompatActivity() {
+
     private val viewModel: MainViewModel by viewModels()
 
     /* Local UI */
-    private lateinit var logAdapter: ArrayAdapter<String>
-
-    private val logStrings: ArrayList<String> = arrayListOf()
+    private lateinit var logAdapter: LogAdapter
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -58,7 +56,7 @@ class GattServerActivity : AppCompatActivity() {
         // Initialize the local UI
         updateTimeView()
 
-        logAdapter = ArrayAdapter(this, R.layout.item_log, logStrings)
+        logAdapter = LogAdapter(this)
         log_list.adapter = logAdapter
 
         // Devices with a display should not go to sleep
@@ -88,12 +86,8 @@ class GattServerActivity : AppCompatActivity() {
             .observeOn(AndroidSchedulers.mainThread())
             .subscribe { logLine ->
                 updateTimeView() //TODO mebbe run on a timer
-
-                if (logAdapter.count > 101) {
-                    logAdapter.remove(logAdapter.getItem(0))
-                }
                 logAdapter.add(logLine)
-                log_list.smoothScrollToPosition(logAdapter.count)
+                log_list.smoothScrollToPosition(logAdapter.itemCount)
             }
 
     }
@@ -157,6 +151,5 @@ class GattServerActivity : AppCompatActivity() {
 
     companion object {
         private const val STRING_PREFIX: String = "🔠"
-        private val NEW_MSG_ALERT: ByteArray = "~NEWMSGALERT".toByteArray()
     }
 }

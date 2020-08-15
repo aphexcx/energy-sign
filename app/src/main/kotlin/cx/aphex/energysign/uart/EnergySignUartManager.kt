@@ -114,7 +114,7 @@ class EnergySignUartManager(val viewModel: MainViewModel) : UartDeviceCallback {
 
         private const val UART_DEVICE_NAME: String = "UART6"
         private const val UART_BAUD_RATE: Int = 9600
-        private const val ARDUINO_RECEVIED_STRING_LEN: Int = 512
+        private const val ARDUINO_RECEVIED_STRING_LEN: Int = 64
         private const val MAX_ARDUINO_JSON_SIZE: Int = 700
 
     }

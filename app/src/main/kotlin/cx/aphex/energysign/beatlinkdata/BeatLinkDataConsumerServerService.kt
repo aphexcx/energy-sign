@@ -18,6 +18,8 @@ import io.ktor.routing.post
 import io.ktor.routing.routing
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
+import io.netty.util.internal.logging.InternalLoggerFactory
+import io.netty.util.internal.logging.JdkLoggerFactory
 import io.reactivex.rxjava3.subjects.PublishSubject
 
 class BeatLinkDataConsumerServerService : Service() {
@@ -46,6 +48,8 @@ class BeatLinkDataConsumerServerService : Service() {
     val HTTP_PORT = 8080
 
     override fun onCreate() {
+        InternalLoggerFactory.setDefaultFactory(JdkLoggerFactory.INSTANCE)
+
         embeddedServer(Netty, HTTP_PORT) {
 
             install(ContentNegotiation) {

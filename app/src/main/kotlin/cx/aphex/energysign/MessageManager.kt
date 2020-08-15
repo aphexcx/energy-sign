@@ -6,39 +6,46 @@ import cx.aphex.energysign.Message.FlashingAnnouncement.NowPlayingAnnouncement
 import cx.aphex.energysign.beatlinkdata.BeatLinkTrack
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
+import kotlinx.atomicfu.AtomicInt
+import kotlinx.atomicfu.atomic
+import kotlinx.atomicfu.getAndUpdate
+import kotlinx.atomicfu.update
 import java.io.File
+import java.util.Collections.synchronizedList
 
 class MessageManager(val context: Context) {
     private var nowPlayingTrack: Message.NowPlayingTrackMessage? = null
 
-    private var messages: MutableList<Message> = mutableListOf()
+    private val currentIdx: AtomicInt = atomic(0)
 
-    private var currentIdx: Int = 0
+    private val userMessages: MutableList<Message.UserMessage> =
+        synchronizedList(mutableListOf<Message.UserMessage>())
 
-    private var chooserIdx: Int = 0
+    private val oneTimeMessages: MutableList<Message> =
+        synchronizedList(mutableListOf<Message>())
 
     // Message type state mess **
     private var isChooserModeEnabled: Boolean = false
     private var keyboardInputStartedAtMs: Long = 0
     private var lastKeyboardInputReceivedAtMs: Long = 0
     private var isPaused: Boolean = false
-    private var isMicOn: Boolean = true
-    private var sendMicChange: Boolean = false
     /**/
 
     private var keyboardStringBuilder: StringBuilder = StringBuilder()
 
     init {
-        messages = loadUserMessages().toMutableList()
-        advertise()
+        userMessages.addAll(loadUserMessages())
+//        pushAdvertisements()
     }
+
+    private var usrMsgCount: Int = 0
 
     /** Pushes a new user message onto the top of the messages list. */
     fun processNewUserMessage(userMessage: Message.UserMessage) {
-        currentIdx = 0
+        currentIdx.value = 0
 
-        pushMessage(userMessage)
-        pushMessage(NewMessageAnnouncement)
+        pushUserMessage(userMessage)
+        enqueueOneTimeMessage(NewMessageAnnouncement)
 
 //        String(value).split("++").filter { it.isNotBlank() }.reversed().forEach {
 //            pushStringOnList(it.replace('•', '*'))
@@ -47,150 +54,159 @@ class MessageManager(val context: Context) {
         saveUserMessages()
     }
 
+    private fun pushOneTimeMessage(message: Message) {
+        oneTimeMessages.add(0, message)
+    }
+
+    private fun enqueueOneTimeMessage(message: Message) {
+        oneTimeMessages.add(message)
+    }
 
     /** Pushes a message into the messages list at the current index. */
-    private fun pushMessage(message: Message) {
-        messages.add(currentIdx, message)
+    private fun pushUserMessage(userMessage: Message.UserMessage) {
+        userMessages.add(0, userMessage)
     }
 
 
+    @OptIn(ExperimentalStdlibApi::class)
     fun getNextMessage(): Message {
+        if (keyboardStringBuilder.isNotEmpty()) {
+            val timeElapsedSinceLastInput =
+                System.currentTimeMillis() - lastKeyboardInputReceivedAtMs
 
-        val timeElapsedSinceLastInput =
-            System.currentTimeMillis() - lastKeyboardInputReceivedAtMs
-        if (timeElapsedSinceLastInput > KEYBOARD_INPUT_TIMEOUT_MS) {
-            keyboardStringBuilder.clear()
-        }
+            if (timeElapsedSinceLastInput > KEYBOARD_INPUT_TIMEOUT_MS) {
+                keyboardStringBuilder.clear()
+            }
 
-        if (messages.isEmpty()) {
-            advertise()
-        }
-
-        val currentMessage = messages[currentIdx]
-        logD("getNextMessage: currentMessage is now messages[$currentIdx] = $currentMessage")
-
-        return when {
-            timeElapsedSinceLastInput < KEYBOARD_INPUT_TIMEOUT_MS -> {
+            if (timeElapsedSinceLastInput < KEYBOARD_INPUT_TIMEOUT_MS) {
                 if (timeElapsedSinceLastInput > (KEYBOARD_INPUT_TIMEOUT_MS - KEYBOARD_INPUT_WARNING_MS)) {
                     // Running out of input time! Display this in input warning mode.
-                    Message.KeyboardEcho.InputWarning(keyboardStringBuilder.toString())
+                    return Message.KeyboardEcho.InputWarning(keyboardStringBuilder.toString())
                 } else {
-                    Message.KeyboardEcho.Input(keyboardStringBuilder.toString())
+                    return Message.KeyboardEcho.Input(keyboardStringBuilder.toString())
                 }
             }
-            currentMessage is Message.NowPlayingTrackMessage -> {
-                if (!isPaused) { //if not paused, advance index
-                    advanceCurrentIdx()
-                }
-                currentMessage
-            }
-            currentMessage is Message.ChonkySlide ||
-                    currentMessage is Message.Icon ||
-//                    currentMessage is Message.NowPlayingTrackMessage ||
-                    currentMessage is Message.OneByOneMessage -> {
-                messages.removeAt(currentIdx)
-                currentMessage
-            }
-            currentMessage is Message.FlashingAnnouncement -> {
-                when (currentMessage) {
-                    NewMessageAnnouncement -> logD("Showing the new string alert!")
-                    NowPlayingAnnouncement -> logD("Showing the now playing alert!")
-                }
-                messages.removeAt(currentIdx)
-                currentMessage
-            }
-            sendMicChange -> { //TODO move out of here
-                sendMicChange = false
-                if (isMicOn) {
-                    logD("Enabling beat detector microphone!")
-                    Message.UtilityMessage.EnableMic
-                } else {
-                    logD("Disabling beat detector microphone!")
-                    Message.UtilityMessage.DisableMic
-                }
-            }
+        }
 
-            currentMessage is Message.UserMessage -> {
-                if (isChooserModeEnabled) {
-                    logD("The next string will show as chooser!")
-                    Message.Chooser(chooserIdx, messages.lastIndex, currentMessage)
-                } else {
-                    logD("Sending messages[$currentIdx]")
-                    currentMessage
-                }.also {
-                    if (!isPaused) { //if not paused, advance index
-                        advanceCurrentIdx()
-                    }
-                }
+        if (oneTimeMessages.isEmpty() && userMessages.isEmpty()) {
+            logD("No messages to display; injecting advertisement")
+            pushAdvertisements()
+        }
+
+        oneTimeMessages.removeFirstOrNull()?.let {
+            return it
+        }
+
+        if (isChooserModeEnabled) {
+            val idx = currentIdx.value
+            val currentUsrMsg: Message.UserMessage =
+                userMessages[idx].let { it.copy(str = it.str.take(7)) }
+            logD("getNextMessage: currentMessage is now messages[$idx] = $currentUsrMsg")
+            logD("Sending messages[$idx] as chooser!")
+            return Message.Chooser(idx + 1, userMessages.lastIndex + 1, currentUsrMsg)
+        } else {
+            val idx = getIdxAndAdvance()
+            val currentUsrMsg: Message.UserMessage = userMessages[idx]
+            logD("getNextMessage: currentMessage is now messages[$idx] = $currentUsrMsg")
+            logD("Sending messages[$idx]")
+            usrMsgCount++
+            if (usrMsgCount % ADVERTISE_EVERY == 0) {
+                logD("Advertise period reached; injecting advertisement")
+                pushAdvertisements()
             }
-            else -> {
-                logW("Unhandled default, sending messages[$currentIdx] = ${messages[currentIdx]}")
-                currentMessage
-            }
+            return currentUsrMsg
         }
     }
 
-    private fun advanceCurrentIdx() {
-        if (currentIdx == messages.lastIndex) {
-            currentIdx = 0
-        } else {
-            currentIdx += 1
+    private fun getIdxAndAdvance(): Int {
+        return currentIdx.getAndUpdate {
+            if (isPaused) {
+                it
+            } else {
+                if (it == userMessages.lastIndex) 0
+                else it + 1
+            }
         }
     }
 
     //TODO advertise every 8 usermessages without skipping any
-    private fun advertise() {
-        pushMessages(
-            Message.ChonkySlide("QUARAN", context.getColor(R.color.instagram)),
-            Message.ChonkySlide("TRANCE", context.getColor(R.color.instagram)),
-            Message.OneByOneMessage("INSTAGRAM:", context.getColor(R.color.instagram)),
-            Message.OneByOneMessage(
+    // TODO deal with new usermessages coming in during advertisements
+    private fun pushAdvertisements() {
+        val nowPlayingMsgs: Array<Message> = nowPlayingTrack?.let {
+            listOf<Message>(
+                Message.ColorMessage.ChonkySlide("CURRENT", context.getColor(R.color.instagram)),
+                Message.ColorMessage.ChonkySlide("TRACK", context.getColor(R.color.instagram)),
+                it
+            ).toTypedArray()
+        } ?: listOf<Message>(
+            Message.ColorMessage.OneByOneMessage("PARTY MODE", context.getColor(R.color.twitch)),
+            Message.NowPlayingTrackMessage("LED THERE BE LIGHT")
+        ).toTypedArray() // emptyArray()
+
+        pushOneTimeMessages(
+            Message.ColorMessage.ChonkySlide("QUARAN", context.getColor(R.color.instagram)),
+            Message.ColorMessage.ChonkySlide("TRANCE", context.getColor(R.color.instagram)),
+            *nowPlayingMsgs,
+            Message.ColorMessage.OneByOneMessage("INSTAGRAM:", context.getColor(R.color.instagram)),
+            Message.ColorMessage.OneByOneMessage(
                 "@APHEXCX",
                 context.getColor(R.color.instahandle),
+                delayMs = 1000
+            ),
+            Message.ColorMessage.OneByOneMessage("TWITTER:", context.getColor(R.color.twitter)),
+            Message.ColorMessage.OneByOneMessage(
+                "@APHEX",
+                context.getColor(R.color.twitter),
+                delayMs = 1000
+            ),
+            Message.ColorMessage.OneByOneMessage(
+                "SOUNDCLOUD",
+                context.getColor(R.color.soundcloud)
+            ),
+            Message.ColorMessage.OneByOneMessage(
+                "@APHEXCX",
+                context.getColor(R.color.soundcloud),
                 delayMs = 1000
             ),
             Message.Icon.Invaders
         )
     }
 
-    private fun pushMessages(vararg messages: Message) {
-        messages.reversed().forEach { pushMessage(it) }
+    private fun pushOneTimeMessages(vararg messages: Message) {
+        messages.reversed().forEach { pushOneTimeMessage(it) }
+    }
+
+    private fun pushUserMessages(vararg messages: Message.UserMessage) {
+        messages.reversed().forEach { pushUserMessage(it) }
     }
 
     private fun processUartCommand(value: ByteArray) {
         logD("Procesing Uart command ${String(value)}")
         when (val cmd = String(value)) {
             "!choose" -> {
-                chooserIdx = currentIdx
                 isChooserModeEnabled = true
             }
             "!prev" -> {
-                chooserIdx = if (chooserIdx > 0) chooserIdx - 1 else 0
-                currentIdx = if (currentIdx > 0) currentIdx - 1 else 0
+                currentIdx.update {
+                    if (it > 0) it - 1 else 0
+                }
             }
             "!next" -> {
-                chooserIdx =
-                    if (chooserIdx < messages.lastIndex) chooserIdx + 1 else messages.lastIndex
-                currentIdx =
-                    if (currentIdx < messages.lastIndex) currentIdx + 1 else messages.lastIndex
+                currentIdx.update {
+                    if (it < userMessages.lastIndex) it + 1 else userMessages.lastIndex
+                }
             }
             "!first" -> {
-                chooserIdx = 0
-                currentIdx = chooserIdx
+                currentIdx.value = 0
             }
             "!last" -> {
-                chooserIdx = messages.lastIndex
-                currentIdx = chooserIdx
+                currentIdx.value = userMessages.lastIndex
             }
             "!delete" -> {
-                messages.removeAt(chooserIdx)
+                userMessages.removeAt(currentIdx.value)
                 saveUserMessages()
-                //clamp //TODO
-                chooserIdx =
-                    if (chooserIdx >= messages.lastIndex) messages.lastIndex else chooserIdx
             }
             "!endchoose" -> {
-                currentIdx = chooserIdx
                 isChooserModeEnabled = false
             }
             "!pause" -> {
@@ -200,12 +216,10 @@ class MessageManager(val context: Context) {
                 isPaused = false
             }
             "!micOn" -> {
-                isMicOn = true
-                sendMicChange = true
+                pushOneTimeMessage(Message.UtilityMessage.EnableMic)
             }
             "!micOff" -> {
-                isMicOn = false
-                sendMicChange = true
+                pushOneTimeMessage(Message.UtilityMessage.DisableMic)
             }
         }
     }
@@ -242,8 +256,7 @@ class MessageManager(val context: Context) {
     /** Write out the list of strings to the file */
     private fun saveUserMessages() {
         try {
-            messages
-                .filterIsInstance<Message.UserMessage>()
+            userMessages
                 .map { it.str }
                 .reversed()
                 .toFile(File(context.filesDir, SIGN_STRINGS_FILE_NAME))
@@ -298,18 +311,27 @@ class MessageManager(val context: Context) {
     }
 
     fun processNowPlayingTrack(track: BeatLinkTrack) {
-        nowPlayingTrack?.let { messages.remove(it) }
-        messages.removeAll { it is Message.NowPlayingTrackMessage }
+//        nowPlayingTrack?.let { userMessages.remove(it) }
+//        userMessages.removeAll { it is Message.NowPlayingTrackMessage }
+        if (track.isEmpty) {
+            nowPlayingTrack = null
+            pushAdvertisements()
+        } else {
+            nowPlayingTrack =
+                Message.NowPlayingTrackMessage("${track.artist.replace('•', '*')} - ${track.title}")
 
-        nowPlayingTrack =
-            Message.NowPlayingTrackMessage("${track.artist.replace('•', '*')} - ${track.title}")
+            pushOneTimeMessages(
+                NowPlayingAnnouncement,
+                nowPlayingTrack!!
+            )
+        }
 
-        pushMessages(
-//            Message.ChonkySlide(" NOW ", context.getColor(R.color.instagram)),
-//            Message.ChonkySlide("PLAYING", context.getColor(R.color.instagram)),
-            NowPlayingAnnouncement,
-            nowPlayingTrack!!
-        )
+//        pushMessages(
+////            Message.ChonkySlide(" NOW ", context.getColor(R.color.instagram)),
+////            Message.ChonkySlide("PLAYING", context.getColor(R.color.instagram)),
+//            NowPlayingAnnouncement,
+//            nowPlayingTrack!!
+//        )
     }
 
     companion object {
@@ -318,7 +340,6 @@ class MessageManager(val context: Context) {
 
         //How often to advertise, e.g. every 5 marquee scrolls
         private const val ADVERTISE_EVERY: Int = 8
-
 
         private const val MINIMUM_INPUT_ENTRY_PERIOD: Int = 5_000
         private const val KEYBOARD_INPUT_TIMEOUT_MS: Int = 30_000
