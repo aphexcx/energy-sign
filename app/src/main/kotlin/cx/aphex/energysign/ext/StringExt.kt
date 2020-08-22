@@ -11,7 +11,12 @@ fun String.toNormalized(): String {
 
     // Filter out emojis
     newStr = newStr.filterIndexed { index, c ->
-        !UCharacter.hasBinaryProperty(newStr.codePointAt(index), UProperty.EMOJI)
+        !UCharacter.hasBinaryProperty(
+            newStr.codePointAt(index), UProperty.EMOJI
+        )
+                && !UCharacter.hasBinaryProperty(
+            newStr.codePointAt(index), UProperty.EMOJI_COMPONENT
+        )
                 && !c.isSurrogate()
     }
 

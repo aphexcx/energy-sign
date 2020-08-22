@@ -37,14 +37,14 @@ sealed class Message {
         data class OneByOneMessage(
             override val str: String,
             @Transient @ColorInt val color: Int,
-            override val delayMs: Short = 700,
+            override val delayMs: Short = 1000,
             override val type: MSGTYPE = MSGTYPE.ONE_BY_ONE
         ) : ColorMessage(color, delayMs = delayMs)
 
         data class ChonkySlide(
             override val str: String,
             @Transient @ColorInt val colorCycle: Int,
-            override val delayMs: Short = 700,
+            override val delayMs: Short = 1000,
 //        val colorFrom: Color,
 //        val colorTo: Color
             override val type: MSGTYPE = MSGTYPE.CHONKY_SLIDE
