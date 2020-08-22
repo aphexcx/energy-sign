@@ -6,6 +6,7 @@ import cx.aphex.energysign.Message.FlashingAnnouncement.NowPlayingAnnouncement
 import cx.aphex.energysign.beatlinkdata.BeatLinkTrack
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
+import cx.aphex.energysign.ext.toNormalized
 import kotlinx.atomicfu.AtomicInt
 import kotlinx.atomicfu.atomic
 import kotlinx.atomicfu.getAndUpdate
@@ -14,6 +15,7 @@ import java.io.File
 import java.util.Collections.synchronizedList
 
 class MessageManager(val context: Context) {
+    private val playedTracks: LinkedHashSet<BeatLinkTrack> = linkedSetOf()
     private var nowPlayingTrack: Message.NowPlayingTrackMessage? = null
 
     private val currentIdx: AtomicInt = atomic(0)
@@ -41,10 +43,10 @@ class MessageManager(val context: Context) {
     private var usrMsgCount: Int = 0
 
     /** Pushes a new user message onto the top of the messages list. */
-    fun processNewUserMessage(userMessage: Message.UserMessage) {
+    fun processNewUserMessage(str: String) {
         currentIdx.value = 0
 
-        pushUserMessage(userMessage)
+        pushUserMessage(Message.UserMessage(str.toNormalized()))
         enqueueOneTimeMessage(NewMessageAnnouncement)
 
 //        String(value).split("++").filter { it.isNotBlank() }.reversed().forEach {
@@ -66,7 +68,6 @@ class MessageManager(val context: Context) {
     private fun pushUserMessage(userMessage: Message.UserMessage) {
         userMessages.add(0, userMessage)
     }
-
 
     @OptIn(ExperimentalStdlibApi::class)
     fun getNextMessage(): Message {
@@ -134,42 +135,50 @@ class MessageManager(val context: Context) {
     private fun pushAdvertisements() {
         val nowPlayingMsgs: Array<Message> = nowPlayingTrack?.let {
             listOf<Message>(
-                Message.ColorMessage.ChonkySlide("CURRENT", context.getColor(R.color.instagram)),
-                Message.ColorMessage.ChonkySlide("TRACK", context.getColor(R.color.instagram)),
+                Message.ColorMessage.OneByOneMessage(
+                    "CURRENT",
+                    context.getColor(R.color.instagram)
+                ),
+                Message.ColorMessage.OneByOneMessage("TRACK", context.getColor(R.color.instagram)),
                 it
             ).toTypedArray()
-        } ?: listOf<Message>(
-            Message.ColorMessage.OneByOneMessage("PARTY MODE", context.getColor(R.color.twitch)),
-            Message.NowPlayingTrackMessage("LED THERE BE LIGHT")
-        ).toTypedArray() // emptyArray()
+        } ?: emptyArray()
 
-        pushOneTimeMessages(
-            Message.ColorMessage.ChonkySlide("QUARAN", context.getColor(R.color.instagram)),
-            Message.ColorMessage.ChonkySlide("TRANCE", context.getColor(R.color.instagram)),
-            *nowPlayingMsgs,
-            Message.ColorMessage.OneByOneMessage("INSTAGRAM:", context.getColor(R.color.instagram)),
-            Message.ColorMessage.OneByOneMessage(
-                "@APHEXCX",
-                context.getColor(R.color.instahandle),
-                delayMs = 1000
-            ),
-            Message.ColorMessage.OneByOneMessage("TWITTER:", context.getColor(R.color.twitter)),
-            Message.ColorMessage.OneByOneMessage(
-                "@APHEX",
-                context.getColor(R.color.twitter),
-                delayMs = 1000
-            ),
-            Message.ColorMessage.OneByOneMessage(
-                "SOUNDCLOUD",
-                context.getColor(R.color.soundcloud)
-            ),
-            Message.ColorMessage.OneByOneMessage(
-                "@APHEXCX",
-                context.getColor(R.color.soundcloud),
-                delayMs = 1000
-            ),
-            Message.Icon.Invaders
-        )
+        // Hack to avoid advertising back to back with another advertisement.
+        if (!oneTimeMessages.contains(Message.Icon.Invaders)) {
+            pushOneTimeMessages(
+                Message.ColorMessage.ChonkySlide("QUARAN", context.getColor(R.color.instagram)),
+                Message.ColorMessage.ChonkySlide("TRANCE", context.getColor(R.color.instagram)),
+                Message.ColorMessage.ChonkySlide(" LIVE ", context.getColor(R.color.instagram)),
+                Message.ColorMessage.ChonkySlide(" LEDS ", context.getColor(R.color.instagram)),
+                *nowPlayingMsgs,
+                Message.ColorMessage.OneByOneMessage(
+                    "INSTAGRAM:",
+                    context.getColor(R.color.instagram)
+                ),
+                Message.ColorMessage.OneByOneMessage(
+                    "@APHEXCX",
+                    context.getColor(R.color.instahandle),
+                    delayMs = 1000
+                ),
+                Message.ColorMessage.OneByOneMessage("TWITTER:", context.getColor(R.color.twitter)),
+                Message.ColorMessage.OneByOneMessage(
+                    "@APHEX",
+                    context.getColor(R.color.twitter),
+                    delayMs = 1000
+                ),
+                Message.ColorMessage.OneByOneMessage(
+                    "SOUNDCLOUD",
+                    context.getColor(R.color.soundcloud)
+                ),
+                Message.ColorMessage.OneByOneMessage(
+                    "@APHEXCX",
+                    context.getColor(R.color.soundcloud),
+                    delayMs = 1000
+                ),
+                Message.Icon.Invaders
+            )
+        }
     }
 
     private fun pushOneTimeMessages(vararg messages: Message) {
@@ -203,8 +212,13 @@ class MessageManager(val context: Context) {
                 currentIdx.value = userMessages.lastIndex
             }
             "!delete" -> {
-                userMessages.removeAt(currentIdx.value)
-                saveUserMessages()
+                if (userMessages.isNotEmpty()) {
+                    userMessages.removeAt(currentIdx.value)
+                    currentIdx.update {
+                        if (it >= userMessages.lastIndex) userMessages.lastIndex else it
+                    }
+                    saveUserMessages()
+                }
             }
             "!endchoose" -> {
                 isChooserModeEnabled = false
@@ -218,12 +232,11 @@ class MessageManager(val context: Context) {
             "!micOn" -> {
                 pushOneTimeMessage(Message.UtilityMessage.EnableMic)
             }
-            "!micOff" -> {
+            "!🔇" -> {
                 pushOneTimeMessage(Message.UtilityMessage.DisableMic)
             }
         }
     }
-
 
     /** Return the
      * //TODO last [MAX_SIGN_STRINGS]
@@ -244,9 +257,11 @@ class MessageManager(val context: Context) {
                         .asReversed()
 
                 logD(
-                    "Read ${list.size} lines from ${SIGN_STRINGS_FILE_NAME}! Here are the first 10: [${list.take(
-                        10
-                    ).joinToString(", ") { it.str }}]"
+                    "Read ${list.size} lines from ${SIGN_STRINGS_FILE_NAME}! Here are the first 10: [${
+                        list.take(
+                            10
+                        ).joinToString(", ") { it.str }
+                    }]"
                 )
                 return list
             }
@@ -297,7 +312,7 @@ class MessageManager(val context: Context) {
             && keyboardStringBuilder.isNotBlank()
         ) {
             lastKeyboardInputReceivedAtMs = -1
-            processNewUserMessage(Message.UserMessage(keyboardStringBuilder.toString()))
+            processNewUserMessage(keyboardStringBuilder.toString())
             keyboardStringBuilder.clear()
         }
     }
@@ -306,32 +321,31 @@ class MessageManager(val context: Context) {
         if (String(value).startsWith("!")) {
             processUartCommand(value)
         } else {
-            processNewUserMessage(Message.UserMessage(String(value)))
+            processNewUserMessage(String(value))
         }
     }
 
     fun processNowPlayingTrack(track: BeatLinkTrack) {
-//        nowPlayingTrack?.let { userMessages.remove(it) }
-//        userMessages.removeAll { it is Message.NowPlayingTrackMessage }
         if (track.isEmpty) {
             nowPlayingTrack = null
             pushAdvertisements()
         } else {
-            nowPlayingTrack =
-                Message.NowPlayingTrackMessage("${track.artist.replace('•', '*')} - ${track.title}")
+            if (track !in playedTracks) {
+                nowPlayingTrack = Message.NowPlayingTrackMessage(
+                    "${track.artist.toNormalized()} - ${track.title.toNormalized()}"
+                )
+                oneTimeMessages.removeIf { it is NowPlayingAnnouncement || it is Message.NowPlayingTrackMessage }
 
-            pushOneTimeMessages(
-                NowPlayingAnnouncement,
-                nowPlayingTrack!!
-            )
+                enqueueOneTimeMessage(NowPlayingAnnouncement)
+                enqueueOneTimeMessage(nowPlayingTrack!!)
+
+
+                while (playedTracks.size > MAX_PLAYED_TRACKS_MEMORY) {
+                    playedTracks.remove(playedTracks.first())
+                }
+                playedTracks.add(track)
+            }
         }
-
-//        pushMessages(
-////            Message.ChonkySlide(" NOW ", context.getColor(R.color.instagram)),
-////            Message.ChonkySlide("PLAYING", context.getColor(R.color.instagram)),
-//            NowPlayingAnnouncement,
-//            nowPlayingTrack!!
-//        )
     }
 
     companion object {
@@ -344,5 +358,8 @@ class MessageManager(val context: Context) {
         private const val MINIMUM_INPUT_ENTRY_PERIOD: Int = 5_000
         private const val KEYBOARD_INPUT_TIMEOUT_MS: Int = 30_000
         private const val KEYBOARD_INPUT_WARNING_MS: Int = 7_000
+
+        private const val MAX_PLAYED_TRACKS_MEMORY: Int = 4
+
     }
 }

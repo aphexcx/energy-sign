@@ -79,7 +79,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         messageManager.processNowPlayingTrack(track)
     }
 
-    fun newPostedUserMessage(userMessage: Message.UserMessage) {
-        messageManager.processNewUserMessage(userMessage)
+    fun newPostedUserMessage(str: String) {
+        messageManager.processNewUserMessage(str)
     }
 }

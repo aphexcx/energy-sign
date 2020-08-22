@@ -107,8 +107,8 @@ class GattServerActivity : AppCompatActivity() {
                 }
 
             newPostedUserMessageSubscription = binder.getService().newUserMessages
-                .subscribe { userMessage ->
-                    viewModel.newPostedUserMessage(userMessage)
+                .subscribe { str ->
+                    viewModel.newPostedUserMessage(str)
                 }
         }
 

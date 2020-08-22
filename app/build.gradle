@@ -66,6 +66,7 @@ dependencies {
     implementation "androidx.lifecycle:lifecycle-extensions:2.2.0"
     implementation 'androidx.lifecycle:lifecycle-viewmodel-ktx:2.2.0'
     implementation 'androidx.constraintlayout:constraintlayout:2.0.0-rc1'
+    implementation 'com.ibm.icu:icu4j:67.1'
 
     // Add the Firebase Crashlytics SDK.
     implementation 'com.google.firebase:firebase-crashlytics:17.2.1'

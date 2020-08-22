@@ -4,33 +4,30 @@ import android.app.Service
 import android.content.Intent
 import android.os.Binder
 import android.os.IBinder
-import cx.aphex.energysign.Message
 import cx.aphex.energysign.ext.logW
-import io.ktor.application.call
-import io.ktor.application.install
-import io.ktor.features.ContentNegotiation
-import io.ktor.gson.gson
-import io.ktor.request.receive
-import io.ktor.response.respond
-import io.ktor.response.respondText
-import io.ktor.routing.get
-import io.ktor.routing.post
-import io.ktor.routing.routing
-import io.ktor.server.engine.embeddedServer
-import io.ktor.server.netty.Netty
+import io.ktor.application.*
+import io.ktor.features.*
+import io.ktor.gson.*
+import io.ktor.request.*
+import io.ktor.response.*
+import io.ktor.routing.*
+import io.ktor.server.engine.*
+import io.ktor.server.netty.*
 import io.netty.util.internal.logging.InternalLoggerFactory
 import io.netty.util.internal.logging.JdkLoggerFactory
+import io.reactivex.rxjava3.core.Observable
 import io.reactivex.rxjava3.subjects.PublishSubject
 
 class BeatLinkDataConsumerServerService : Service() {
+
     // Binder given to clients
     private val binder = ServerBinder()
 
     private val nowPlayingTrackSubject: PublishSubject<BeatLinkTrack> = PublishSubject.create()
-    val nowPlayingTrack =
-        nowPlayingTrackSubject.distinctUntilChanged() //TODO doesnt actually work because euqals isnt right on usermessage
+    val nowPlayingTrack: Observable<BeatLinkTrack> =
+        nowPlayingTrackSubject.distinctUntilChanged()
 
-    val newUserMessages: PublishSubject<Message.UserMessage> = PublishSubject.create()
+    val newUserMessages: PublishSubject<String> = PublishSubject.create()
 
     override fun onBind(intent: Intent?): IBinder {
         return binder
@@ -62,13 +59,14 @@ class BeatLinkDataConsumerServerService : Service() {
                 post("/newUserMessage") {
                     val msg: PostedUserMessage = call.receive()
                     logW("Received new POSTed UserMessage: ${msg.message}")
-                    newUserMessages.onNext(Message.UserMessage(msg.message))
+                    newUserMessages.onNext(msg.message)
                     call.respondText("Received new POSTed UserMessage: ${msg.message}")
                 }
                 post("/currentTrack") {
                     val track: BeatLinkTrack = call.receive()
                     logW("Received new BeatLinkTrack: $track")
                     nowPlayingTrackSubject.onNext(track)
+
                     call.respondText("Received new BeatLinkTrack: $track")
                 }
             }
