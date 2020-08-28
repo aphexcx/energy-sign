@@ -1,6 +1,8 @@
 package cx.aphex.energysign
 
 import android.content.Context
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import com.vdurmont.emoji.EmojiParser
 import cx.aphex.energysign.Message.FlashingAnnouncement.NewMessageAnnouncement
 import cx.aphex.energysign.Message.FlashingAnnouncement.NowPlayingAnnouncement
@@ -13,9 +15,13 @@ import kotlinx.atomicfu.atomic
 import kotlinx.atomicfu.getAndUpdate
 import kotlinx.atomicfu.update
 import java.io.File
+import java.lang.reflect.Type
 import java.util.Collections.synchronizedList
 
+
 class MessageManager(val context: Context) {
+    private val gson: Gson = Gson()
+
     private val advertisements: MutableList<Message> = mutableListOf()
     private val playedTracks: LinkedHashSet<BeatLinkTrack> = linkedSetOf()
     private var nowPlayingTrack: Message.NowPlayingTrackMessage? = null
@@ -40,39 +46,41 @@ class MessageManager(val context: Context) {
     init {
         userMessages.addAll(loadUserMessages())
 
+
         advertisements.addAll(
-            listOf(
-                Message.ColorMessage.ChonkySlide("QUARAN", context.getColor(R.color.instagram)),
-                Message.ColorMessage.ChonkySlide("TRANCE", context.getColor(R.color.instagram)),
-                Message.ColorMessage.ChonkySlide(" LIVE ", context.getColor(R.color.instagram)),
-                Message.ColorMessage.ChonkySlide(" LEDS ", context.getColor(R.color.instagram)),
-                Message.NowPlayingTrackMessage(""),
-                Message.ColorMessage.OneByOneMessage(
-                    "INSTAGRAM:",
-                    context.getColor(R.color.instagram)
-                ),
-                Message.ColorMessage.OneByOneMessage(
-                    "@APHEXCX",
-                    context.getColor(R.color.instahandle),
-                    delayMs = 1000
-                ),
-                Message.ColorMessage.OneByOneMessage("TWITTER:", context.getColor(R.color.twitter)),
-                Message.ColorMessage.OneByOneMessage(
-                    "@APHEX",
-                    context.getColor(R.color.twitter),
-                    delayMs = 1000
-                ),
-                Message.ColorMessage.OneByOneMessage(
-                    "SOUNDCLOUD",
-                    context.getColor(R.color.soundcloud)
-                ),
-                Message.ColorMessage.OneByOneMessage(
-                    "@APHEXCX",
-                    context.getColor(R.color.soundcloud),
-                    delayMs = 1000
-                ),
-                Message.Icon.Invaders
-            )
+            loadAds()
+//            listOf(
+//                Message.ColorMessage.ChonkySlide("QUARAN", context.getColor(R.color.instagram)),
+//                Message.ColorMessage.ChonkySlide("TRANCE", context.getColor(R.color.instagram)),
+//                Message.ColorMessage.ChonkySlide(" LIVE ", context.getColor(R.color.instagram)),
+//                Message.ColorMessage.ChonkySlide(" LEDS ", context.getColor(R.color.instagram)),
+//                Message.NowPlayingTrackMessage(""),
+//                Message.ColorMessage.OneByOneMessage(
+//                    "INSTAGRAM:",
+//                    context.getColor(R.color.instagram)
+//                ),
+//                Message.ColorMessage.OneByOneMessage(
+//                    "@APHEXCX",
+//                    context.getColor(R.color.instahandle),
+//                    delayMs = 1000
+//                ),
+//                Message.ColorMessage.OneByOneMessage("TWITTER:", context.getColor(R.color.twitter)),
+//                Message.ColorMessage.OneByOneMessage(
+//                    "@APHEX",
+//                    context.getColor(R.color.twitter),
+//                    delayMs = 1000
+//                ),
+//                Message.ColorMessage.OneByOneMessage(
+//                    "SOUNDCLOUD",
+//                    context.getColor(R.color.soundcloud)
+//                ),
+//                Message.ColorMessage.OneByOneMessage(
+//                    "@APHEXCX",
+//                    context.getColor(R.color.soundcloud),
+//                    delayMs = 1000
+//                ),
+//                Message.Icon.Invaders
+//            )
         )
 //        pushAdvertisements()
     }
@@ -345,7 +353,34 @@ class MessageManager(val context: Context) {
     private fun replaceAdsWith(ads: List<Message>) {
         advertisements.clear()
         advertisements.addAll(ads)
+        saveAds()
         pushAdvertisements()
+    }
+
+    private fun loadAds(): List<Message> {
+        try {
+            with(File(context.filesDir, ADS_FILE_NAME)) {
+                val typeOfT: Type = object : TypeToken<List<Message>>() {}.type
+                return gson.fromJson(readText(), typeOfT)
+            }
+        } catch (e: Throwable) {
+            logW("Exception when loading ${ADS_FILE_NAME}! ${e.message}")
+            return listOf()
+        }
+    }
+
+    private fun saveAds() {
+        try {
+            with(File(context.filesDir, ADS_FILE_NAME)) {
+                when (createNewFile()) {
+                    true -> logD("${ADS_FILE_NAME} does not exist; created new.")
+                    else -> logD("${ADS_FILE_NAME} exists. Writing ads...")
+                }
+                writeText(gson.toJson(advertisements))
+            }
+        } catch (e: Throwable) {
+            logW("Exception when saving ${ADS_FILE_NAME}! ${e.message}")
+        }
     }
 
     /** Return the
@@ -460,6 +495,7 @@ class MessageManager(val context: Context) {
 
     companion object {
         private const val SIGN_STRINGS_FILE_NAME = "signstrings.txt"
+        private const val ADS_FILE_NAME = "ads.json"
         private const val MAX_SIGN_STRINGS: Int = 1000
 
         //How often to advertise, e.g. every 5 marquee scrolls
