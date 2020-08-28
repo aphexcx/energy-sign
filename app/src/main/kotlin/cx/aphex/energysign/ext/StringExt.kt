@@ -1,24 +1,22 @@
 package cx.aphex.energysign.ext
 
-import com.ibm.icu.lang.UCharacter
-import com.ibm.icu.lang.UProperty
-import java.text.Normalizer
 import java.util.*
-
 
 fun String.toNormalized(): String {
     var newStr = this
 
     // Filter out emojis
-    newStr = newStr.filterIndexed { index, c ->
-        !UCharacter.hasBinaryProperty(
-            newStr.codePointAt(index), UProperty.EMOJI
-        )
-                && !UCharacter.hasBinaryProperty(
-            newStr.codePointAt(index), UProperty.EMOJI_COMPONENT
-        )
-                && !c.isSurrogate()
-    }
+//    newStr = newStr.filterIndexed { index, c ->
+//        c.isLetterOrDigit()
+//                || !UCharacter.hasBinaryProperty(
+//            newStr.codePointAt(index), UProperty.EMOJI
+//        )
+//                && !UCharacter.hasBinaryProperty(
+//            newStr.codePointAt(index), UProperty.EMOJI_COMPONENT
+//        )
+//                && !c.isSurrogate()
+//    }
+//    newStr = EmojiParser.removeAllEmojis(newStr)
 
     // Convert Unicode chars to similar looking ASCII chars
     unicodeCharMap.forEach { (unichr, replacement) ->
@@ -26,9 +24,12 @@ fun String.toNormalized(): String {
     }
 
     // Run java text normalizer
-    newStr = Normalizer
-        .normalize(newStr, Normalizer.Form.NFKC)
-        .replace("[^\\p{ASCII}]", "")
+//    newStr = Normalizer
+//        .normalize(newStr, Normalizer.Form.NFKC)
+//        .replace("[^\\p{ASCII}]", "")
+
+    // Strip out all remaining non-ascii chars
+    newStr = newStr.replace(Regex("[^\\p{ASCII}]"), "")
 
     return newStr
 }

@@ -1,6 +1,7 @@
 package cx.aphex.energysign
 
 import android.content.Context
+import com.vdurmont.emoji.EmojiParser
 import cx.aphex.energysign.Message.FlashingAnnouncement.NewMessageAnnouncement
 import cx.aphex.energysign.Message.FlashingAnnouncement.NowPlayingAnnouncement
 import cx.aphex.energysign.beatlinkdata.BeatLinkTrack
@@ -251,13 +252,17 @@ class MessageManager(val context: Context) {
                 when {
                     cmd.startsWith("!🅰") -> {
 //                        !🅰️
-//                        🆑2️⃣BAAAHS
+//                        🆑🕰BAAAHS
 //                        🆑AT THE
-//                        🆑2️⃣BEACH!
+//                        🆑🕰BEACH!
 //                        🅾️💗YOUR DJ:
-//                        🅾️💗2️⃣Parzival
+//                        🅾️🕰💗Aphex
+//                        🅾️💛INSTAGRAM:
+//                        🅾️🕰❤️@APHEXCX
+//                        🅾️💙TWITTER:
+//                        🅾️🕰💙@APHEX
 //                        🅾️🧡SOUNDCLOUD
-//                        🅾️🧡2️⃣@PRZVL
+//                        🅾️🕰🧡@APHEXCX
 //                        🛤️
 //                        👾
                         processAdChange(cmd.drop(2))
@@ -270,9 +275,7 @@ class MessageManager(val context: Context) {
     private fun processAdChange(adString: String) {
         val ads = adString.lines().mapNotNull { line ->
 
-            val delay = if (line.contains("2️⃣")) {
-                2000
-            } else 1000
+            val delay = (EmojiParser.extractEmojis(line).count { it == "🕰" } + 1) * 1000
 
             when {
                 line.startsWith("🆑") -> {
@@ -315,7 +318,6 @@ class MessageManager(val context: Context) {
                     val str = line //.substring(line.offsetByCodePoints(0, 3))
                         .toNormalized()
                     //.trim()
-
 
                     if (color != null) {
                         Message.ColorMessage.OneByOneMessage(str, color, delay.toShort())
