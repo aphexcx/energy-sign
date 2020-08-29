@@ -60,14 +60,14 @@ class BeatLinkDataConsumerServerService : Service() {
                     val msg: PostedUserMessage = call.receive()
                     logW("Received new POSTed UserMessage: ${msg.message}")
                     newUserMessages.onNext(msg.message)
-                    call.respondText("Received new POSTed UserMessage: ${msg.message}")
+                    call.respond(mapOf("success" to true))
                 }
                 post("/currentTrack") {
                     val track: BeatLinkTrack = call.receive()
                     logW("Received new BeatLinkTrack: $track")
                     nowPlayingTrackSubject.onNext(track)
 
-                    call.respondText("Received new BeatLinkTrack: $track")
+                    call.respond(mapOf("success" to true))
                 }
             }
 
