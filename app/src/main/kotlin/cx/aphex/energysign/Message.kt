@@ -7,7 +7,7 @@ import com.google.gson.annotations.JsonAdapter
 import com.google.gson.annotations.SerializedName
 import java.lang.reflect.Type
 
-
+@JsonAdapter(Message.MessageSerializer::class)
 sealed class Message {
     abstract val str: String
     protected abstract val type: MSGTYPE
@@ -58,11 +58,14 @@ sealed class Message {
         object NowPlayingAnnouncement : FlashingAnnouncement("NOW${VT}PLAYING")
     }
 
-    sealed class Icon(override val str: String) : Message() {
+    sealed class IconInvaders(override val str: String) : Message() {
         override val type: MSGTYPE = MSGTYPE.ICON
 
-        object Invaders : Icon("I")
-        // could have other icons here too
+        object Enemy1 : IconInvaders("1")
+        object Enemy2 : IconInvaders("2")
+        object Explosion : IconInvaders("E")
+        object ANJUNA : IconInvaders("A")
+        object BAAAHS : IconInvaders("B")
     }
 
     /* Messages that control admin-only device modes or settings.
@@ -72,6 +75,7 @@ sealed class Message {
 
         object EnableMic : UtilityMessage("E", 'M')
         object DisableMic : UtilityMessage("D", 'M')
+        class BrightnessShift(amount: Int?) : UtilityMessage(amount?.toString() ?: "", 'B')
     }
 
     class Chooser(
@@ -122,13 +126,102 @@ sealed class Message {
                 context: JsonDeserializationContext
             ): MSGTYPE =
                 try {
-                    valueOf(json.asString)
+                    values().firstOrNull { it.value == json.asString.firstOrNull() } ?: DEFAULT
                 } catch (e: JsonParseException) {
                     DEFAULT
                 }
         }
     }
 
+//    @JsonCreator
+//    @JvmStatic
+//    fun findBySimpleClassName(simpleName: String): Parent? {
+//        return Parent::class.sealedSubclasses.first {
+//            it.simpleName == simpleName
+//        }.objectInstance
+//    }
+
+    class MessageSerializer : JsonSerializer<Message>, JsonDeserializer<Message> {
+        override fun serialize(
+            src: Message,
+            typeOfSrc: Type,
+            context: JsonSerializationContext
+        ): JsonElement =
+            context.serialize(src)
+
+        override fun deserialize(
+            json: JsonElement,
+            typeOfT: Type,
+            context: JsonDeserializationContext
+        ): Message =
+            try {
+                val type: MSGTYPE = MSGTYPE.MsgTypeSerializer()
+                    .deserialize(json.asJsonObject["type"], Char::class.java, context)
+                when (type) {
+                    MSGTYPE.CHONKY_SLIDE -> context.deserialize(
+                        json,
+                        ColorMessage.ChonkySlide::class.java
+                    )
+                    MSGTYPE.ONE_BY_ONE -> context.deserialize(
+                        json,
+                        ColorMessage.OneByOneMessage::class.java
+                    )
+                    MSGTYPE.FLASHY -> context.deserialize(json, FlashingAnnouncement::class.java)
+                    MSGTYPE.UTILITY -> context.deserialize(json, UtilityMessage::class.java)
+                    MSGTYPE.KEYBOARD -> context.deserialize(json, KeyboardEcho::class.java)
+                    MSGTYPE.CHOOSER -> context.deserialize(json, Chooser::class.java)
+                    MSGTYPE.ICON -> context.deserialize(json, IconInvaders::class.java)
+                    MSGTYPE.TRACKID -> context.deserialize(json, NowPlayingTrackMessage::class.java)
+                    MSGTYPE.DEFAULT -> context.deserialize(json, UserMessage::class.java)
+                    else -> context.deserialize(json, UserMessage::class.java)
+                }
+            } catch (e: JsonParseException) {
+                context.deserialize(json, UserMessage::class.java)
+            }
+    }
 
 }
-
+//
+//object Json {
+//    val gson: Gson =
+//        GsonBuilder().registerTypeAdapterFactory(
+//            object : TypeAdapterFactory {
+//                override fun <T : Any> create(gson: Gson, type: TypeToken<T>): TypeAdapter<T> {
+//                    val kclass = Reflection.getOrCreateKotlinClass(type.rawType)
+//                    return if (kclass.sealedSubclasses.any()) {
+//                        SealedClassTypeAdapter<T>(kclass, gson)
+//                    } else
+//                        gson.getDelegateAdapter(this, type)
+//                }
+//            }).create()
+//
+//    inline fun <reified T> fromJson(x: String): T = this.gson.fromJson(x, T::class.java)
+//
+//    fun <T> fromJsonWithClass(x: String, classObj: Class<T>): T =
+//        this.gson.fromJson(x, classObj)
+//
+//    fun <T> toJson(item: T): String = this.gson.toJson(item)
+//}
+//
+//class SealedClassTypeAdapter<T : Any>(val kclass: KClass<Any>, val gson: Gson) : TypeAdapter<T>() {
+//    override fun read(jsonReader: JsonReader): T? {
+//        jsonReader.beginObject() //start reading the object
+//        val nextName = jsonReader.nextName() //get the name on the object
+//        val innerClass = kclass.sealedSubclasses.firstOrNull {
+//            it.simpleName!!.contains(nextName)
+//        }
+//            ?: throw Exception("$nextName is not found to be a data class of the sealed class ${kclass.qualifiedName}")
+//        val x = gson.fromJson<T>(jsonReader, innerClass.javaObjectType)
+//        jsonReader.endObject()
+//        //if there a static object, actually return that back to ensure equality and such!
+//        return innerClass.objectInstance as T? ?: x
+//    }
+//
+//    override fun write(out: JsonWriter, value: T) {
+//        val jsonString = gson.toJson(value)
+//        out.beginObject()
+//        out.name(value.javaClass.canonicalName?.splitToSequence(".")?.last() ?: "").jsonValue(jsonString)
+//        out.endObject()
+//    }
+//
+//}

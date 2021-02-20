@@ -15,7 +15,7 @@
  */
 
 buildscript {
-    ext.kotlin_version = '1.4.0'
+    ext.kotlin_version = '1.4.30'
     repositories {
         google()
         jcenter()
@@ -24,7 +24,7 @@ buildscript {
 //    ext.atomicfu_version = '0.14.3'
 
     dependencies {
-        classpath 'com.android.tools.build:gradle:4.0.1'
+        classpath 'com.android.tools.build:gradle:4.1.2'
         classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
 
         // Check that you have the Google Services Gradle plugin v4.3.2 or later
