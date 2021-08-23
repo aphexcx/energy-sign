@@ -3,6 +3,7 @@ package cx.aphex.energysign.bluetooth
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
@@ -12,8 +13,10 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.ParcelUuid
+import com.google.android.things.bluetooth.*
 import cx.aphex.energysign.MainViewModel
 import cx.aphex.energysign.ext.logD
+import cx.aphex.energysign.ext.logE
 import cx.aphex.energysign.ext.logW
 import io.reactivex.rxjava3.core.Observable
 
@@ -33,9 +36,21 @@ class EnergySignBluetoothManager(
 
     val receivedBytes: Observable<ByteArray> = energySignBluetoothGattServer.receivedBytes
 
+    private lateinit var bluetoothConnectionManager: BluetoothConnectionManager
+
+
     init {
         energySignBluetoothGattServer.bluetoothStatusUpdates.subscribe {
             viewModel.onBtStatusUpdate(it)
+        }
+
+        val profileManager = BluetoothProfileManager.getInstance()
+        val enabledProfiles = profileManager.enabledProfiles
+        bluetoothAdapter.startDiscovery()
+
+        bluetoothConnectionManager = BluetoothConnectionManager.getInstance().apply {
+            registerPairingCallback(bluetoothPairingCallback)
+            registerConnectionCallback(bluetoothConnectionCallback)
         }
     }
 
@@ -79,6 +94,113 @@ class EnergySignBluetoothManager(
 
     val BLE_PIN: String = "123456"
 
+
+    private fun startPairing(remoteDevice: BluetoothDevice) {
+        bluetoothConnectionManager.initiatePairing(remoteDevice)
+    }
+
+    private val bluetoothPairingCallback = object : BluetoothPairingCallback {
+
+        override fun onPairingInitiated(
+            bluetoothDevice: BluetoothDevice,
+            pairingParams: PairingParams
+        ) {
+            logD("Pairing initiated: ${bluetoothDevice.name}")
+            // Handle incoming pairing request or confirmation of outgoing pairing request
+            handlePairingRequest(bluetoothDevice, pairingParams)
+        }
+
+        override fun onPaired(bluetoothDevice: BluetoothDevice) {
+            // Device pairing complete
+            logD("Device pairing complete: ${bluetoothDevice.name}")
+        }
+
+        override fun onUnpaired(bluetoothDevice: BluetoothDevice) {
+            // Device unpaired
+        }
+
+        override fun onPairingError(
+            bluetoothDevice: BluetoothDevice,
+            pairingError: BluetoothPairingCallback.PairingError
+        ) {
+            // Something went wrong!
+            logE(pairingError.toString())
+        }
+    }
+
+    private fun handlePairingRequest(
+        bluetoothDevice: BluetoothDevice,
+        pairingParams: PairingParams
+    ) {
+        when (pairingParams.pairingType) {
+            PairingParams.PAIRING_VARIANT_DISPLAY_PIN,
+            PairingParams.PAIRING_VARIANT_DISPLAY_PASSKEY -> {
+                // Display the required PIN to the user
+                logD("Display Passkey - ${pairingParams.pairingPin}")
+            }
+            PairingParams.PAIRING_VARIANT_PIN, PairingParams.PAIRING_VARIANT_PIN_16_DIGITS -> {
+                // Obtain PIN from the user
+                val pin = "1234"
+                // Pass the result to complete pairing
+                bluetoothConnectionManager.finishPairing(bluetoothDevice, pin)
+            }
+            PairingParams.PAIRING_VARIANT_CONSENT,
+            PairingParams.PAIRING_VARIANT_PASSKEY_CONFIRMATION -> {
+                // Show confirmation of pairing to the user
+                //...
+                // Complete the pairing process
+                bluetoothConnectionManager.finishPairing(bluetoothDevice)
+                logD("FINISH PAIRING: ${bluetoothDevice.name}")
+                bluetoothConnectionManager.connect(bluetoothDevice, BluetoothProfile.HID_DEVICE)
+            }
+        }
+    }
+
+    // Set up callbacks for the profile connection process.
+    private val bluetoothConnectionCallback = object : BluetoothConnectionCallback {
+        override fun onConnectionRequested(
+            bluetoothDevice: BluetoothDevice,
+            connectionParams: ConnectionParams
+        ) {
+            // Handle incoming connection request
+            handleConnectionRequest(bluetoothDevice, connectionParams)
+        }
+
+        override fun onConnectionRequestCancelled(
+            bluetoothDevice: BluetoothDevice,
+            requestType: Int
+        ) {
+            // Request cancelled
+        }
+
+        override fun onConnected(bluetoothDevice: BluetoothDevice, profile: Int) {
+            // Connection completed successfully
+            logD("CONNECTED: ${bluetoothDevice.name}")
+        }
+
+        override fun onDisconnected(bluetoothDevice: BluetoothDevice, profile: Int) {
+            // Remote device disconnected
+            logD("DISCONNECTED: ${bluetoothDevice.name}")
+        }
+    }
+
+    private fun handleConnectionRequest(
+        bluetoothDevice: BluetoothDevice,
+        connectionParams: ConnectionParams
+    ) {
+        // Determine whether to accept the connection request
+        val accept =
+            connectionParams.requestType == ConnectionParams.REQUEST_TYPE_PROFILE_CONNECTION
+        logD("Handle connection request: ${bluetoothDevice.name}")
+
+        // Pass that result on to the BluetoothConnectionManager
+        bluetoothConnectionManager.confirmOrDenyConnection(
+            bluetoothDevice,
+            connectionParams,
+            accept
+        )
+    }
+
     /**
      * Listens for Bluetooth pairing requests and bond state changes
      */
@@ -118,7 +240,18 @@ class EnergySignBluetoothManager(
                     // MAC address
                     logD("Bluetooth device found!")
                     logD("Device Name: >${bluetoothDevice.name}<")
+//                    logD("Device Alias: >${bluetoothDevice.alias}<")
                     logD("deviceHardwareAddress >${bluetoothDevice.address}<")
+                    if (bluetoothDevice.name == "DIERYA      ") {
+                        bluetoothAdapter.cancelDiscovery()
+                        startPairing(bluetoothDevice)
+//                        val willBondingBegin = bluetoothDevice.createBond()
+//                        logD("Will I be bonding to ${bluetoothDevice.name}?... $willBondingBegin")
+                        bluetoothDevice.bluetoothClass.deviceClass
+//                        bluetoothDevice.con
+                        bluetoothAdapter
+//                        bluetoothDevice.setPairingConfirmation(true)
+                    }
                 }
             }
         }
