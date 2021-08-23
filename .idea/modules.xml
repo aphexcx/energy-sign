@@ -2,8 +2,8 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/app/app.iml" filepath="$PROJECT_DIR$/app/app.iml" group="bluetooth-gatt-server/app" />
-      <module fileurl="file://$PROJECT_DIR$/bluetooth-gatt-server.iml" filepath="$PROJECT_DIR$/bluetooth-gatt-server.iml" group="bluetooth-gatt-server" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/bluetooth-gatt-server.iml" filepath="$PROJECT_DIR$/.idea/modules/bluetooth-gatt-server.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/app/bluetooth-gatt-server.app.iml" filepath="$PROJECT_DIR$/.idea/modules/app/bluetooth-gatt-server.app.iml" />
     </modules>
   </component>
 </project>

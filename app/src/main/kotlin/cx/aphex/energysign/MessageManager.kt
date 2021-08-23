@@ -46,9 +46,13 @@ class MessageManager(val context: Context) {
     init {
         userMessages.addAll(loadUserMessages())
 
+        val ads = loadAds()
 
         advertisements.addAll(
-            loadAds()
+            when { // When I fix ad loading, don't need this when anymore, because loading the default ads from ads.json will work on fresh installs.
+                ads.isEmpty() -> DEFAULT_ADS
+                else -> ads
+            }
 //            listOf(
 //                Message.ColorMessage.ChonkySlide("QUARAN", context.getColor(R.color.instagram)),
 //                Message.ColorMessage.ChonkySlide("TRANCE", context.getColor(R.color.instagram)),
@@ -63,7 +67,7 @@ class MessageManager(val context: Context) {
 //                    "@APHEXCX",
 //                    context.getColor(R.color.instahandle),
 //                    delayMs = 1000
-//                ),
+//                )
 //                Message.ColorMessage.OneByOneMessage("TWITTER:", context.getColor(R.color.twitter)),
 //                Message.ColorMessage.OneByOneMessage(
 //                    "@APHEX",
@@ -360,6 +364,13 @@ class MessageManager(val context: Context) {
     private fun loadAds(): List<Message> {
         try {
             with(File(context.filesDir, ADS_FILE_NAME)) {
+                when (createNewFile()) {
+                    true -> {
+                        logD("$ADS_FILE_NAME does not exist; created new, with default ad of <Invaders>.")
+                        writeText(gson.toJson(DEFAULT_ADS))
+                        return DEFAULT_ADS
+                    }
+                }
                 val typeOfT: Type = object : TypeToken<List<Message>>() {}.type
                 return gson.fromJson(readText(), typeOfT)
             }
@@ -426,7 +437,7 @@ class MessageManager(val context: Context) {
     }
 
     internal fun processNewKeyboardKey(key: Char) {
-        if (key.toInt() == 0) {
+        if (key.code == 0) {
             logD("Invalid key!")
             return
         }
@@ -496,6 +507,7 @@ class MessageManager(val context: Context) {
     companion object {
         private const val SIGN_STRINGS_FILE_NAME = "signstrings.txt"
         private const val ADS_FILE_NAME = "ads.json"
+        private val DEFAULT_ADS = listOf(Message.Icon.Invaders)
         private const val MAX_SIGN_STRINGS: Int = 1000
 
         //How often to advertise, e.g. every 5 marquee scrolls

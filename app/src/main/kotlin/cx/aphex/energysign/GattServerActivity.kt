@@ -66,10 +66,6 @@ class GattServerActivity : AppCompatActivity() {
             bindService(intent, connection, Context.BIND_AUTO_CREATE)
         }
 
-//        val profileManager = BluetoothProfileManager.getInstance()
-//        val enabledProfiles = profileManager.enabledProfiles
-//        bluetoothAdapter.startDiscovery()
-
         viewModel.currentString.observeNonNull(this) {
             current_string.text = STRING_PREFIX + it
         }
