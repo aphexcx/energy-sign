@@ -2,6 +2,7 @@ package cx.aphex.energysign.ext
 
 
 import android.util.Log
+import com.google.firebase.crashlytics.FirebaseCrashlytics
 import cx.aphex.energysign.ScreenLogger
 import org.funktionale.memoization.memoize
 import kotlin.reflect.KClass
@@ -43,11 +44,11 @@ private val Class<out Any>.firstNonLambdaEnclosingClass: Class<out Any>
 /**
  * Log a crashlytics message and exception as *Non-fatal*, or logs to the Android system in **INTERNAL builds**.
  */
-//fun Any.crashlyticsLogNonfatal(message: String, throwable: Throwable) {
-//    logE(message, throwable)
-//    FirebaseCrashlytics.getInstance().log(message)
-//    FirebaseCrashlytics.getInstance().recordException(throwable)
-//}
+fun Any.crashlyticsLogNonfatal(message: String, throwable: Throwable) {
+    logE(message, throwable)
+    FirebaseCrashlytics.getInstance().log(message)
+    FirebaseCrashlytics.getInstance().recordException(throwable)
+}
 
 ///**
 // * Log a crashlytics exception as *Non-fatal*, & logs to the Android system in **INTERNAL builds**.

@@ -16,9 +16,9 @@
 apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
 apply plugin: 'kotlin-android-extensions'
-//apply plugin: 'com.google.gms.google-services' // Google Services Gradle plugin
+apply plugin: 'com.google.gms.google-services' // Google Services Gradle plugin
 // Apply the Crashlytics Gradle plugin
-//apply plugin: 'com.google.firebase.crashlytics'
+apply plugin: 'com.google.firebase.crashlytics'
 //apply plugin: 'kotlinx-atomicfu'
 
 android {
@@ -71,7 +71,11 @@ dependencies {
     implementation 'com.ibm.icu:icu4j:67.1'
 
     // Add the Firebase Crashlytics SDK.
-//    implementation 'com.google.firebase:firebase-crashlytics:17.2.1'
+    implementation platform('com.google.firebase:firebase-bom:28.4.0')
+
+    implementation 'com.google.firebase:firebase-crashlytics'
+    implementation 'com.google.firebase:firebase-analytics'
+    implementation 'com.google.firebase:firebase-analytics-ktx'
 
     implementation "org.funktionale:funktionale-memoization:1.2"
 
