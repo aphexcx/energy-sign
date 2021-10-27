@@ -1,5 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!--
+<?xml version="1.0" encoding="utf-8"?><!--
   Copyright (C) 2018 The Android Open Source Project
 
   Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,12 +13,14 @@
   See the License for the specific language governing permissions and
   limitations under the License.
   -->
-<manifest package="cx.aphex.energysign"
-    xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="cx.aphex.energysign">
 
     <uses-permission android:name="android.permission.BLUETOOTH" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
     <uses-permission android:name="com.google.android.things.permission.MANAGE_BLUETOOTH" />
 
     <uses-permission android:name="com.google.android.things.permission.USE_PERIPHERAL_IO" />
@@ -33,7 +34,9 @@
         android:theme="@style/Theme.AppCompat.NoActionBar">
         <uses-library android:name="com.google.android.things" />
 
-        <activity android:name=".GattServerActivity">
+        <activity
+            android:name=".GattServerActivity"
+            android:exported="true">
 
             <!-- Launch as default from Android Studio -->
             <intent-filter>

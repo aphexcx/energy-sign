@@ -2,7 +2,6 @@ package cx.aphex.energysign
 
 import android.content.Context
 import com.google.gson.Gson
-import com.google.gson.reflect.TypeToken
 import com.vdurmont.emoji.EmojiParser
 import cx.aphex.energysign.Message.FlashingAnnouncement.NewMessageAnnouncement
 import cx.aphex.energysign.Message.FlashingAnnouncement.NowPlayingAnnouncement
@@ -15,7 +14,6 @@ import kotlinx.atomicfu.atomic
 import kotlinx.atomicfu.getAndUpdate
 import kotlinx.atomicfu.update
 import java.io.File
-import java.lang.reflect.Type
 import java.util.Collections.synchronizedList
 
 
@@ -46,7 +44,8 @@ class MessageManager(val context: Context) {
     init {
         userMessages.addAll(loadUserMessages())
 
-        val ads = loadAds()
+        //TODO fix deserialization
+        val ads: List<Message> = loadAds()
 
         advertisements.addAll(
             when { // When I fix ad loading, don't need this when anymore, because loading the default ads from ads.json will work on fresh installs.
@@ -67,7 +66,7 @@ class MessageManager(val context: Context) {
 //                    "@APHEXCX",
 //                    context.getColor(R.color.instahandle),
 //                    delayMs = 1000
-//                )
+//                ),
 //                Message.ColorMessage.OneByOneMessage("TWITTER:", context.getColor(R.color.twitter)),
 //                Message.ColorMessage.OneByOneMessage(
 //                    "@APHEX",
@@ -140,7 +139,7 @@ class MessageManager(val context: Context) {
         } ?: emptyList()
 
         // Hack to avoid advertising back to back with another advertisement.
-        if (!oneTimeMessages.contains(Message.Icon.Invaders)) {
+        if (!oneTimeMessages.contains(Message.IconInvaders.Enemy1)) {
             val ads = advertisements.flatMap {
                 if (it is Message.NowPlayingTrackMessage) {
                     nowPlayingMsgs
@@ -154,41 +153,43 @@ class MessageManager(val context: Context) {
 
     @OptIn(ExperimentalStdlibApi::class)
     fun getNextMessage(): Message {
-        if (keyboardStringBuilder.isNotEmpty()) {
-            val timeElapsedSinceLastInput =
-                System.currentTimeMillis() - lastKeyboardInputReceivedAtMs
-
-            if (timeElapsedSinceLastInput > KEYBOARD_INPUT_TIMEOUT_MS) {
-                keyboardStringBuilder.clear()
-            }
-
-            if (timeElapsedSinceLastInput < KEYBOARD_INPUT_TIMEOUT_MS) {
-                if (timeElapsedSinceLastInput > (KEYBOARD_INPUT_TIMEOUT_MS - KEYBOARD_INPUT_WARNING_MS)) {
-                    // Running out of input time! Display this in input warning mode.
-                    return Message.KeyboardEcho.InputWarning(keyboardStringBuilder.toString())
-                } else {
-                    return Message.KeyboardEcho.Input(keyboardStringBuilder.toString())
-                }
-            }
-        }
-
-        if (oneTimeMessages.isEmpty() && userMessages.isEmpty()) {
-            logD("No messages to display; injecting advertisement")
-            pushAdvertisements()
-        }
-
-        oneTimeMessages.removeFirstOrNull()?.let {
-            return it
-        }
-
         if (isChooserModeEnabled) {
             val idx = currentIdx.value
             val currentUsrMsg: Message.UserMessage =
-                userMessages[idx].let { it.copy(str = it.str.take(7)) }
+                userMessages.getOrNull(idx)?.let { it.copy(str = it.str.take(7)) }
+                    ?: Message.UserMessage("<empty>")
             logD("getNextMessage: currentMessage is now messages[$idx] = $currentUsrMsg")
             logD("Sending messages[$idx] as chooser!")
             return Message.Chooser(idx + 1, userMessages.lastIndex + 1, currentUsrMsg)
         } else {
+
+            if (keyboardStringBuilder.isNotEmpty()) {
+                val timeElapsedSinceLastInput =
+                    System.currentTimeMillis() - lastKeyboardInputReceivedAtMs
+
+                if (timeElapsedSinceLastInput > KEYBOARD_INPUT_TIMEOUT_MS) {
+                    keyboardStringBuilder.clear()
+                }
+
+                if (timeElapsedSinceLastInput < KEYBOARD_INPUT_TIMEOUT_MS) {
+                    if (timeElapsedSinceLastInput > (KEYBOARD_INPUT_TIMEOUT_MS - KEYBOARD_INPUT_WARNING_MS)) {
+                        // Running out of input time! Display this in input warning mode.
+                        return Message.KeyboardEcho.InputWarning(keyboardStringBuilder.toString())
+                    } else {
+                        return Message.KeyboardEcho.Input(keyboardStringBuilder.toString())
+                    }
+                }
+            }
+
+            if (oneTimeMessages.isEmpty() && userMessages.isEmpty()) {
+                logD("No messages to display; injecting advertisement")
+                pushAdvertisements()
+            }
+
+            oneTimeMessages.removeFirstOrNull()?.let {
+                return it
+            }
+
             val idx = getIdxAndAdvance()
             val currentUsrMsg: Message.UserMessage = userMessages[idx]
             logD("getNextMessage: currentMessage is now messages[$idx] = $currentUsrMsg")
@@ -259,7 +260,6 @@ class MessageManager(val context: Context) {
             "!micOff", "!🔇" -> {
                 pushOneTimeMessage(Message.UtilityMessage.DisableMic)
             }
-
             else -> {
                 when {
                     cmd.startsWith("!🅰") -> {
@@ -278,6 +278,14 @@ class MessageManager(val context: Context) {
 //                        🛤️
 //                        👾
                         processAdChange(cmd.drop(2))
+                    }
+
+                    cmd.startsWith("!B", ignoreCase = true) -> {
+                        pushOneTimeMessage(
+                            Message.UtilityMessage.BrightnessShift(
+                                cmd.drop(2).trim().toIntOrNull()
+                            )
+                        )
                     }
                 }
             }
@@ -345,7 +353,7 @@ class MessageManager(val context: Context) {
                     Message.NowPlayingTrackMessage("")
                 }
                 line.startsWith("👾") -> {
-                    Message.Icon.Invaders
+                    Message.IconInvaders.Enemy1
                 }
                 else -> null
             }
@@ -371,8 +379,11 @@ class MessageManager(val context: Context) {
                         return DEFAULT_ADS
                     }
                 }
-                val typeOfT: Type = object : TypeToken<List<Message>>() {}.type
-                return gson.fromJson(readText(), typeOfT)
+//                val typeOfT: Type =
+//                    TypeToken.getParameterized(List::class.java, Message::class.java).type
+//                object : TypeToken<List<Message>>() {}.type
+                val ads = gson.fromJson(readText(), Array<Message>::class.java).toList()
+                return ads
             }
         } catch (e: Throwable) {
             logW("Exception when loading ${ADS_FILE_NAME}! ${e.message}")
@@ -437,6 +448,7 @@ class MessageManager(val context: Context) {
     }
 
     internal fun processNewKeyboardKey(key: Char) {
+        //TODO key.toInt() needed here?
         if (key.code == 0) {
             logD("Invalid key!")
             return
@@ -507,10 +519,11 @@ class MessageManager(val context: Context) {
     companion object {
         private const val SIGN_STRINGS_FILE_NAME = "signstrings.txt"
         private const val ADS_FILE_NAME = "ads.json"
-        private val DEFAULT_ADS = listOf(Message.Icon.Invaders)
+        private val DEFAULT_ADS = listOf(Message.IconInvaders.Enemy1, Message.IconInvaders.BAAAHS)
         private const val MAX_SIGN_STRINGS: Int = 1000
 
         //How often to advertise, e.g. every 5 marquee scrolls
+        //TODO make this a utilitymessage-settable setting
         private const val ADVERTISE_EVERY: Int = 8
 
         private const val MINIMUM_INPUT_ENTRY_PERIOD: Int = 5_000
