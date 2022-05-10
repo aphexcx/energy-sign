@@ -297,7 +297,20 @@ class MessageManager(val context: Context) {
                             )
                         )
                     }
+
+                    cmd.startsWith("!find", ignoreCase = true) -> {
+                        findUserMessage(cmd.split(" ").drop(1).joinToString(" "))
+                    }
                 }
+            }
+        }
+    }
+
+    private fun findUserMessage(query: String) {
+        val idx = userMessages.indexOfFirst { it.str.contains(query, ignoreCase = true) }
+        if (idx != -1) {
+            currentIdx.update {
+                idx
             }
         }
     }
