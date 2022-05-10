@@ -4,6 +4,9 @@
     <modules>
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/bluetooth-gatt-server.iml" filepath="$PROJECT_DIR$/.idea/modules/bluetooth-gatt-server.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/app/bluetooth-gatt-server.app.iml" filepath="$PROJECT_DIR$/.idea/modules/app/bluetooth-gatt-server.app.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/app/bluetooth-gatt-server.app.androidTest.iml" filepath="$PROJECT_DIR$/.idea/modules/app/bluetooth-gatt-server.app.androidTest.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/app/bluetooth-gatt-server.app.main.iml" filepath="$PROJECT_DIR$/.idea/modules/app/bluetooth-gatt-server.app.main.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/app/bluetooth-gatt-server.app.unitTest.iml" filepath="$PROJECT_DIR$/.idea/modules/app/bluetooth-gatt-server.app.unitTest.iml" />
     </modules>
   </component>
 </project>
