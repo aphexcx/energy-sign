@@ -217,25 +217,31 @@ class MessageManager(val context: Context) {
     private fun processUartCommand(value: ByteArray) {
         logD("Procesing Uart command ${String(value)}")
         when (val cmd = String(value)) {
+            "!c",
             "!choose" -> {
                 isChooserModeEnabled = true
             }
+            "!pr",
             "!prev" -> {
                 currentIdx.update {
                     if (it > 0) it - 1 else 0
                 }
             }
+            "!ne",
             "!next" -> {
                 currentIdx.update {
                     if (it < userMessages.lastIndex) it + 1 else userMessages.lastIndex
                 }
             }
+            "!f",
             "!first" -> {
                 currentIdx.value = 0
             }
+            "!l",
             "!last" -> {
                 currentIdx.value = userMessages.lastIndex
             }
+            "!d",
             "!delete" -> {
                 if (userMessages.isNotEmpty()) {
                     userMessages.removeAt(currentIdx.value)
@@ -245,19 +251,23 @@ class MessageManager(val context: Context) {
                     saveUserMessages()
                 }
             }
+            "!ec",
             "!endchoose" -> {
                 isChooserModeEnabled = false
             }
+            "!p",
             "!pause" -> {
                 isPaused = true
             }
+            "!up",
             "!unpause" -> {
                 isPaused = false
             }
             "!micOn" -> {
                 pushOneTimeMessage(Message.UtilityMessage.EnableMic)
             }
-            "!micOff", "!🔇" -> {
+            "!🔇",
+            "!micOff" -> {
                 pushOneTimeMessage(Message.UtilityMessage.DisableMic)
             }
             else -> {
