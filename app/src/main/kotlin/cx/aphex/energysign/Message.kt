@@ -54,8 +54,14 @@ sealed class Message {
     sealed class FlashingAnnouncement(override val str: String) : Message() {
         override val type: MSGTYPE = MSGTYPE.FLASHY
 
-        object NewMessageAnnouncement : FlashingAnnouncement("NEW MSG IN")
         object NowPlayingAnnouncement : FlashingAnnouncement("NOW${VT}PLAYING")
+        class CustomFlashyAnnouncement(str: String) : FlashingAnnouncement(str)
+    }
+
+    sealed class CountDownAnnouncement(override val str: String) : Message() {
+        override val type: MSGTYPE = MSGTYPE.COUNTDOWN
+
+        object NewMessageAnnouncement : CountDownAnnouncement("NEW${VT}MSG${VT}")
     }
 
     sealed class IconInvaders(override val str: String) : Message() {
@@ -105,6 +111,7 @@ sealed class Message {
         CHONKY_SLIDE('C'),
         ONE_BY_ONE('O'),
         FLASHY('F'),
+        COUNTDOWN('W'),
         UTILITY('U'),
         KEYBOARD('K'),
         CHOOSER('H'),

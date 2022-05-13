@@ -3,7 +3,6 @@ package cx.aphex.energysign
 import android.content.Context
 import com.google.gson.Gson
 import com.vdurmont.emoji.EmojiParser
-import cx.aphex.energysign.Message.FlashingAnnouncement.NewMessageAnnouncement
 import cx.aphex.energysign.Message.FlashingAnnouncement.NowPlayingAnnouncement
 import cx.aphex.energysign.beatlinkdata.BeatLinkTrack
 import cx.aphex.energysign.ext.logD
@@ -40,6 +39,9 @@ class MessageManager(val context: Context) {
     /**/
 
     private var keyboardStringBuilder: StringBuilder = StringBuilder()
+
+    //How often to advertise, e.g. every 5 user messages
+    private var advertiseEvery: Int = 8
 
     init {
         userMessages.addAll(loadUserMessages())
@@ -94,7 +96,7 @@ class MessageManager(val context: Context) {
     fun processNewUserMessage(str: String) {
         currentIdx.value = 0
 
-        enqueueOneTimeMessage(NewMessageAnnouncement)
+        enqueueOneTimeMessage(Message.CountDownAnnouncement.NewMessageAnnouncement)
         pushUserMessage(Message.UserMessage(str.toNormalized()))
 
 //        String(value).split("++").filter { it.isNotBlank() }.reversed().forEach {
@@ -195,7 +197,7 @@ class MessageManager(val context: Context) {
             logD("getNextMessage: currentMessage is now messages[$idx] = $currentUsrMsg")
             logD("Sending messages[$idx]")
             usrMsgCount++
-            if (usrMsgCount % ADVERTISE_EVERY == 0) {
+            if (usrMsgCount % advertiseEvery == 0) {
                 logD("Advertise period reached; injecting advertisement")
                 pushAdvertisements()
             }
@@ -296,6 +298,15 @@ class MessageManager(val context: Context) {
                                 cmd.drop(2).trim().toIntOrNull()
                             )
                         )
+                    }
+
+                    cmd.startsWith("!A", ignoreCase = true) -> {
+                        cmd.drop(2).trim().toIntOrNull()?.let { newPeriod ->
+                            advertiseEvery = newPeriod
+                            pushOneTimeMessage(
+                                Message.FlashingAnnouncement.CustomFlashyAnnouncement("AD EVERY=$advertiseEvery")
+                            )
+                        }
                     }
 
                     cmd.startsWith("!find", ignoreCase = true) -> {
@@ -544,10 +555,6 @@ class MessageManager(val context: Context) {
         private const val ADS_FILE_NAME = "ads.json"
         private val DEFAULT_ADS = listOf(Message.IconInvaders.Enemy1, Message.IconInvaders.BAAAHS)
         private const val MAX_SIGN_STRINGS: Int = 1000
-
-        //How often to advertise, e.g. every 5 marquee scrolls
-        //TODO make this a utilitymessage-settable setting
-        private const val ADVERTISE_EVERY: Int = 8
 
         private const val MINIMUM_INPUT_ENTRY_PERIOD: Int = 5_000
         private const val KEYBOARD_INPUT_TIMEOUT_MS: Int = 30_000
