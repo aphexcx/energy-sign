@@ -333,55 +333,29 @@ class MessageManager(val context: Context) {
 
             when {
                 line.startsWith("🆑") -> {
+                    val color: Int? = emojiToColor(line)
                     val str = line //.substring(line.offsetByCodePoints(0, 2))
                         .toNormalized()
                     //.trim()
 
                     Message.ColorMessage.ChonkySlide(
                         str,
-                        context.getColor(R.color.instagram),
+                        color ?: context.getColor(R.color.chonkyslide_defaultpink),
                         delay.toShort()
                     )
                 }
                 line.startsWith("🅾") -> { // idk why this is 3, i imagine it should be 1
-                    val color: Int? = when {
-                        line.contains("💛") -> {
-                            context.getColor(R.color.instagram)
-                        }
-                        // ❤️
-                        line.contains("🔴") || line.contains("❤️") -> {
-                            context.getColor(R.color.instahandle)
-                        }
-                        line.contains("💙") -> {
-                            context.getColor(R.color.twitter)
-                        }
-                        line.contains("🧡") -> {
-                            context.getColor(R.color.soundcloud)
-                        }
-                        line.contains("💜") -> {
-                            context.getColor(R.color.twitch)
-                        }
-                        line.contains("💚") -> {
-                            context.getColor(R.color.green)
-                        }
-                        line.contains("💗") -> {
-                            context.getColor(R.color.pink)
-                        }
-                        else -> null
-                    }
+                    val color: Int? = emojiToColor(line)
                     val str = line //.substring(line.offsetByCodePoints(0, 3))
                         .toNormalized()
                     //.trim()
 
-                    if (color != null) {
-                        Message.ColorMessage.OneByOneMessage(str, color, delay.toShort())
-                    } else {
-                        Message.ColorMessage.OneByOneMessage(
-                            str,
-                            context.getColor(R.color.instagram),
-                            delay.toShort()
-                        )
-                    }
+                    Message.ColorMessage.OneByOneMessage(
+                        str,
+                        color ?: context.getColor(R.color.instagram),
+                        delay.toShort()
+                    )
+
                 }
                 line.startsWith("🛤") -> {
                     Message.NowPlayingTrackMessage("")
@@ -394,6 +368,32 @@ class MessageManager(val context: Context) {
         }
 
         replaceAdsWith(ads)
+    }
+
+    private fun emojiToColor(line: String): Int? = when {
+        line.contains("💛") -> {
+            context.getColor(R.color.instagram)
+        }
+        // ❤️
+        line.contains("🔴") || line.contains("❤️") -> {
+            context.getColor(R.color.instahandle)
+        }
+        line.contains("💙") -> {
+            context.getColor(R.color.twitter)
+        }
+        line.contains("🧡") -> {
+            context.getColor(R.color.soundcloud)
+        }
+        line.contains("💜") -> {
+            context.getColor(R.color.twitch)
+        }
+        line.contains("💚") -> {
+            context.getColor(R.color.green)
+        }
+        line.contains("💗") -> {
+            context.getColor(R.color.pink)
+        }
+        else -> null
     }
 
     private fun replaceAdsWith(ads: List<Message>) {

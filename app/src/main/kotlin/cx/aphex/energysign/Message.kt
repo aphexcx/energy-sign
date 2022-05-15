@@ -45,8 +45,8 @@ sealed class Message {
             override val str: String,
             @Transient @ColorInt val colorCycle: Int,
             @SerializedName("dly") override val delayMs: Short = 1000,
-//        val colorFrom: Color,
-//        val colorTo: Color
+//            val colorFrom: Color,
+//            val colorTo: Color,
             override val type: MSGTYPE = MSGTYPE.CHONKY_SLIDE
         ) : ColorMessage(colorCycle)
     }
