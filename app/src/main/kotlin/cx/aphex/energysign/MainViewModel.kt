@@ -71,6 +71,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         messageManager.deleteKey()
     }
 
+    fun escapeKey() {
+        messageManager.escapeKey()
+    }
+
     fun processNewKeyboardKey(key: Char) {
         messageManager.processNewKeyboardKey(key)
     }

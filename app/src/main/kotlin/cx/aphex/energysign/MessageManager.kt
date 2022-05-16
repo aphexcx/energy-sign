@@ -38,6 +38,8 @@ class MessageManager(val context: Context) {
     private var isPaused: Boolean = false
     /**/
 
+    private var isInKeyboardInput: Boolean = false
+    private var showAsWarning: Boolean = false
     private var keyboardStringBuilder: StringBuilder = StringBuilder()
 
     //How often to advertise, e.g. every 5 user messages
@@ -153,7 +155,6 @@ class MessageManager(val context: Context) {
         }
     }
 
-    @OptIn(ExperimentalStdlibApi::class)
     fun getNextMessage(): Message {
         if (isChooserModeEnabled) {
             val idx = currentIdx.value
@@ -165,16 +166,20 @@ class MessageManager(val context: Context) {
             return Message.Chooser(idx + 1, userMessages.lastIndex + 1, currentUsrMsg)
         } else {
 
-            if (keyboardStringBuilder.isNotEmpty()) {
+            if (isInKeyboardInput) {
                 val timeElapsedSinceLastInput =
                     System.currentTimeMillis() - lastKeyboardInputReceivedAtMs
 
+                showAsWarning =
+                    timeElapsedSinceLastInput > (KEYBOARD_INPUT_TIMEOUT_MS - KEYBOARD_INPUT_WARNING_MS)
+
                 if (timeElapsedSinceLastInput > KEYBOARD_INPUT_TIMEOUT_MS) {
                     keyboardStringBuilder.clear()
+                    isInKeyboardInput = false
                 }
 
                 if (timeElapsedSinceLastInput < KEYBOARD_INPUT_TIMEOUT_MS) {
-                    if (timeElapsedSinceLastInput > (KEYBOARD_INPUT_TIMEOUT_MS - KEYBOARD_INPUT_WARNING_MS)) {
+                    if (showAsWarning) {
                         // Running out of input time! Display this in input warning mode.
                         return Message.KeyboardEcho.InputWarning(keyboardStringBuilder.toString())
                     } else {
@@ -487,6 +492,7 @@ class MessageManager(val context: Context) {
             logD("Invalid key!")
             return
         }
+        isInKeyboardInput = true
         if (keyboardStringBuilder.isEmpty()) {
             keyboardInputStartedAtMs = System.currentTimeMillis()
         }
@@ -501,6 +507,25 @@ class MessageManager(val context: Context) {
         }
     }
 
+    internal fun escapeKey() {
+        // If not blank and esc key was pressed:
+        // First show as warning if we aren't already
+        // Then clear message if we are already warning
+        if (!showAsWarning && keyboardStringBuilder.isNotBlank()) {
+            lastKeyboardInputReceivedAtMs =
+                System.currentTimeMillis() - KEYBOARD_INPUT_TIMEOUT_MS + KEYBOARD_INPUT_WARNING_MS
+        } else {
+            pushOneTimeMessage(Message.Starfield())
+            endKeyboardInput()
+        }
+    }
+
+    private fun endKeyboardInput() {
+        lastKeyboardInputReceivedAtMs = -1
+        keyboardStringBuilder.clear()
+        isInKeyboardInput = false
+    }
+
     internal fun submitKeyboardInput() {
         val totalKeyboardInputTimeElapsed = System.currentTimeMillis() - keyboardInputStartedAtMs
 //        if (keyboardStringBuilder.length < 4) {
@@ -510,12 +535,14 @@ class MessageManager(val context: Context) {
 //        } else if (keyboardStringBuilder.toString().split(' ').any { it in Dictionary.ENGLISH_DICT })
         // else if ! any words are in dict
         // NO SPAM!
-        if (totalKeyboardInputTimeElapsed > MINIMUM_INPUT_ENTRY_PERIOD
-            && keyboardStringBuilder.isNotBlank()
-        ) {
-            lastKeyboardInputReceivedAtMs = -1
-            processNewUserMessage(keyboardStringBuilder.toString())
-            keyboardStringBuilder.clear()
+
+        if (keyboardStringBuilder.isBlank()) {
+            endKeyboardInput()
+        } else {
+            if (totalKeyboardInputTimeElapsed > MINIMUM_INPUT_ENTRY_PERIOD) {
+                processNewUserMessage(keyboardStringBuilder.toString())
+                endKeyboardInput()
+            }
         }
     }
 

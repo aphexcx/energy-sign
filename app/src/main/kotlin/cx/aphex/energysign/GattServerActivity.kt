@@ -120,6 +120,7 @@ class GattServerActivity : AppCompatActivity() {
             when {
                 event.keyCode == KeyEvent.KEYCODE_ENTER -> viewModel.submitKeyboardInput()
                 event.keyCode == KeyEvent.KEYCODE_DEL -> viewModel.deleteKey()
+                event.keyCode == KeyEvent.KEYCODE_ESCAPE -> viewModel.escapeKey()
                 event.keyCode == KeyEvent.KEYCODE_SPACE -> viewModel.processNewKeyboardKey(' ')
                 event.isPrintingKey -> viewModel.processNewKeyboardKey(key)
                 else -> return true // super.dispatchKeyEvent(event)

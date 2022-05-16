@@ -21,6 +21,12 @@ sealed class Message {
         override val type: MSGTYPE = MSGTYPE.DEFAULT
     ) : Message()
 
+    data class Starfield(
+        override val str: String = "",
+        val stars: Int = 300,
+        override val type: MSGTYPE = MSGTYPE.STARFIELD
+    ) : Message()
+
     data class NowPlayingTrackMessage(
         override val str: String,
         override val type: MSGTYPE = MSGTYPE.TRACKID
@@ -112,6 +118,7 @@ sealed class Message {
         ONE_BY_ONE('O'),
         FLASHY('F'),
         COUNTDOWN('W'),
+        STARFIELD('S'),
         UTILITY('U'),
         KEYBOARD('K'),
         CHOOSER('H'),
