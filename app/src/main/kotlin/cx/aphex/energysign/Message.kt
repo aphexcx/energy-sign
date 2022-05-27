@@ -14,6 +14,7 @@ sealed class Message {
 
     companion object {
         const val VT: Char = '\u000B' //vertical tab or \v; single column
+        const val HEART: Char = '\u007F' //heart char (DEL)
     }
 
     data class UserMessage(

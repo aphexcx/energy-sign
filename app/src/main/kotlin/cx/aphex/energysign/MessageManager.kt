@@ -5,6 +5,7 @@ import com.google.gson.Gson
 import com.vdurmont.emoji.EmojiParser
 import cx.aphex.energysign.Message.FlashingAnnouncement.NowPlayingAnnouncement
 import cx.aphex.energysign.beatlinkdata.BeatLinkTrack
+import cx.aphex.energysign.ext.convertHeartEmojis
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
 import cx.aphex.energysign.ext.toNormalized
@@ -99,7 +100,13 @@ class MessageManager(val context: Context) {
         currentIdx.value = 0
 
         enqueueOneTimeMessage(Message.CountDownAnnouncement.NewMessageAnnouncement)
-        pushUserMessage(Message.UserMessage(str.toNormalized()))
+        pushUserMessage(
+            Message.UserMessage(
+                str
+                    .convertHeartEmojis()
+                    .toNormalized()
+            )
+        )
 
 //        String(value).split("++").filter { it.isNotBlank() }.reversed().forEach {
 //            pushStringOnList(it.replace('•', '*'))
@@ -353,6 +360,7 @@ class MessageManager(val context: Context) {
                     val color: Int? = emojiToColor(line)
                     val str = line //.substring(line.offsetByCodePoints(0, 3))
                         .toNormalized()
+
                     //.trim()
 
                     Message.ColorMessage.OneByOneMessage(

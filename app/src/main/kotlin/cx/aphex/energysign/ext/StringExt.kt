@@ -1,6 +1,23 @@
 package cx.aphex.energysign.ext
 
-import java.util.*
+import cx.aphex.energysign.Message.Companion.HEART
+
+fun String.convertHeartEmojis(): String {
+    var newStr = this
+
+//    EmojiParser.EmojiTransformer { uni ->
+//        uni.emoji.aliases //??
+//    }
+
+    val hearts: List<String> =
+        listOf("♥️", "❤️", "💙", "🧡", "💜", "💚", "💗", "❤️")
+
+    hearts.forEach { heart ->
+        newStr = newStr.replace(heart, "$HEART")
+    }
+
+    return newStr
+}
 
 fun String.toNormalized(): String {
     var newStr = this
