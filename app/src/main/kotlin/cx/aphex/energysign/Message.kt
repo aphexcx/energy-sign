@@ -102,7 +102,7 @@ sealed class Message {
     }
 
     sealed class KeyboardEcho(currentString: String, val mode: Char) : Message() {
-        override val str: String = currentString + '_'
+        override val str: String = currentString.takeLast(19) + '_'
         override val type: MSGTYPE = MSGTYPE.KEYBOARD
 
         data class Input(@Transient val currentInput: String) :

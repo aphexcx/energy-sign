@@ -320,8 +320,8 @@ class MessageManager(val context: Context) {
                             )
                         }
                     }
-
-                    cmd.startsWith("!find", ignoreCase = true) -> {
+                    cmd.startsWith("!s", ignoreCase = true) ||
+                            cmd.startsWith("!find", ignoreCase = true) -> {
                         findUserMessage(cmd.split(" ").drop(1).joinToString(" "))
                     }
                 }
