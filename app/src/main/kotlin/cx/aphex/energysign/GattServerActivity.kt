@@ -30,13 +30,13 @@ import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
 import com.chibatching.kotpref.Kotpref
 import cx.aphex.energysign.beatlinkdata.BeatLinkDataConsumerServerService
+import cx.aphex.energysign.databinding.ActivityServerBinding
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.observeNonNull
 import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers
 import io.reactivex.rxjava3.disposables.Disposable
-import kotlinx.android.synthetic.main.activity_server.*
 import java.text.SimpleDateFormat
-import java.util.*
+import java.util.Date
 
 class GattServerActivity : AppCompatActivity() {
 
@@ -44,10 +44,12 @@ class GattServerActivity : AppCompatActivity() {
 
     /* Local UI */
     private lateinit var logAdapter: LogAdapter
+    private lateinit var binding: ActivityServerBinding
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_server)
+        binding = ActivityServerBinding.inflate(layoutInflater)
+        setContentView(binding.root)
         Kotpref.init(applicationContext)
 
         timeFormat = SimpleDateFormat("HH:mm:ss")
@@ -57,7 +59,7 @@ class GattServerActivity : AppCompatActivity() {
         updateTimeView()
 
         logAdapter = LogAdapter(this)
-        log_list.adapter = logAdapter
+        binding.logList.adapter = logAdapter
 
         // Devices with a display should not go to sleep
 //        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -67,15 +69,15 @@ class GattServerActivity : AppCompatActivity() {
         }
 
         viewModel.currentString.observeNonNull(this) {
-            current_string.text = STRING_PREFIX + it
+            binding.currentString.text = STRING_PREFIX + it
         }
 
         viewModel.btAdvertiseStatus.observeNonNull(this) {
-            advertiser_status.text = it
+            binding.advertiserStatus.text = it
         }
         viewModel.btDeviceStatus.observeNonNull(this) {
-            device_status.text = it.btDevice.toUiString()
-            mtu_status.text = "Ⓜ️${it.mtu ?: "20?"}"
+            binding.deviceStatus.text = it.btDevice.toUiString()
+            binding.mtuStatus.text = "Ⓜ️${it.mtu ?: "20?"}"
         }
 
         ScreenLogger.logLines
@@ -83,7 +85,7 @@ class GattServerActivity : AppCompatActivity() {
             .subscribe { logLine ->
                 updateTimeView() //TODO mebbe run on a timer
                 logAdapter.add(logLine)
-                log_list.smoothScrollToPosition(logAdapter.itemCount)
+                binding.logList.smoothScrollToPosition(logAdapter.itemCount)
             }
 
     }
@@ -143,7 +145,7 @@ class GattServerActivity : AppCompatActivity() {
         val date = Date(System.currentTimeMillis())
         val displayDate = dateFormat.format(date)
         val displayTime = timeFormat.format(date)
-        local_time.text = "$displayDate 🕰 $displayTime"
+        binding.localTime.text = "$displayDate 🕰 $displayTime"
     }
 
     companion object {

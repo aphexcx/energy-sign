@@ -4,9 +4,8 @@ import android.content.Context
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
-import kotlinx.android.extensions.LayoutContainer
-import kotlinx.android.synthetic.main.item_log.view.*
 
 
 class LogAdapter(private val context: Context) : RecyclerView.Adapter<LogAdapter.LogViewHolder>() {
@@ -43,13 +42,10 @@ class LogAdapter(private val context: Context) : RecyclerView.Adapter<LogAdapter
         notifyItemRemoved(idx)
     }
 
-    class LogViewHolder(view: View) : RecyclerView.ViewHolder(view), LayoutContainer {
-
-        override val containerView: View?
-            get() = itemView
+    class LogViewHolder(view: View) : RecyclerView.ViewHolder(view) {
 
         fun bind(logLine: String) {
-            itemView.log_line.text = logLine
+            itemView.findViewById<TextView>(R.id.log_line).text = logLine
         }
     }
 

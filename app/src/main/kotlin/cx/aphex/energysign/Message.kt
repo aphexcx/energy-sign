@@ -161,8 +161,14 @@ sealed class Message {
             src: Message,
             typeOfSrc: Type,
             context: JsonSerializationContext
-        ): JsonElement =
-            context.serialize(src)
+        ): JsonElement {
+            return when (src) {
+//                is KeyboardEcho -> {
+//                    JsonPrimitive(src.str)
+//                }
+                else -> context.serialize(src)
+            }
+        }
 
         override fun deserialize(
             json: JsonElement,

@@ -374,7 +374,16 @@ class MessageManager(val context: Context) {
                     Message.NowPlayingTrackMessage("")
                 }
                 line.startsWith("👾") -> {
-                    Message.IconInvaders.Enemy1
+                    val icon = EmojiParser.extractEmojis(line).last()
+                    when (icon) {
+                        "👾" -> Message.IconInvaders.Enemy1
+                        "👽" -> Message.IconInvaders.Enemy2
+                        "💥" -> Message.IconInvaders.Explosion
+                        "🆎" -> Message.IconInvaders.ANJUNA
+                        "🐑" -> Message.IconInvaders.BAAAHS
+                        else -> Message.IconInvaders.Enemy1
+                    }
+
                 }
                 else -> null
             }
@@ -419,12 +428,10 @@ class MessageManager(val context: Context) {
     private fun loadAds(): List<Message> {
         try {
             with(File(context.filesDir, ADS_FILE_NAME)) {
-                when (createNewFile()) {
-                    true -> {
-                        logD("$ADS_FILE_NAME does not exist; created new, with default ad of <Invaders>.")
-                        writeText(gson.toJson(DEFAULT_ADS))
-                        return DEFAULT_ADS
-                    }
+                if (createNewFile()) {
+                    logD("$ADS_FILE_NAME does not exist; created new, with default ad of <Invaders>.")
+                    writeText(gson.toJson(DEFAULT_ADS))
+                    return DEFAULT_ADS
                 }
 //                val typeOfT: Type =
 //                    TypeToken.getParameterized(List::class.java, Message::class.java).type
@@ -588,7 +595,7 @@ class MessageManager(val context: Context) {
     companion object {
         private const val SIGN_STRINGS_FILE_NAME = "signstrings.txt"
         private const val ADS_FILE_NAME = "ads.json"
-        private val DEFAULT_ADS = listOf(Message.IconInvaders.Enemy1, Message.IconInvaders.BAAAHS)
+        private val DEFAULT_ADS = listOf(Message.IconInvaders.Enemy1, Message.IconInvaders.Enemy2)
         private const val MAX_SIGN_STRINGS: Int = 1000
 
         private const val MINIMUM_INPUT_ENTRY_PERIOD: Int = 5_000
