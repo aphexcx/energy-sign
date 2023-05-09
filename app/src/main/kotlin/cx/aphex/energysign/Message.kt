@@ -79,6 +79,7 @@ sealed class Message {
         object Explosion : IconInvaders("E")
         object ANJUNA : IconInvaders("A")
         object BAAAHS : IconInvaders("B")
+        object DREAMSTATE : IconInvaders("D")
     }
 
     /* Messages that control admin-only device modes or settings.

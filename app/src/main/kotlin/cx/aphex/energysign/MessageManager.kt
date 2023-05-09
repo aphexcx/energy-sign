@@ -381,6 +381,8 @@ class MessageManager(val context: Context) {
                         "💥" -> Message.IconInvaders.Explosion
                         "🆎" -> Message.IconInvaders.ANJUNA
                         "🐑" -> Message.IconInvaders.BAAAHS
+                        "🌌" -> Message.IconInvaders.DREAMSTATE
+//                        "🌼" -> Message.IconInvaders.EDC
                         else -> Message.IconInvaders.Enemy1
                     }
 
