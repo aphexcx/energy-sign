@@ -37,6 +37,8 @@ import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers
 import io.reactivex.rxjava3.disposables.Disposable
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.Locale
+import java.util.concurrent.TimeUnit
 
 class GattServerActivity : AppCompatActivity() {
 
@@ -45,6 +47,7 @@ class GattServerActivity : AppCompatActivity() {
     /* Local UI */
     private lateinit var logAdapter: LogAdapter
     private lateinit var binding: ActivityServerBinding
+    private var appStartTime: Long = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -52,8 +55,9 @@ class GattServerActivity : AppCompatActivity() {
         setContentView(binding.root)
         Kotpref.init(applicationContext)
 
-        timeFormat = SimpleDateFormat("HH:mm:ss")
+        timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
         dateFormat = DateFormat.getMediumDateFormat(this)
+        appStartTime = System.currentTimeMillis()
 
         // Initialize the local UI
         updateTimeView()
@@ -142,10 +146,24 @@ class GattServerActivity : AppCompatActivity() {
      * Update graphical UI on devices that support it with the current time.
      */
     private fun updateTimeView() {
-        val date = Date(System.currentTimeMillis())
+        val currentTime = System.currentTimeMillis()
+        val date = Date(currentTime)
         val displayDate = dateFormat.format(date)
         val displayTime = timeFormat.format(date)
-        binding.localTime.text = "$displayDate 🕰 $displayTime"
+
+        // Calculate the app's uptime
+        val appUptime = currentTime - appStartTime
+
+        // Calculate uptime in hours, minutes, and seconds
+        val hours = TimeUnit.MILLISECONDS.toHours(appUptime)
+        val minutes = TimeUnit.MILLISECONDS.toMinutes(appUptime) % 60
+        val seconds = TimeUnit.MILLISECONDS.toSeconds(appUptime) % 60
+
+        // Format the uptime manually as a string
+        val displayUptime =
+            String.format(Locale.getDefault(), "%02d:%02d:%02d", hours, minutes, seconds)
+
+        binding.localTime.text = "🆙 $displayUptime 📅 $displayDate 🕰 $displayTime"
     }
 
     companion object {
