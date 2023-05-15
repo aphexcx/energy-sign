@@ -39,23 +39,37 @@ sealed class Message {
         val g: Int = Color.green(color),
         val b: Int = Color.blue(color)
     ) : Message() {
-        abstract val delayMs: Short
 
         data class OneByOneMessage(
             override val str: String,
             @Transient @ColorInt val color: Int,
-            @SerializedName("dly") override val delayMs: Short = 1000,
+            @SerializedName("dly") val delayMs: Short = 1000,
             override val type: MSGTYPE = MSGTYPE.ONE_BY_ONE
         ) : ColorMessage(color)
 
         data class ChonkySlide(
             override val str: String,
             @Transient @ColorInt val colorCycle: Int,
-            @SerializedName("dly") override val delayMs: Short = 1000,
+            @SerializedName("dly") val delayMs: Short = 1000,
 //            val colorFrom: Color,
 //            val colorTo: Color,
             override val type: MSGTYPE = MSGTYPE.CHONKY_SLIDE
         ) : ColorMessage(colorCycle)
+
+        sealed class IconInvaders(
+            override val str: String,
+            @ColorInt color: Int
+        ) : ColorMessage(color) {
+            override val type: MSGTYPE = MSGTYPE.ICON
+
+            class Enemy1(color: Int) : IconInvaders("1", color)
+            class Enemy2(color: Int) : IconInvaders("2", color)
+            class Explosion(color: Int) : IconInvaders("X", color)
+            class ANJUNA(color: Int) : IconInvaders("A", color)
+            class BAAAHS(color: Int) : IconInvaders("B", color)
+            class DREAMSTATE(color: Int) : IconInvaders("D", color)
+            class EDC(color: Int) : IconInvaders("E", color)
+        }
     }
 
     sealed class FlashingAnnouncement(override val str: String) : Message() {
@@ -69,17 +83,6 @@ sealed class Message {
         override val type: MSGTYPE = MSGTYPE.COUNTDOWN
 
         object NewMessageAnnouncement : CountDownAnnouncement("NEW${VT}MSG${VT}")
-    }
-
-    sealed class IconInvaders(override val str: String) : Message() {
-        override val type: MSGTYPE = MSGTYPE.ICON
-
-        object Enemy1 : IconInvaders("1")
-        object Enemy2 : IconInvaders("2")
-        object Explosion : IconInvaders("E")
-        object ANJUNA : IconInvaders("A")
-        object BAAAHS : IconInvaders("B")
-        object DREAMSTATE : IconInvaders("D")
     }
 
     /* Messages that control admin-only device modes or settings.
@@ -192,7 +195,7 @@ sealed class Message {
                     MSGTYPE.UTILITY -> context.deserialize(json, UtilityMessage::class.java)
                     MSGTYPE.KEYBOARD -> context.deserialize(json, KeyboardEcho::class.java)
                     MSGTYPE.CHOOSER -> context.deserialize(json, Chooser::class.java)
-                    MSGTYPE.ICON -> context.deserialize(json, IconInvaders::class.java)
+                    MSGTYPE.ICON -> context.deserialize(json, ColorMessage.IconInvaders::class.java)
                     MSGTYPE.TRACKID -> context.deserialize(json, NowPlayingTrackMessage::class.java)
                     MSGTYPE.DEFAULT -> context.deserialize(json, UserMessage::class.java)
                     else -> context.deserialize(json, UserMessage::class.java)

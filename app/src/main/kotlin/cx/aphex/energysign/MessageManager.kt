@@ -46,6 +46,11 @@ class MessageManager(val context: Context) {
     //How often to advertise, e.g. every 5 user messages
     private var advertiseEvery: Int = 8
 
+    private val DEFAULT_ADS = listOf(
+        Message.ColorMessage.IconInvaders.Enemy1(context.getColor(R.color.icon_defaultblue)),
+        Message.ColorMessage.IconInvaders.Enemy2(context.getColor(R.color.icon_defaultblue))
+    )
+
     init {
         userMessages.addAll(loadUserMessages())
 
@@ -150,7 +155,7 @@ class MessageManager(val context: Context) {
         } ?: emptyList()
 
         // Hack to avoid advertising back to back with another advertisement.
-        if (!oneTimeMessages.contains(Message.IconInvaders.Enemy1)) {
+        if (!oneTimeMessages.any { it is Message.ColorMessage.IconInvaders }) {
             val ads = advertisements.flatMap {
                 if (it is Message.NowPlayingTrackMessage) {
                     nowPlayingMsgs
@@ -374,16 +379,18 @@ class MessageManager(val context: Context) {
                     Message.NowPlayingTrackMessage("")
                 }
                 line.startsWith("👾") -> {
+                    val color: Int =
+                        emojiToColor(line) ?: context.getColor(R.color.icon_defaultblue)
                     val icon = EmojiParser.extractEmojis(line).last()
                     when (icon) {
-                        "👾" -> Message.IconInvaders.Enemy1
-                        "👽" -> Message.IconInvaders.Enemy2
-                        "💥" -> Message.IconInvaders.Explosion
-                        "🆎" -> Message.IconInvaders.ANJUNA
-                        "🐑" -> Message.IconInvaders.BAAAHS
-                        "🌌" -> Message.IconInvaders.DREAMSTATE
-//                        "🌼" -> Message.IconInvaders.EDC
-                        else -> Message.IconInvaders.Enemy1
+                        "👾" -> Message.ColorMessage.IconInvaders.Enemy1(color)
+                        "👽" -> Message.ColorMessage.IconInvaders.Enemy2(color)
+                        "💥" -> Message.ColorMessage.IconInvaders.Explosion(color)
+                        "🆎" -> Message.ColorMessage.IconInvaders.ANJUNA(color)
+                        "🐑" -> Message.ColorMessage.IconInvaders.BAAAHS(color)
+                        "🌌" -> Message.ColorMessage.IconInvaders.DREAMSTATE(color)
+                        "🌼" -> Message.ColorMessage.IconInvaders.EDC(color)
+                        else -> Message.ColorMessage.IconInvaders.Enemy1(color)
                     }
 
                 }
@@ -525,6 +532,8 @@ class MessageManager(val context: Context) {
     }
 
     internal fun escapeKey() {
+        //TODO fix bug -- pressing esc key causes type flashy error to be displayed
+
         // If not blank and esc key was pressed:
         // First show as warning if we aren't already
         // Then clear message if we are already warning
@@ -597,7 +606,6 @@ class MessageManager(val context: Context) {
     companion object {
         private const val SIGN_STRINGS_FILE_NAME = "signstrings.txt"
         private const val ADS_FILE_NAME = "ads.json"
-        private val DEFAULT_ADS = listOf(Message.IconInvaders.Enemy1, Message.IconInvaders.Enemy2)
         private const val MAX_SIGN_STRINGS: Int = 1000
 
         private const val MINIMUM_INPUT_ENTRY_PERIOD: Int = 5_000
