@@ -2,6 +2,8 @@ package cx.aphex.energysign
 
 import android.content.Context
 import com.google.gson.Gson
+import com.google.gson.GsonBuilder
+import com.google.gson.reflect.TypeToken
 import com.vdurmont.emoji.EmojiParser
 import cx.aphex.energysign.Message.FlashingAnnouncement.NowPlayingAnnouncement
 import cx.aphex.energysign.beatlinkdata.BeatLinkTrack
@@ -18,7 +20,9 @@ import java.util.Collections.synchronizedList
 
 
 class MessageManager(val context: Context) {
-    private val gson: Gson = Gson()
+    private val gson: Gson = GsonBuilder()
+        .registerTypeAdapter(Message::class.java, Message.MessageSerializer())
+        .create()
 
     private val advertisements: MutableList<Message> = mutableListOf()
     private val playedTracks: LinkedHashSet<BeatLinkTrack> = linkedSetOf()
@@ -33,13 +37,13 @@ class MessageManager(val context: Context) {
         synchronizedList(mutableListOf<Message>())
 
     // Message type state mess **
-    private var isChooserModeEnabled: Boolean = false
+    private var isInChooserMode: Boolean = false
     private var keyboardInputStartedAtMs: Long = 0
     private var lastKeyboardInputReceivedAtMs: Long = 0
     private var isPaused: Boolean = false
     /**/
 
-    private var isInKeyboardInput: Boolean = false
+    private var isInKeyboardInputMode: Boolean = false
     private var showAsWarning: Boolean = false
     private var keyboardStringBuilder: StringBuilder = StringBuilder()
 
@@ -168,7 +172,7 @@ class MessageManager(val context: Context) {
     }
 
     fun getNextMessage(): Message {
-        if (isChooserModeEnabled) {
+        if (isInChooserMode) {
             val idx = currentIdx.value
             val currentUsrMsg: Message.UserMessage =
                 userMessages.getOrNull(idx)?.let { it.copy(str = it.str.take(7)) }
@@ -178,19 +182,18 @@ class MessageManager(val context: Context) {
             return Message.Chooser(idx + 1, userMessages.lastIndex + 1, currentUsrMsg)
         } else {
 
-            if (isInKeyboardInput) {
-                val timeElapsedSinceLastInput =
-                    System.currentTimeMillis() - lastKeyboardInputReceivedAtMs
+            if (isInKeyboardInputMode) {
+                val msSinceLastInput = System.currentTimeMillis() - lastKeyboardInputReceivedAtMs
 
                 showAsWarning =
-                    timeElapsedSinceLastInput > (KEYBOARD_INPUT_TIMEOUT_MS - KEYBOARD_INPUT_WARNING_MS)
+                    (msSinceLastInput > (KEYBOARD_INPUT_TIMEOUT_MS - KEYBOARD_INPUT_WARNING_MS))
 
-                if (timeElapsedSinceLastInput > KEYBOARD_INPUT_TIMEOUT_MS) {
-                    keyboardStringBuilder.clear()
-                    isInKeyboardInput = false
+                if (msSinceLastInput > KEYBOARD_INPUT_TIMEOUT_MS) {
+                    endKeyboardInput()
+                    pushOneTimeMessage(Message.Starfield())
                 }
 
-                if (timeElapsedSinceLastInput < KEYBOARD_INPUT_TIMEOUT_MS) {
+                if (msSinceLastInput < KEYBOARD_INPUT_TIMEOUT_MS) {
                     if (showAsWarning) {
                         // Running out of input time! Display this in input warning mode.
                         return Message.KeyboardEcho.InputWarning(keyboardStringBuilder.toString())
@@ -199,6 +202,8 @@ class MessageManager(val context: Context) {
                     }
                 }
             }
+
+            // Regular marquee mode; display next user message/
 
             if (oneTimeMessages.isEmpty() && userMessages.isEmpty()) {
                 logD("No messages to display; injecting advertisement")
@@ -238,28 +243,33 @@ class MessageManager(val context: Context) {
         when (val cmd = String(value)) {
             "!c",
             "!choose" -> {
-                isChooserModeEnabled = true
+                isInChooserMode = true
             }
+
             "!pr",
             "!prev" -> {
                 currentIdx.update {
                     if (it > 0) it - 1 else 0
                 }
             }
+
             "!ne",
             "!next" -> {
                 currentIdx.update {
                     if (it < userMessages.lastIndex) it + 1 else userMessages.lastIndex
                 }
             }
+
             "!f",
             "!first" -> {
                 currentIdx.value = 0
             }
+
             "!l",
             "!last" -> {
                 currentIdx.value = userMessages.lastIndex
             }
+
             "!d",
             "!delete" -> {
                 if (userMessages.isNotEmpty()) {
@@ -270,25 +280,31 @@ class MessageManager(val context: Context) {
                     saveUserMessages()
                 }
             }
+
             "!ec",
             "!endchoose" -> {
-                isChooserModeEnabled = false
+                isInChooserMode = false
             }
+
             "!p",
             "!pause" -> {
                 isPaused = true
             }
+
             "!up",
             "!unpause" -> {
                 isPaused = false
             }
+
             "!micOn" -> {
                 pushOneTimeMessage(Message.UtilityMessage.EnableMic)
             }
+
             "!🔇",
             "!micOff" -> {
                 pushOneTimeMessage(Message.UtilityMessage.DisableMic)
             }
+
             else -> {
                 when {
                     cmd.startsWith("!🅰") -> {
@@ -325,7 +341,9 @@ class MessageManager(val context: Context) {
                             )
                         }
                     }
+
                     cmd.startsWith("!s", ignoreCase = true) ||
+                            cmd.startsWith("!search", ignoreCase = true) ||
                             cmd.startsWith("!find", ignoreCase = true) -> {
                         findUserMessage(cmd.split(" ").drop(1).joinToString(" "))
                     }
@@ -361,6 +379,7 @@ class MessageManager(val context: Context) {
                         delay.toShort()
                     )
                 }
+
                 line.startsWith("🅾") -> { // idk why this is 3, i imagine it should be 1
                     val color: Int? = emojiToColor(line)
                     val str = line //.substring(line.offsetByCodePoints(0, 3))
@@ -375,9 +394,11 @@ class MessageManager(val context: Context) {
                     )
 
                 }
+
                 line.startsWith("🛤") -> {
                     Message.NowPlayingTrackMessage("")
                 }
+
                 line.startsWith("👾") -> {
                     val color: Int =
                         emojiToColor(line) ?: context.getColor(R.color.icon_defaultblue)
@@ -394,6 +415,7 @@ class MessageManager(val context: Context) {
                     }
 
                 }
+
                 else -> null
             }
         }
@@ -409,21 +431,27 @@ class MessageManager(val context: Context) {
         line.contains("🔴") || line.contains("❤️") -> {
             context.getColor(R.color.instahandle)
         }
+
         line.contains("💙") -> {
             context.getColor(R.color.twitter)
         }
+
         line.contains("🧡") -> {
             context.getColor(R.color.soundcloud)
         }
+
         line.contains("💜") -> {
             context.getColor(R.color.twitch)
         }
+
         line.contains("💚") -> {
             context.getColor(R.color.green)
         }
+
         line.contains("💗") -> {
             context.getColor(R.color.pink)
         }
+
         else -> null
     }
 
@@ -445,7 +473,11 @@ class MessageManager(val context: Context) {
 //                val typeOfT: Type =
 //                    TypeToken.getParameterized(List::class.java, Message::class.java).type
 //                object : TypeToken<List<Message>>() {}.type
-                val ads = gson.fromJson(readText(), Array<Message>::class.java).toList()
+                val messagesType = object : TypeToken<List<Message>>() {}.type
+                val ads = gson.fromJson<List<Message>>(readText(), messagesType)
+//                val jsonString = json.encodeToString(Message.serializer(), message)
+
+//                val ads = json.decodeFromString(Message.serializer(), readText())
                 return ads
             }
         } catch (e: Throwable) {
@@ -516,7 +548,7 @@ class MessageManager(val context: Context) {
             logD("Invalid key!")
             return
         }
-        isInKeyboardInput = true
+        isInKeyboardInputMode = true
         if (keyboardStringBuilder.isEmpty()) {
             keyboardInputStartedAtMs = System.currentTimeMillis()
         }
@@ -537,19 +569,20 @@ class MessageManager(val context: Context) {
         // If not blank and esc key was pressed:
         // First show as warning if we aren't already
         // Then clear message if we are already warning
-        if (!showAsWarning && keyboardStringBuilder.isNotBlank()) {
+        if (keyboardStringBuilder.isNotBlank() && !showAsWarning) {
+            // ensures we are in warning period
             lastKeyboardInputReceivedAtMs =
                 System.currentTimeMillis() - KEYBOARD_INPUT_TIMEOUT_MS + KEYBOARD_INPUT_WARNING_MS
         } else {
-            pushOneTimeMessage(Message.Starfield())
             endKeyboardInput()
+            pushOneTimeMessage(Message.Starfield())
         }
     }
 
     private fun endKeyboardInput() {
         lastKeyboardInputReceivedAtMs = -1
         keyboardStringBuilder.clear()
-        isInKeyboardInput = false
+        isInKeyboardInputMode = false
     }
 
     internal fun submitKeyboardInput() {

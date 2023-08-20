@@ -5,9 +5,11 @@ import androidx.annotation.ColorInt
 import com.google.gson.*
 import com.google.gson.annotations.JsonAdapter
 import com.google.gson.annotations.SerializedName
+import kotlinx.serialization.Serializable
 import java.lang.reflect.Type
 
 @JsonAdapter(Message.MessageSerializer::class)
+//@Serializable
 sealed class Message {
     abstract val str: String
     protected abstract val type: MSGTYPE
@@ -17,17 +19,20 @@ sealed class Message {
         const val HEART: Char = '\u007F' //heart char (DEL)
     }
 
+    @Serializable
     data class UserMessage(
         override val str: String,
         override val type: MSGTYPE = MSGTYPE.DEFAULT
     ) : Message()
 
+    @Serializable
     data class Starfield(
         override val str: String = "",
-        val stars: Int = 300,
+        val stars: Short = 300,
         override val type: MSGTYPE = MSGTYPE.STARFIELD
     ) : Message()
 
+    @Serializable
     data class NowPlayingTrackMessage(
         override val str: String,
         override val type: MSGTYPE = MSGTYPE.TRACKID
@@ -178,34 +183,43 @@ sealed class Message {
             json: JsonElement,
             typeOfT: Type,
             context: JsonDeserializationContext
-        ): Message =
-            try {
-                val type: MSGTYPE = MSGTYPE.MsgTypeSerializer()
-                    .deserialize(json.asJsonObject["type"], Char::class.java, context)
+        ): Message {
+            return try {
+                val type: MSGTYPE =
+                    MSGTYPE.MsgTypeSerializer().deserialize(json.asJsonObject["type"], Char::class.java, context)
                 when (type) {
-                    MSGTYPE.CHONKY_SLIDE -> context.deserialize(
-                        json,
-                        ColorMessage.ChonkySlide::class.java
-                    )
-                    MSGTYPE.ONE_BY_ONE -> context.deserialize(
-                        json,
-                        ColorMessage.OneByOneMessage::class.java
-                    )
+                    MSGTYPE.CHONKY_SLIDE -> context.deserialize(json, ColorMessage.ChonkySlide::class.java) as Message
+                    MSGTYPE.ONE_BY_ONE -> context.deserialize(json, ColorMessage.OneByOneMessage::class.java) as Message
                     MSGTYPE.FLASHY -> context.deserialize(json, FlashingAnnouncement::class.java)
+                    MSGTYPE.COUNTDOWN -> context.deserialize(json, CountDownAnnouncement::class.java)
                     MSGTYPE.UTILITY -> context.deserialize(json, UtilityMessage::class.java)
-                    MSGTYPE.KEYBOARD -> context.deserialize(json, KeyboardEcho::class.java)
                     MSGTYPE.CHOOSER -> context.deserialize(json, Chooser::class.java)
-                    MSGTYPE.ICON -> context.deserialize(json, ColorMessage.IconInvaders::class.java)
+                    MSGTYPE.KEYBOARD -> context.deserialize(json, KeyboardEcho::class.java)
+                    MSGTYPE.STARFIELD -> context.deserialize(json, Starfield::class.java)
                     MSGTYPE.TRACKID -> context.deserialize(json, NowPlayingTrackMessage::class.java)
+                    MSGTYPE.ICON -> {
+                        when (json.asJsonObject["str"].asString) {
+                            "1" -> context.deserialize(json, ColorMessage.IconInvaders.Enemy1::class.java)
+                            "2" -> context.deserialize(json, ColorMessage.IconInvaders.Enemy2::class.java)
+                            "X" -> context.deserialize(json, ColorMessage.IconInvaders.Explosion::class.java)
+                            "A" -> context.deserialize(json, ColorMessage.IconInvaders.ANJUNA::class.java)
+                            "B" -> context.deserialize(json, ColorMessage.IconInvaders.BAAAHS::class.java)
+                            "D" -> context.deserialize(json, ColorMessage.IconInvaders.DREAMSTATE::class.java)
+                            "E" -> context.deserialize(json, ColorMessage.IconInvaders.EDC::class.java)
+                            else -> throw JsonParseException("Unknown IconInvader: ${json.asJsonObject["str"].asString}")
+                        }
+                    }
+
                     MSGTYPE.DEFAULT -> context.deserialize(json, UserMessage::class.java)
                     else -> context.deserialize(json, UserMessage::class.java)
                 }
             } catch (e: JsonParseException) {
                 context.deserialize(json, UserMessage::class.java)
             }
+        }
     }
-
 }
+
 //
 //object Json {
 //    val gson: Gson =

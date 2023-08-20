@@ -47,7 +47,7 @@ class GattServerActivity : AppCompatActivity() {
     /* Local UI */
     private lateinit var logAdapter: LogAdapter
     private lateinit var binding: ActivityServerBinding
-    private var appStartTime: Long = System.currentTimeMillis()
+    private var appStartTime: Long = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -57,7 +57,7 @@ class GattServerActivity : AppCompatActivity() {
 
         timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
         dateFormat = DateFormat.getMediumDateFormat(this)
-//        appStartTime = System.currentTimeMillis()
+        appStartTime = System.currentTimeMillis()
 
         // Initialize the local UI
         updateTimeView()
@@ -92,6 +92,11 @@ class GattServerActivity : AppCompatActivity() {
                 binding.logList.smoothScrollToPosition(logAdapter.itemCount)
             }
 
+    }
+
+    override fun onStart() {
+        super.onStart()
+        appStartTime = System.currentTimeMillis()
     }
 
     var nowPlayingTrackSubscription: Disposable? = null
