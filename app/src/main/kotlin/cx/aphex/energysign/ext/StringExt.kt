@@ -1,6 +1,6 @@
 package cx.aphex.energysign.ext
 
-import cx.aphex.energysign.Message.Companion.HEART
+import cx.aphex.energysign.message.Message.Companion.HEART
 
 fun String.convertHeartEmojis(): String {
     var newStr = this

@@ -34,7 +34,6 @@ import cx.aphex.energysign.databinding.ActivityServerBinding
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.observeNonNull
 import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers
-import io.reactivex.rxjava3.disposables.Disposable
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -99,8 +98,6 @@ class GattServerActivity : AppCompatActivity() {
         appStartTime = System.currentTimeMillis()
     }
 
-    var nowPlayingTrackSubscription: Disposable? = null
-    var newPostedUserMessageSubscription: Disposable? = null
 
     /** Defines callbacks for service binding, passed to bindService()  */
     private val connection = object : ServiceConnection {
@@ -108,19 +105,10 @@ class GattServerActivity : AppCompatActivity() {
         override fun onServiceConnected(className: ComponentName, service: IBinder) {
             // We've bound to LocalService, cast the IBinder and get LocalService instance
             val binder = service as BeatLinkDataConsumerServerService.ServerBinder
-            nowPlayingTrackSubscription = binder.getService().nowPlayingTrack
-                .subscribe { track ->
-                    viewModel.nowPlaying(track)
-                }
 
-            newPostedUserMessageSubscription = binder.getService().newUserMessages
-                .subscribe { str ->
-                    viewModel.newPostedUserMessage(str)
-                }
         }
 
         override fun onServiceDisconnected(arg0: ComponentName) {
-            nowPlayingTrackSubscription?.dispose()
         }
     }
 

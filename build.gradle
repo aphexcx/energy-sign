@@ -19,7 +19,6 @@ buildscript {
     repositories {
         google()
         mavenCentral()
-        jcenter()
     }
 
 //    ext.atomicfu_version = '0.14.3'
@@ -34,7 +33,6 @@ buildscript {
 
         // Add the Crashlytics Gradle plugin.
         classpath 'com.google.firebase:firebase-crashlytics-gradle:2.9.5'
-
 
 //        classpath "org.jetbrains.kotlinx:atomicfu-gradle-plugin:$atomicfu_version"
 
@@ -51,8 +49,4 @@ allprojects {
         mavenCentral()
         jcenter()
     }
-}
-
-task clean(type: Delete) {
-    delete rootProject.buildDir
 }

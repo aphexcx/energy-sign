@@ -1,4 +1,4 @@
-package cx.aphex.energysign
+package cx.aphex.energysign.message
 
 import android.graphics.Color
 import androidx.annotation.ColorInt
@@ -87,7 +87,7 @@ sealed class Message {
     sealed class CountDownAnnouncement(override val str: String) : Message() {
         override val type: MSGTYPE = MSGTYPE.COUNTDOWN
 
-        object NewMessageAnnouncement : CountDownAnnouncement("NEW${VT}MSG${VT}")
+        object NewMessageAnnouncement : CountDownAnnouncement("NEW${VT}MSG$VT")
     }
 
     /* Messages that control admin-only device modes or settings.
@@ -211,7 +211,6 @@ sealed class Message {
                     }
 
                     MSGTYPE.DEFAULT -> context.deserialize(json, UserMessage::class.java)
-                    else -> context.deserialize(json, UserMessage::class.java)
                 }
             } catch (e: JsonParseException) {
                 context.deserialize(json, UserMessage::class.java)

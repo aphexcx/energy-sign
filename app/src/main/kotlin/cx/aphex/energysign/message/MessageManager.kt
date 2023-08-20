@@ -1,25 +1,25 @@
-package cx.aphex.energysign
+package cx.aphex.energysign.message
 
 import android.content.Context
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import com.google.gson.reflect.TypeToken
 import com.vdurmont.emoji.EmojiParser
-import cx.aphex.energysign.Message.FlashingAnnouncement.NowPlayingAnnouncement
+import cx.aphex.energysign.R
 import cx.aphex.energysign.beatlinkdata.BeatLinkTrack
 import cx.aphex.energysign.ext.convertHeartEmojis
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
 import cx.aphex.energysign.ext.toNormalized
+import cx.aphex.energysign.message.Message.FlashingAnnouncement.NowPlayingAnnouncement
 import kotlinx.atomicfu.AtomicInt
 import kotlinx.atomicfu.atomic
 import kotlinx.atomicfu.getAndUpdate
 import kotlinx.atomicfu.update
 import java.io.File
-import java.util.Collections.synchronizedList
 
 
-class MessageManager(val context: Context) {
+class MessageManager(val context: Context, val msgRepo: MessageRepository) {
     private val gson: Gson = GsonBuilder()
         .registerTypeAdapter(Message::class.java, Message.MessageSerializer())
         .create()
@@ -29,12 +29,6 @@ class MessageManager(val context: Context) {
     private var nowPlayingTrack: Message.NowPlayingTrackMessage? = null
 
     private val currentIdx: AtomicInt = atomic(0)
-
-    private val userMessages: MutableList<Message.UserMessage> =
-        synchronizedList(mutableListOf<Message.UserMessage>())
-
-    private val oneTimeMessages: MutableList<Message> =
-        synchronizedList(mutableListOf<Message>())
 
     // Message type state mess **
     private var isInChooserMode: Boolean = false
@@ -56,7 +50,7 @@ class MessageManager(val context: Context) {
     )
 
     init {
-        userMessages.addAll(loadUserMessages())
+        msgRepo.userMessages.addAll(msgRepo.loadUserMessages(context))
 
         //TODO fix deserialization
         val ads: List<Message> = loadAds()
@@ -108,8 +102,8 @@ class MessageManager(val context: Context) {
     fun processNewUserMessage(str: String) {
         currentIdx.value = 0
 
-        enqueueOneTimeMessage(Message.CountDownAnnouncement.NewMessageAnnouncement)
-        pushUserMessage(
+        msgRepo.enqueueOneTimeMessage(Message.CountDownAnnouncement.NewMessageAnnouncement)
+        msgRepo.pushUserMessage(
             Message.UserMessage(
                 str
                     .convertHeartEmojis()
@@ -121,29 +115,10 @@ class MessageManager(val context: Context) {
 //            pushStringOnList(it.replace('•', '*'))
 //        }
 
-        saveUserMessages()
+        msgRepo.saveUserMessages(context)
     }
 
-    private fun pushOneTimeMessages(vararg messages: Message) {
-        messages.reversed().forEach { pushOneTimeMessage(it) }
-    }
 
-    private fun pushOneTimeMessage(message: Message) {
-        oneTimeMessages.add(0, message)
-    }
-
-    private fun enqueueOneTimeMessage(message: Message) {
-        oneTimeMessages.add(message)
-    }
-
-    private fun pushUserMessages(vararg messages: Message.UserMessage) {
-        messages.reversed().forEach { pushUserMessage(it) }
-    }
-
-    /** Pushes a message into the messages list at the current index. */
-    private fun pushUserMessage(userMessage: Message.UserMessage) {
-        userMessages.add(0, userMessage)
-    }
 
     // TODO deal with new usermessages coming in during advertisements
     private fun pushAdvertisements() {
@@ -159,7 +134,7 @@ class MessageManager(val context: Context) {
         } ?: emptyList()
 
         // Hack to avoid advertising back to back with another advertisement.
-        if (!oneTimeMessages.any { it is Message.ColorMessage.IconInvaders }) {
+        if (!msgRepo.oneTimeMessages.any { it is Message.ColorMessage.IconInvaders }) {
             val ads = advertisements.flatMap {
                 if (it is Message.NowPlayingTrackMessage) {
                     nowPlayingMsgs
@@ -167,7 +142,7 @@ class MessageManager(val context: Context) {
                     listOf(it)
                 }
             }
-            pushOneTimeMessages(*ads.toTypedArray())
+            msgRepo.pushOneTimeMessages(*ads.toTypedArray())
         }
     }
 
@@ -175,11 +150,11 @@ class MessageManager(val context: Context) {
         if (isInChooserMode) {
             val idx = currentIdx.value
             val currentUsrMsg: Message.UserMessage =
-                userMessages.getOrNull(idx)?.let { it.copy(str = it.str.take(7)) }
+                msgRepo.userMessages.getOrNull(idx)?.let { it.copy(str = it.str.take(7)) }
                     ?: Message.UserMessage("<empty>")
             logD("getNextMessage: currentMessage is now messages[$idx] = $currentUsrMsg")
             logD("Sending messages[$idx] as chooser!")
-            return Message.Chooser(idx + 1, userMessages.lastIndex + 1, currentUsrMsg)
+            return Message.Chooser(idx + 1, msgRepo.userMessages.lastIndex + 1, currentUsrMsg)
         } else {
 
             if (isInKeyboardInputMode) {
@@ -190,7 +165,7 @@ class MessageManager(val context: Context) {
 
                 if (msSinceLastInput > KEYBOARD_INPUT_TIMEOUT_MS) {
                     endKeyboardInput()
-                    pushOneTimeMessage(Message.Starfield())
+                    msgRepo.pushOneTimeMessage(Message.Starfield())
                 }
 
                 if (msSinceLastInput < KEYBOARD_INPUT_TIMEOUT_MS) {
@@ -205,17 +180,17 @@ class MessageManager(val context: Context) {
 
             // Regular marquee mode; display next user message/
 
-            if (oneTimeMessages.isEmpty() && userMessages.isEmpty()) {
+            if (msgRepo.oneTimeMessages.isEmpty() && msgRepo.userMessages.isEmpty()) {
                 logD("No messages to display; injecting advertisement")
                 pushAdvertisements()
             }
 
-            oneTimeMessages.removeFirstOrNull()?.let {
+            msgRepo.oneTimeMessages.removeFirstOrNull()?.let {
                 return it
             }
 
             val idx = getIdxAndAdvance()
-            val currentUsrMsg: Message.UserMessage = userMessages[idx]
+            val currentUsrMsg: Message.UserMessage = msgRepo.userMessages[idx]
             logD("getNextMessage: currentMessage is now messages[$idx] = $currentUsrMsg")
             logD("Sending messages[$idx]")
             usrMsgCount++
@@ -232,7 +207,7 @@ class MessageManager(val context: Context) {
             if (isPaused) {
                 it
             } else {
-                if (it == userMessages.lastIndex) 0
+                if (it == msgRepo.userMessages.lastIndex) 0
                 else it + 1
             }
         }
@@ -256,7 +231,7 @@ class MessageManager(val context: Context) {
             "!ne",
             "!next" -> {
                 currentIdx.update {
-                    if (it < userMessages.lastIndex) it + 1 else userMessages.lastIndex
+                    if (it < msgRepo.userMessages.lastIndex) it + 1 else msgRepo.userMessages.lastIndex
                 }
             }
 
@@ -267,17 +242,17 @@ class MessageManager(val context: Context) {
 
             "!l",
             "!last" -> {
-                currentIdx.value = userMessages.lastIndex
+                currentIdx.value = msgRepo.userMessages.lastIndex
             }
 
             "!d",
             "!delete" -> {
-                if (userMessages.isNotEmpty()) {
-                    userMessages.removeAt(currentIdx.value)
+                if (msgRepo.userMessages.isNotEmpty()) {
+                    msgRepo.userMessages.removeAt(currentIdx.value)
                     currentIdx.update {
-                        if (it >= userMessages.lastIndex) userMessages.lastIndex else it
+                        if (it >= msgRepo.userMessages.lastIndex) msgRepo.userMessages.lastIndex else it
                     }
-                    saveUserMessages()
+                    msgRepo.saveUserMessages(context)
                 }
             }
 
@@ -297,12 +272,12 @@ class MessageManager(val context: Context) {
             }
 
             "!micOn" -> {
-                pushOneTimeMessage(Message.UtilityMessage.EnableMic)
+                msgRepo.pushOneTimeMessage(Message.UtilityMessage.EnableMic)
             }
 
             "!🔇",
             "!micOff" -> {
-                pushOneTimeMessage(Message.UtilityMessage.DisableMic)
+                msgRepo.pushOneTimeMessage(Message.UtilityMessage.DisableMic)
             }
 
             else -> {
@@ -326,7 +301,7 @@ class MessageManager(val context: Context) {
                     }
 
                     cmd.startsWith("!B", ignoreCase = true) -> {
-                        pushOneTimeMessage(
+                        msgRepo.pushOneTimeMessage(
                             Message.UtilityMessage.BrightnessShift(
                                 cmd.drop(2).trim().toIntOrNull()
                             )
@@ -336,7 +311,7 @@ class MessageManager(val context: Context) {
                     cmd.startsWith("!A", ignoreCase = true) -> {
                         cmd.drop(2).trim().toIntOrNull()?.let { newPeriod ->
                             advertiseEvery = newPeriod
-                            pushOneTimeMessage(
+                            msgRepo.pushOneTimeMessage(
                                 Message.FlashingAnnouncement.CustomFlashyAnnouncement("AD EVERY=$advertiseEvery")
                             )
                         }
@@ -353,7 +328,7 @@ class MessageManager(val context: Context) {
     }
 
     private fun findUserMessage(query: String) {
-        val idx = userMessages.indexOfFirst { it.str.contains(query, ignoreCase = true) }
+        val idx = msgRepo.userMessages.indexOfFirst { it.str.contains(query, ignoreCase = true) }
         if (idx != -1) {
             currentIdx.update {
                 idx
@@ -481,7 +456,7 @@ class MessageManager(val context: Context) {
                 return ads
             }
         } catch (e: Throwable) {
-            logW("Exception when loading ${ADS_FILE_NAME}! ${e.message}")
+            logW("Exception when loading $ADS_FILE_NAME! ${e.message}")
             return listOf()
         }
     }
@@ -490,57 +465,16 @@ class MessageManager(val context: Context) {
         try {
             with(File(context.filesDir, ADS_FILE_NAME)) {
                 when (createNewFile()) {
-                    true -> logD("${ADS_FILE_NAME} does not exist; created new.")
-                    else -> logD("${ADS_FILE_NAME} exists. Writing ads...")
+                    true -> logD("$ADS_FILE_NAME does not exist; created new.")
+                    else -> logD("$ADS_FILE_NAME exists. Writing ads...")
                 }
                 writeText(gson.toJson(advertisements))
             }
         } catch (e: Throwable) {
-            logW("Exception when saving ${ADS_FILE_NAME}! ${e.message}")
+            logW("Exception when saving $ADS_FILE_NAME! ${e.message}")
         }
     }
 
-    /** Return the
-     * //TODO last [MAX_SIGN_STRINGS]
-     * strings from the sign strings file. */
-    private fun loadUserMessages(): MutableList<Message.UserMessage> {
-        with(File(context.filesDir, SIGN_STRINGS_FILE_NAME)) {
-            when (createNewFile()) {
-                true -> logD("${SIGN_STRINGS_FILE_NAME} does not exist; created new.")
-                else -> logD("${SIGN_STRINGS_FILE_NAME} exists. Reading...")
-            }
-
-            bufferedReader().use { reader ->
-                val list: MutableList<Message.UserMessage> =
-                    reader.lineSequence() //.take(MAX_SIGN_STRINGS)
-                        .map { Message.UserMessage(it) }
-                        .filter { it.str.isNotBlank() }
-                        .toMutableList()
-                        .asReversed()
-
-                logD(
-                    "Read ${list.size} lines from ${SIGN_STRINGS_FILE_NAME}! Here are the first 10: [${
-                        list.take(
-                            10
-                        ).joinToString(", ") { it.str }
-                    }]"
-                )
-                return list
-            }
-        }
-    }
-
-    /** Write out the list of strings to the file */
-    private fun saveUserMessages() {
-        try {
-            userMessages
-                .map { it.str }
-                .reversed()
-                .toFile(File(context.filesDir, SIGN_STRINGS_FILE_NAME))
-        } catch (e: Throwable) {
-            logW("Exception when saving ${SIGN_STRINGS_FILE_NAME}! ${e.message}")
-        }
-    }
 
     internal fun processNewKeyboardKey(key: Char) {
         //TODO key.toInt() needed here?
@@ -575,7 +509,7 @@ class MessageManager(val context: Context) {
                 System.currentTimeMillis() - KEYBOARD_INPUT_TIMEOUT_MS + KEYBOARD_INPUT_WARNING_MS
         } else {
             endKeyboardInput()
-            pushOneTimeMessage(Message.Starfield())
+            msgRepo.pushOneTimeMessage(Message.Starfield())
         }
     }
 
@@ -622,10 +556,10 @@ class MessageManager(val context: Context) {
                 nowPlayingTrack = Message.NowPlayingTrackMessage(
                     "${track.artist.toNormalized()} - ${track.title.toNormalized()}"
                 )
-                oneTimeMessages.removeIf { it is NowPlayingAnnouncement || it is Message.NowPlayingTrackMessage }
+                msgRepo.oneTimeMessages.removeIf { it is NowPlayingAnnouncement || it is Message.NowPlayingTrackMessage }
 
-                enqueueOneTimeMessage(NowPlayingAnnouncement)
-                enqueueOneTimeMessage(nowPlayingTrack!!)
+                msgRepo.enqueueOneTimeMessage(NowPlayingAnnouncement)
+                msgRepo.enqueueOneTimeMessage(nowPlayingTrack!!)
 
 
                 while (playedTracks.size > MAX_PLAYED_TRACKS_MEMORY) {
@@ -637,9 +571,7 @@ class MessageManager(val context: Context) {
     }
 
     companion object {
-        private const val SIGN_STRINGS_FILE_NAME = "signstrings.txt"
         private const val ADS_FILE_NAME = "ads.json"
-        private const val MAX_SIGN_STRINGS: Int = 1000
 
         private const val MINIMUM_INPUT_ENTRY_PERIOD: Int = 5_000
         private const val KEYBOARD_INPUT_TIMEOUT_MS: Int = 30_000

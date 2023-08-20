@@ -5,29 +5,28 @@ import android.content.Intent
 import android.os.Binder
 import android.os.IBinder
 import cx.aphex.energysign.ext.logW
-import io.ktor.application.*
-import io.ktor.features.*
-import io.ktor.gson.*
-import io.ktor.request.*
-import io.ktor.response.*
-import io.ktor.routing.*
-import io.ktor.server.engine.*
-import io.ktor.server.netty.*
+import cx.aphex.energysign.message.MessageManager
+import io.ktor.application.call
+import io.ktor.application.install
+import io.ktor.features.ContentNegotiation
+import io.ktor.gson.gson
+import io.ktor.request.receive
+import io.ktor.response.respond
+import io.ktor.routing.get
+import io.ktor.routing.post
+import io.ktor.routing.routing
+import io.ktor.server.engine.embeddedServer
+import io.ktor.server.netty.Netty
 import io.netty.util.internal.logging.InternalLoggerFactory
 import io.netty.util.internal.logging.JdkLoggerFactory
-import io.reactivex.rxjava3.core.Observable
-import io.reactivex.rxjava3.subjects.PublishSubject
+import org.koin.core.component.KoinComponent
+import org.koin.core.component.inject
 
-class BeatLinkDataConsumerServerService : Service() {
+class BeatLinkDataConsumerServerService : Service(), KoinComponent {
+    private val messageManager: MessageManager by inject()
 
     // Binder given to clients
     private val binder = ServerBinder()
-
-    private val nowPlayingTrackSubject: PublishSubject<BeatLinkTrack> = PublishSubject.create()
-    val nowPlayingTrack: Observable<BeatLinkTrack> =
-        nowPlayingTrackSubject.distinctUntilChanged()
-
-    val newUserMessages: PublishSubject<String> = PublishSubject.create()
 
     override fun onBind(intent: Intent?): IBinder {
         return binder
@@ -53,20 +52,19 @@ class BeatLinkDataConsumerServerService : Service() {
                 gson {}
             }
             routing {
-                get("/") {
-                    call.respond(mapOf("message" to "Hello world"))
+                get("/messages") {
+                    call.respond(messageManager.msgRepo.userMessages)
                 }
                 post("/newUserMessage") {
                     val msg: PostedUserMessage = call.receive()
                     logW("Received new POSTed UserMessage: ${msg.message}")
-                    newUserMessages.onNext(msg.message)
+                    messageManager.processNewUserMessage(msg.message)
                     call.respond(mapOf("success" to true))
                 }
                 post("/currentTrack") {
                     val track: BeatLinkTrack = call.receive()
                     logW("Received new BeatLinkTrack: $track")
-                    nowPlayingTrackSubject.onNext(track)
-
+                    messageManager.processNowPlayingTrack(track)
                     call.respond(mapOf("success" to true))
                 }
             }

@@ -3,15 +3,17 @@ package cx.aphex.energysign
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import com.google.gson.Gson
-import cx.aphex.energysign.beatlinkdata.BeatLinkTrack
 import cx.aphex.energysign.beatlinkdata.DnsSdAnnouncer
 import cx.aphex.energysign.bluetooth.BluetoothStatusUpdate
 import cx.aphex.energysign.bluetooth.EnergySignBluetoothManager
 import cx.aphex.energysign.ext.NonNullMutableLiveData
+import cx.aphex.energysign.message.Message
+import cx.aphex.energysign.message.MessageManager
 import cx.aphex.energysign.uart.EnergySignUartManager
+import org.koin.core.component.KoinComponent
+import org.koin.core.component.inject
 
-class MainViewModel(application: Application) : AndroidViewModel(application) {
-    private val context = application.applicationContext
+class MainViewModel(application: Application) : AndroidViewModel(application), KoinComponent {
     private val gson: Gson = Gson()
 
     val currentString: NonNullMutableLiveData<String> = NonNullMutableLiveData("")
@@ -20,7 +22,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val btDeviceStatus: NonNullMutableLiveData<BluetoothStatusUpdate> =
         NonNullMutableLiveData(BluetoothStatusUpdate(null, null))
 
-    private val messageManager: MessageManager = MessageManager(context)
+    private val messageManager: MessageManager by inject()
     private val energySignBluetoothManager: EnergySignBluetoothManager
     private val energySignUartManager: EnergySignUartManager = EnergySignUartManager(this)
     private val dnsSdAnnouncer: DnsSdAnnouncer
@@ -28,14 +30,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
 //        currentBytes.value = messageManager.getNextMessage().bytes
 
-        energySignBluetoothManager = EnergySignBluetoothManager(context, this)
+        energySignBluetoothManager = EnergySignBluetoothManager(application.applicationContext, this)
         energySignBluetoothManager.start()
 
         energySignBluetoothManager.receivedBytes.subscribe { value ->
             messageManager.processNewBytes(value)
         }
 
-        dnsSdAnnouncer = DnsSdAnnouncer(context)
+        dnsSdAnnouncer = DnsSdAnnouncer(application.applicationContext)
         dnsSdAnnouncer.start()
     }
 
@@ -77,13 +79,5 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun processNewKeyboardKey(key: Char) {
         messageManager.processNewKeyboardKey(key)
-    }
-
-    fun nowPlaying(track: BeatLinkTrack) {
-        messageManager.processNowPlayingTrack(track)
-    }
-
-    fun newPostedUserMessage(str: String) {
-        messageManager.processNewUserMessage(str)
     }
 }
