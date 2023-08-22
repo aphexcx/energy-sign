@@ -12,6 +12,7 @@ import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
 import cx.aphex.energysign.ext.toNormalized
 import cx.aphex.energysign.message.Message.FlashingAnnouncement.NowPlayingAnnouncement
+import io.ktor.util.toUpperCasePreservingASCIIRules
 import kotlinx.atomicfu.AtomicInt
 import kotlinx.atomicfu.atomic
 import kotlinx.atomicfu.getAndUpdate
@@ -40,6 +41,8 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
     private var isInKeyboardInputMode: Boolean = false
     private var showAsWarning: Boolean = false
     private var keyboardStringBuilder: StringBuilder = StringBuilder()
+
+    private var isSheepThinking: Boolean = false
 
     //How often to advertise, e.g. every 5 user messages
     private var advertiseEvery: Int = 8
@@ -119,7 +122,6 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
     }
 
 
-
     // TODO deal with new usermessages coming in during advertisements
     private fun pushAdvertisements() {
         val nowPlayingMsgs: List<Message> = nowPlayingTrack?.let {
@@ -183,6 +185,12 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
             if (msgRepo.oneTimeMessages.isEmpty() && msgRepo.userMessages.isEmpty()) {
                 logD("No messages to display; injecting advertisement")
                 pushAdvertisements()
+            }
+
+            if (msgRepo.oneTimeMessages.isEmpty() && isSheepThinking) {
+                logD("Sheep is thinking, injecting thinking notification")
+//                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("PONDERING."))
+                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("THINKING.."))
             }
 
             msgRepo.oneTimeMessages.removeFirstOrNull()?.let {
@@ -568,6 +576,20 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
                 playedTracks.add(track)
             }
         }
+    }
+
+    fun processNewSheepThought(thought: String) {
+        msgRepo.pushOneTimeMessages(
+            Message.ColorMessage.ChonkySlide("NEW", context.getColor(R.color.chonkyslide_defaultpink)),
+            Message.ColorMessage.ChonkySlide("SHEEP", context.getColor(R.color.chonkyslide_defaultpink)),
+            Message.ColorMessage.ChonkySlide("THOT..", context.getColor(R.color.chonkyslide_defaultpink)),
+            Message.ColorMessage.IconInvaders.BAAAHS(context.getColor(R.color.instahandle)),
+            Message.ChonkyMarquee(thought.toUpperCasePreservingASCIIRules())
+        )
+    }
+
+    fun setSheepThinking(thinking: Boolean) {
+        isSheepThinking = thinking
     }
 
     companion object {

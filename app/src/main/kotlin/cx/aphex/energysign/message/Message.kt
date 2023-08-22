@@ -38,6 +38,12 @@ sealed class Message {
         override val type: MSGTYPE = MSGTYPE.TRACKID
     ) : Message()
 
+    @Serializable
+    data class ChonkyMarquee(
+        override val str: String,
+        override val type: MSGTYPE = MSGTYPE.CHONKYMARQUEE
+    ) : Message()
+
     sealed class ColorMessage(
         @ColorInt color: Int,
         val r: Int = Color.red(color),
@@ -134,6 +140,7 @@ sealed class Message {
         CHOOSER('H'),
         ICON('I'),
         TRACKID('T'),
+        CHONKYMARQUEE('N'),
         DEFAULT('D');
 
         class MsgTypeSerializer : JsonSerializer<MSGTYPE>, JsonDeserializer<MSGTYPE> {
@@ -197,6 +204,7 @@ sealed class Message {
                     MSGTYPE.KEYBOARD -> context.deserialize(json, KeyboardEcho::class.java)
                     MSGTYPE.STARFIELD -> context.deserialize(json, Starfield::class.java)
                     MSGTYPE.TRACKID -> context.deserialize(json, NowPlayingTrackMessage::class.java)
+                    MSGTYPE.CHONKYMARQUEE -> context.deserialize(json, ChonkyMarquee::class.java)
                     MSGTYPE.ICON -> {
                         when (json.asJsonObject["str"].asString) {
                             "1" -> context.deserialize(json, ColorMessage.IconInvaders.Enemy1::class.java)

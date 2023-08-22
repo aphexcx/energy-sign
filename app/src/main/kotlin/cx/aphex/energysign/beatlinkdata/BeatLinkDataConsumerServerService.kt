@@ -56,9 +56,21 @@ class BeatLinkDataConsumerServerService : Service(), KoinComponent {
                     call.respond(messageManager.msgRepo.userMessages)
                 }
                 post("/newUserMessage") {
-                    val msg: PostedUserMessage = call.receive()
+                    val msg: PostedMessage = call.receive()
                     logW("Received new POSTed UserMessage: ${msg.message}")
                     messageManager.processNewUserMessage(msg.message)
+                    call.respond(mapOf("success" to true))
+                }
+                post("/sheepIsThinking") {
+                    val msg: SheepIsThinking = call.receive()
+                    logW("Received new POSTed sheep thinking notification: ${msg.isThinking}")
+                    messageManager.setSheepThinking(msg.isThinking)
+                    call.respond(mapOf("success" to true))
+                }
+                post("/newSheepThought") {
+                    val msg: PostedMessage = call.receive()
+                    logW("Received new POSTed SheepThought: ${msg.message}")
+                    messageManager.processNewSheepThought(msg.message)
                     call.respond(mapOf("success" to true))
                 }
                 post("/currentTrack") {
@@ -73,5 +85,6 @@ class BeatLinkDataConsumerServerService : Service(), KoinComponent {
         super.onCreate()
     }
 
-    data class PostedUserMessage(val message: String)
+    data class PostedMessage(val message: String)
+    data class SheepIsThinking(val isThinking: Boolean)
 }
