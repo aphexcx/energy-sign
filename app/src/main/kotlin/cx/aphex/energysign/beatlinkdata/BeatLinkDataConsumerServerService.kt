@@ -53,7 +53,7 @@ class BeatLinkDataConsumerServerService : Service(), KoinComponent {
             }
             routing {
                 get("/messages") {
-                    call.respond(messageManager.msgRepo.userMessages)
+                    call.respond(messageManager.msgRepo.marqueeMessages)
                 }
                 post("/newUserMessage") {
                     val msg: PostedMessage = call.receive()
@@ -61,10 +61,16 @@ class BeatLinkDataConsumerServerService : Service(), KoinComponent {
                     messageManager.processNewUserMessage(msg.message)
                     call.respond(mapOf("success" to true))
                 }
-                post("/sheepIsThinking") {
-                    val msg: SheepIsThinking = call.receive()
-                    logW("Received new POSTed sheep thinking notification: ${msg.isThinking}")
-                    messageManager.setSheepThinking(msg.isThinking)
+                post("/isGeneratingThought") {
+                    val msg: SheepIsGeneratingThought = call.receive()
+                    logW("Received new POSTed generating thought notification: ${msg.isGenerating}")
+                    messageManager.setGeneratingThought(msg.isGenerating)
+                    call.respond(mapOf("success" to true))
+                }
+                post("/streamPartialSheepThought") {
+                    val msg: PostedMessage = call.receive()
+                    logW("Received new partial SheepThought: ${msg.message}")
+                    messageManager.processPartialSheepThought(msg.message)
                     call.respond(mapOf("success" to true))
                 }
                 post("/newSheepThought") {
@@ -86,5 +92,5 @@ class BeatLinkDataConsumerServerService : Service(), KoinComponent {
     }
 
     data class PostedMessage(val message: String)
-    data class SheepIsThinking(val isThinking: Boolean)
+    data class SheepIsGeneratingThought(val isGenerating: Boolean)
 }

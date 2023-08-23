@@ -8,8 +8,8 @@ import java.io.File
 import java.util.Collections.synchronizedList
 
 class MessageRepository {
-    val userMessages: MutableList<Message.UserMessage> =
-        synchronizedList(mutableListOf<Message.UserMessage>())
+    val marqueeMessages: MutableList<Message.Marquee> =
+        synchronizedList(mutableListOf<Message.Marquee>())
 
     val oneTimeMessages: MutableList<Message> =
         synchronizedList(mutableListOf<Message>())
@@ -26,19 +26,19 @@ class MessageRepository {
         oneTimeMessages.add(message)
     }
 
-    private fun pushUserMessages(vararg messages: Message.UserMessage) {
-        messages.reversed().forEach { pushUserMessage(it) }
+    private fun pushMarqueeMessages(vararg messages: Message.Marquee) {
+        messages.reversed().forEach { pushMarqueeMessage(it) }
     }
 
     /** Pushes a message into the messages list at the current index. */
-    fun pushUserMessage(userMessage: Message.UserMessage) {
-        userMessages.add(0, userMessage)
+    fun pushMarqueeMessage(marqueeMessage: Message.Marquee) {
+        marqueeMessages.add(0, marqueeMessage)
     }
 
     /** Write out the list of strings to the file */
     fun saveUserMessages(context: Context) {
         try {
-            userMessages
+            marqueeMessages
                 .map { it.str }
                 .reversed()
                 .toFile(File(context.filesDir, SIGN_STRINGS_FILE_NAME))
@@ -51,7 +51,7 @@ class MessageRepository {
     /** Return the
      * //TODO last [MAX_SIGN_STRINGS]
      * strings from the sign strings file. */
-    fun loadUserMessages(context: Context): MutableList<Message.UserMessage> {
+    fun loadUserMessages(context: Context): MutableList<Message.Marquee.Default> {
         with(File(context.filesDir, SIGN_STRINGS_FILE_NAME)) {
             when (createNewFile()) {
                 true -> logD("$SIGN_STRINGS_FILE_NAME does not exist; created new.")
@@ -59,9 +59,9 @@ class MessageRepository {
             }
 
             bufferedReader().use { reader ->
-                val list: MutableList<Message.UserMessage> =
+                val list: MutableList<Message.Marquee.Default> =
                     reader.lineSequence() //.take(MAX_SIGN_STRINGS)
-                        .map { Message.UserMessage(it) }
+                        .map { Message.Marquee.Default(it) }
                         .filter { it.str.isNotBlank() }
                         .toMutableList()
                         .asReversed()

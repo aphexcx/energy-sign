@@ -19,11 +19,20 @@ sealed class Message {
         const val HEART: Char = '\u007F' //heart char (DEL)
     }
 
-    @Serializable
-    data class UserMessage(
-        override val str: String,
-        override val type: MSGTYPE = MSGTYPE.DEFAULT
-    ) : Message()
+    sealed class Marquee : Message() {
+        @Serializable
+        data class Default(
+            override val str: String,
+            override val type: MSGTYPE = MSGTYPE.DEFAULT
+        ) : Marquee()
+
+        @Serializable
+        data class Chonky(
+            override val str: String,
+            override val type: MSGTYPE = MSGTYPE.CHONKYMARQUEE
+        ) : Marquee()
+
+    }
 
     @Serializable
     data class Starfield(
@@ -36,12 +45,6 @@ sealed class Message {
     data class NowPlayingTrackMessage(
         override val str: String,
         override val type: MSGTYPE = MSGTYPE.TRACKID
-    ) : Message()
-
-    @Serializable
-    data class ChonkyMarquee(
-        override val str: String,
-        override val type: MSGTYPE = MSGTYPE.CHONKYMARQUEE
     ) : Message()
 
     sealed class ColorMessage(
@@ -64,7 +67,8 @@ sealed class Message {
             @SerializedName("dly") val delayMs: Short = 1000,
 //            val colorFrom: Color,
 //            val colorTo: Color,
-            override val type: MSGTYPE = MSGTYPE.CHONKY_SLIDE
+            override val type: MSGTYPE = MSGTYPE.CHONKY_SLIDE,
+            @SerializedName("scroll") val shouldScrollToLastLetter: Boolean = false
         ) : ColorMessage(colorCycle)
 
         sealed class IconInvaders(
@@ -109,7 +113,7 @@ sealed class Message {
     class Chooser(
         currentIndex: Int,
         lastIndex: Int,
-        currentMessage: UserMessage
+        currentMessage: Marquee
     ) : Message() {
         override val str: String = currentMessage.str
         private val flashy: String = "$currentIndex/${lastIndex}"
@@ -204,7 +208,7 @@ sealed class Message {
                     MSGTYPE.KEYBOARD -> context.deserialize(json, KeyboardEcho::class.java)
                     MSGTYPE.STARFIELD -> context.deserialize(json, Starfield::class.java)
                     MSGTYPE.TRACKID -> context.deserialize(json, NowPlayingTrackMessage::class.java)
-                    MSGTYPE.CHONKYMARQUEE -> context.deserialize(json, ChonkyMarquee::class.java)
+                    MSGTYPE.CHONKYMARQUEE -> context.deserialize(json, Marquee.Chonky::class.java)
                     MSGTYPE.ICON -> {
                         when (json.asJsonObject["str"].asString) {
                             "1" -> context.deserialize(json, ColorMessage.IconInvaders.Enemy1::class.java)
@@ -218,10 +222,10 @@ sealed class Message {
                         }
                     }
 
-                    MSGTYPE.DEFAULT -> context.deserialize(json, UserMessage::class.java)
+                    MSGTYPE.DEFAULT -> context.deserialize(json, Marquee.Default::class.java)
                 }
             } catch (e: JsonParseException) {
-                context.deserialize(json, UserMessage::class.java)
+                context.deserialize(json, Marquee.Default::class.java)
             }
         }
     }

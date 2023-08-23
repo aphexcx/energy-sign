@@ -42,7 +42,11 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
     private var showAsWarning: Boolean = false
     private var keyboardStringBuilder: StringBuilder = StringBuilder()
 
-    private var isSheepThinking: Boolean = false
+    private var isGeneratingThought: Boolean = false
+    private var partialSheepThought: String? = null
+    private var partialSheepThoughtStartIdx: Int = 0
+    private var sheepThoughtBuffer = ArrayDeque<Char>()
+    private var thoughtOnPanel: String = ""
 
     //How often to advertise, e.g. every 5 user messages
     private var advertiseEvery: Int = 8
@@ -53,7 +57,7 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
     )
 
     init {
-        msgRepo.userMessages.addAll(msgRepo.loadUserMessages(context))
+        msgRepo.marqueeMessages.addAll(msgRepo.loadUserMessages(context))
 
         //TODO fix deserialization
         val ads: List<Message> = loadAds()
@@ -106,8 +110,8 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
         currentIdx.value = 0
 
         msgRepo.enqueueOneTimeMessage(Message.CountDownAnnouncement.NewMessageAnnouncement)
-        msgRepo.pushUserMessage(
-            Message.UserMessage(
+        msgRepo.pushMarqueeMessage(
+            Message.Marquee.Default(
                 str
                     .convertHeartEmojis()
                     .toNormalized()
@@ -151,12 +155,17 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
     fun getNextMessage(): Message {
         if (isInChooserMode) {
             val idx = currentIdx.value
-            val currentUsrMsg: Message.UserMessage =
-                msgRepo.userMessages.getOrNull(idx)?.let { it.copy(str = it.str.take(7)) }
-                    ?: Message.UserMessage("<empty>")
+            val currentUsrMsg: Message.Marquee =
+                msgRepo.marqueeMessages.getOrNull(idx)?.let {
+                    when (it) {
+                        is Message.Marquee.Default -> it.copy(str = it.str.take(7))
+                        is Message.Marquee.Chonky -> it.copy(str = it.str.take(5))
+                    }
+                }
+                    ?: Message.Marquee.Default("<empty>")
             logD("getNextMessage: currentMessage is now messages[$idx] = $currentUsrMsg")
             logD("Sending messages[$idx] as chooser!")
-            return Message.Chooser(idx + 1, msgRepo.userMessages.lastIndex + 1, currentUsrMsg)
+            return Message.Chooser(idx + 1, msgRepo.marqueeMessages.lastIndex + 1, currentUsrMsg)
         } else {
 
             if (isInKeyboardInputMode) {
@@ -182,15 +191,52 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
 
             // Regular marquee mode; display next user message/
 
-            if (msgRepo.oneTimeMessages.isEmpty() && msgRepo.userMessages.isEmpty()) {
+            if (msgRepo.oneTimeMessages.isEmpty() && msgRepo.marqueeMessages.isEmpty()) {
                 logD("No messages to display; injecting advertisement")
                 pushAdvertisements()
             }
 
-            if (msgRepo.oneTimeMessages.isEmpty() && isSheepThinking) {
+            if (msgRepo.oneTimeMessages.isEmpty() && partialSheepThought == null && isGeneratingThought) {
                 logD("Sheep is thinking, injecting thinking notification")
 //                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("PONDERING."))
                 msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("THINKING.."))
+            }
+
+            partialSheepThought?.let { partialThought ->
+                if (partialSheepThoughtStartIdx == partialThought.lastIndex && !isGeneratingThought) {
+                    partialSheepThought = null
+                }
+                logD("Returning partial sheep thought!")
+//                if (sheepThoughtBuffer.isEmpty()) {
+//                    val endIdx = (partialSheepThoughtStartIdx + 5).coerceAtMost(partialThought.lastIndex)
+//                    sheepThoughtBuffer.addAll(
+//                        partialThought
+//                            .slice(partialSheepThoughtStartIdx..endIdx)
+//                            .toList()
+//                    )
+//                    partialSheepThoughtStartIdx = endIdx
+//                }
+//                val toDisplay = sheepThoughtBuffer.
+                val endIdx = (partialSheepThoughtStartIdx + 1).coerceAtMost(partialThought.lastIndex)
+
+                thoughtOnPanel += partialThought
+                    .substring(partialSheepThoughtStartIdx until endIdx)
+                    .toUpperCasePreservingASCIIRules()
+
+                partialSheepThoughtStartIdx = endIdx
+
+                val isPanelFull = thoughtOnPanel.length == 5 //sheepThoughtBuffer.isEmpty()
+
+                return Message.ColorMessage.ChonkySlide(
+                    str = thoughtOnPanel.plus('_').padEnd(6, ' '),
+                    colorCycle = context.getColor(R.color.chonkyslide_defaultpink),
+                    delayMs = 10,
+                    shouldScrollToLastLetter = isPanelFull
+                ).also {
+                    if (isPanelFull) {
+                        thoughtOnPanel = thoughtOnPanel.takeLast(1)
+                    }
+                }
             }
 
             msgRepo.oneTimeMessages.removeFirstOrNull()?.let {
@@ -198,7 +244,7 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
             }
 
             val idx = getIdxAndAdvance()
-            val currentUsrMsg: Message.UserMessage = msgRepo.userMessages[idx]
+            val currentUsrMsg: Message.Marquee = msgRepo.marqueeMessages[idx]
             logD("getNextMessage: currentMessage is now messages[$idx] = $currentUsrMsg")
             logD("Sending messages[$idx]")
             usrMsgCount++
@@ -215,7 +261,7 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
             if (isPaused) {
                 it
             } else {
-                if (it == msgRepo.userMessages.lastIndex) 0
+                if (it == msgRepo.marqueeMessages.lastIndex) 0
                 else it + 1
             }
         }
@@ -239,7 +285,7 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
             "!ne",
             "!next" -> {
                 currentIdx.update {
-                    if (it < msgRepo.userMessages.lastIndex) it + 1 else msgRepo.userMessages.lastIndex
+                    if (it < msgRepo.marqueeMessages.lastIndex) it + 1 else msgRepo.marqueeMessages.lastIndex
                 }
             }
 
@@ -250,15 +296,15 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
 
             "!l",
             "!last" -> {
-                currentIdx.value = msgRepo.userMessages.lastIndex
+                currentIdx.value = msgRepo.marqueeMessages.lastIndex
             }
 
             "!d",
             "!delete" -> {
-                if (msgRepo.userMessages.isNotEmpty()) {
-                    msgRepo.userMessages.removeAt(currentIdx.value)
+                if (msgRepo.marqueeMessages.isNotEmpty()) {
+                    msgRepo.marqueeMessages.removeAt(currentIdx.value)
                     currentIdx.update {
-                        if (it >= msgRepo.userMessages.lastIndex) msgRepo.userMessages.lastIndex else it
+                        if (it >= msgRepo.marqueeMessages.lastIndex) msgRepo.marqueeMessages.lastIndex else it
                     }
                     msgRepo.saveUserMessages(context)
                 }
@@ -336,7 +382,7 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
     }
 
     private fun findUserMessage(query: String) {
-        val idx = msgRepo.userMessages.indexOfFirst { it.str.contains(query, ignoreCase = true) }
+        val idx = msgRepo.marqueeMessages.indexOfFirst { it.str.contains(query, ignoreCase = true) }
         if (idx != -1) {
             currentIdx.update {
                 idx
@@ -579,17 +625,27 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
     }
 
     fun processNewSheepThought(thought: String) {
-        msgRepo.pushOneTimeMessages(
-            Message.ColorMessage.ChonkySlide("NEW", context.getColor(R.color.chonkyslide_defaultpink)),
-            Message.ColorMessage.ChonkySlide("SHEEP", context.getColor(R.color.chonkyslide_defaultpink)),
-            Message.ColorMessage.ChonkySlide("THOT..", context.getColor(R.color.chonkyslide_defaultpink)),
-            Message.ColorMessage.IconInvaders.BAAAHS(context.getColor(R.color.instahandle)),
-            Message.ChonkyMarquee(thought.toUpperCasePreservingASCIIRules())
-        )
+
+//        msgRepo.pushOneTimeMessages(
+//            Message.ColorMessage.ChonkySlide("NEW", context.getColor(R.color.chonkyslide_defaultpink)),
+//            Message.ColorMessage.ChonkySlide("SHEEP", context.getColor(R.color.chonkyslide_defaultpink)),
+//            Message.ColorMessage.ChonkySlide("THOT..", context.getColor(R.color.chonkyslide_defaultpink)),
+//            Message.ColorMessage.IconInvaders.BAAAHS(context.getColor(R.color.instahandle)),
+//            Message.ChonkyMarquee(thought.toUpperCasePreservingASCIIRules())
+//        )
+        msgRepo.pushMarqueeMessage(Message.Marquee.Chonky(thought.toUpperCasePreservingASCIIRules()))
     }
 
-    fun setSheepThinking(thinking: Boolean) {
-        isSheepThinking = thinking
+    fun setGeneratingThought(thinking: Boolean) {
+        isGeneratingThought = thinking
+    }
+
+    fun processPartialSheepThought(chunk: String) {
+        if (partialSheepThought == null) {
+            partialSheepThought = ""
+            partialSheepThoughtStartIdx = 0
+        }
+        partialSheepThought += chunk
     }
 
     companion object {
