@@ -35,6 +35,11 @@ class MessageRepository {
         marqueeMessages.add(0, marqueeMessage)
     }
 
+    /** Pushes a message into the messages list at the current index -1. */
+    fun pushMarqueeMessageBeforeCurrent(marqueeMessage: Message.Marquee) {
+        marqueeMessages.add(1, marqueeMessage)
+    }
+
     /** Write out the list of strings to the file */
     fun saveUserMessages(context: Context) {
         try {

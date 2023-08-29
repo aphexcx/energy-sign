@@ -225,12 +225,12 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
 
                 partialSheepThoughtStartIdx = endIdx
 
-                val isPanelFull = thoughtOnPanel.length == 5 //sheepThoughtBuffer.isEmpty()
+                val isPanelFull = thoughtOnPanel.length >= 5 //sheepThoughtBuffer.isEmpty()
 
                 return Message.ColorMessage.ChonkySlide(
-                    str = thoughtOnPanel.plus('_').padEnd(6, ' '),
+                    str = thoughtOnPanel.plus('|').padEnd(6, ' '),
                     colorCycle = context.getColor(R.color.chonkyslide_defaultpink),
-                    delayMs = 10,
+                    delayMs = 20,
                     shouldScrollToLastLetter = isPanelFull
                 ).also {
                     if (isPanelFull) {
@@ -633,7 +633,7 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
 //            Message.ColorMessage.IconInvaders.BAAAHS(context.getColor(R.color.instahandle)),
 //            Message.ChonkyMarquee(thought.toUpperCasePreservingASCIIRules())
 //        )
-        msgRepo.pushMarqueeMessage(Message.Marquee.Chonky(thought.toUpperCasePreservingASCIIRules()))
+        msgRepo.pushMarqueeMessageBeforeCurrent(Message.Marquee.Chonky(thought.toUpperCasePreservingASCIIRules()))
     }
 
     fun setGeneratingThought(thinking: Boolean) {
