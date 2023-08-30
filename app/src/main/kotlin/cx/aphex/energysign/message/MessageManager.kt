@@ -230,11 +230,11 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
                 return Message.ColorMessage.ChonkySlide(
                     str = thoughtOnPanel.plus('|').padEnd(6, ' '),
                     colorCycle = context.getColor(R.color.chonkyslide_defaultpink),
-                    delayMs = 20,
+                    delayMs = 10,
                     shouldScrollToLastLetter = isPanelFull
                 ).also {
                     if (isPanelFull) {
-                        thoughtOnPanel = thoughtOnPanel.takeLast(1)
+                        thoughtOnPanel = thoughtOnPanel.takeLast(5)
                     }
                 }
             }
