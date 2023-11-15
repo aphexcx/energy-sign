@@ -44,9 +44,12 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
 
     private var isGeneratingThought: Boolean = false
     private var partialSheepThought: String? = null
+    private var partialSheepThoughtRetainforAnother: Int = 5
     private var partialSheepThoughtStartIdx: Int = 0
-    private var sheepThoughtBuffer = ArrayDeque<Char>()
+
+    //    private var sheepThoughtBuffer = ArrayDeque<Char>()
     private var thoughtOnPanel: String = ""
+    private var showCaret: Boolean = true
 
     //How often to advertise, e.g. every 5 user messages
     private var advertiseEvery: Int = 8
@@ -169,6 +172,8 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
         } else {
 
             if (isInKeyboardInputMode) {
+                msgRepo.oneTimeMessages.clear()
+
                 val msSinceLastInput = System.currentTimeMillis() - lastKeyboardInputReceivedAtMs
 
                 showAsWarning =
@@ -198,25 +203,32 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
 
             if (msgRepo.oneTimeMessages.isEmpty() && partialSheepThought == null && isGeneratingThought) {
                 logD("Sheep is thinking, injecting thinking notification")
-//                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("PONDERING."))
-                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("THINKING.."))
+                //TODO how do I make sure new user message has been displayed before showing sheep thinking notification?
+                return Message.ColorMessage.ChonkySlide(
+                    str = "".plus(if (showCaret) '|' else ' ').padEnd(6, ' '),
+                    colorCycle = context.getColor(R.color.chonkyslide_defaultpink),
+                    delayMs = 10,
+                )
+
+//                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("THINKING.", 50))
+//                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("THINKING..", 50))
+//                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("PONDERING.", 50))
             }
 
             partialSheepThought?.let { partialThought ->
-                if (partialSheepThoughtStartIdx == partialThought.lastIndex && !isGeneratingThought) {
-                    partialSheepThought = null
+                msgRepo.oneTimeMessages.clear()
+
+                if (!isGeneratingThought && partialSheepThoughtStartIdx == partialThought.lastIndex) {
+                    if (partialSheepThoughtRetainforAnother > 0) {
+                        partialSheepThoughtRetainforAnother -= 1
+                    } else {
+                        partialSheepThought = null
+                        msgRepo.pushOneTimeMessage(Message.ColorMessage.IconInvaders.Explosion(context.getColor(R.color.pink)))
+                        partialSheepThoughtRetainforAnother = 5
+                    }
                 }
                 logD("Returning partial sheep thought!")
-//                if (sheepThoughtBuffer.isEmpty()) {
-//                    val endIdx = (partialSheepThoughtStartIdx + 5).coerceAtMost(partialThought.lastIndex)
-//                    sheepThoughtBuffer.addAll(
-//                        partialThought
-//                            .slice(partialSheepThoughtStartIdx..endIdx)
-//                            .toList()
-//                    )
-//                    partialSheepThoughtStartIdx = endIdx
-//                }
-//                val toDisplay = sheepThoughtBuffer.
+
                 val endIdx = (partialSheepThoughtStartIdx + 1).coerceAtMost(partialThought.lastIndex)
 
                 thoughtOnPanel += partialThought
@@ -228,7 +240,7 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
                 val isPanelFull = thoughtOnPanel.length >= 5 //sheepThoughtBuffer.isEmpty()
 
                 return Message.ColorMessage.ChonkySlide(
-                    str = thoughtOnPanel.plus('|').padEnd(6, ' '),
+                    str = thoughtOnPanel.plus(if (showCaret) '|' else '_').padEnd(6, ' '),
                     colorCycle = context.getColor(R.color.chonkyslide_defaultpink),
                     delayMs = 10,
                     shouldScrollToLastLetter = isPanelFull
@@ -236,6 +248,7 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
                     if (isPanelFull) {
                         thoughtOnPanel = thoughtOnPanel.takeLast(5)
                     }
+                    showCaret = true
                 }
             }
 
@@ -365,8 +378,9 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
                     cmd.startsWith("!A", ignoreCase = true) -> {
                         cmd.drop(2).trim().toIntOrNull()?.let { newPeriod ->
                             advertiseEvery = newPeriod
-                            msgRepo.pushOneTimeMessage(
-                                Message.FlashingAnnouncement.CustomFlashyAnnouncement("AD EVERY=$advertiseEvery")
+                            msgRepo.pushOneTimeMessages(
+                                Message.FlashingAnnouncement.CustomFlashyAnnouncement("AD EVERY=$advertiseEvery"),
+                                Message.Starfield()
                             )
                         }
                     }
@@ -405,7 +419,7 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
                     Message.ColorMessage.ChonkySlide(
                         str,
                         color ?: context.getColor(R.color.chonkyslide_defaultpink),
-                        delay.toShort()
+                        delay
                     )
                 }
 
@@ -614,6 +628,7 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
 
                 msgRepo.enqueueOneTimeMessage(NowPlayingAnnouncement)
                 msgRepo.enqueueOneTimeMessage(nowPlayingTrack!!)
+                msgRepo.enqueueOneTimeMessage(Message.Starfield())
 
 
                 while (playedTracks.size > MAX_PLAYED_TRACKS_MEMORY) {
@@ -645,7 +660,7 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
             partialSheepThought = ""
             partialSheepThoughtStartIdx = 0
         }
-        partialSheepThought += chunk
+        partialSheepThought += chunk.toNormalized()
     }
 
     companion object {
