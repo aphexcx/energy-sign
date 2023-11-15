@@ -3,6 +3,7 @@ package cx.aphex.energysign.message
 import android.content.Context
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
+import cx.aphex.energysign.message.Message.Companion.VT
 import cx.aphex.energysign.toFile
 import java.io.File
 import java.util.Collections.synchronizedList
@@ -44,6 +45,14 @@ class MessageRepository {
     fun saveUserMessages(context: Context) {
         try {
             marqueeMessages
+                .map { it.toString() }
+                .reversed()
+                .toFile(File(context.filesDir, SIGN_DB_FILE_NAME))
+        } catch (e: Throwable) {
+            logW("Exception when saving $SIGN_DB_FILE_NAME! ${e.message}")
+        }
+        try {
+            marqueeMessages
                 .map { it.str }
                 .reversed()
                 .toFile(File(context.filesDir, SIGN_STRINGS_FILE_NAME))
@@ -56,23 +65,30 @@ class MessageRepository {
     /** Return the
      * //TODO last [MAX_SIGN_STRINGS]
      * strings from the sign strings file. */
-    fun loadUserMessages(context: Context): MutableList<Message.Marquee.Default> {
-        with(File(context.filesDir, SIGN_STRINGS_FILE_NAME)) {
+    fun loadUserMessages(context: Context): MutableList<Message.Marquee> {
+        with(File(context.filesDir, SIGN_DB_FILE_NAME)) {
             when (createNewFile()) {
-                true -> logD("$SIGN_STRINGS_FILE_NAME does not exist; created new.")
-                else -> logD("$SIGN_STRINGS_FILE_NAME exists. Reading...")
+                true -> logD("$SIGN_DB_FILE_NAME does not exist; created new.")
+                else -> logD("$SIGN_DB_FILE_NAME exists. Reading...")
             }
 
             bufferedReader().use { reader ->
-                val list: MutableList<Message.Marquee.Default> =
+                val list: MutableList<Message.Marquee> =
                     reader.lineSequence() //.take(MAX_SIGN_STRINGS)
-                        .map { Message.Marquee.Default(it) }
+                        .map {
+                            val parts = it.split("$VT")
+                            when (Message.MSGTYPE.valueOf(parts[0])) {
+                                Message.MSGTYPE.DEFAULT -> Message.Marquee.Default.fromString(it)
+                                Message.MSGTYPE.CHONKYMARQUEE -> Message.Marquee.Chonky.fromString(it)
+                                else -> throw IllegalArgumentException("Invalid message type")
+                            }
+                        }
                         .filter { it.str.isNotBlank() }
                         .toMutableList()
                         .asReversed()
 
                 logD(
-                    "Read ${list.size} lines from $SIGN_STRINGS_FILE_NAME! Here are the first 10: [${
+                    "Read ${list.size} lines from $SIGN_DB_FILE_NAME! Here are the first 10: [${
                         list.take(
                             10
                         ).joinToString(", ") { it.str }
@@ -85,6 +101,7 @@ class MessageRepository {
 
     companion object {
         private const val SIGN_STRINGS_FILE_NAME = "signstrings.txt"
+        private const val SIGN_DB_FILE_NAME = "signstrings.bin"
         private const val MAX_SIGN_STRINGS: Int = 1000
 
     }

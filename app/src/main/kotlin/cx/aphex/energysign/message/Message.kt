@@ -8,8 +8,7 @@ import com.google.gson.annotations.SerializedName
 import kotlinx.serialization.Serializable
 import java.lang.reflect.Type
 
-@JsonAdapter(Message.MessageSerializer::class)
-//@Serializable
+@Serializable
 sealed class Message {
     abstract val str: String
     protected abstract val type: MSGTYPE
@@ -24,13 +23,31 @@ sealed class Message {
         data class Default(
             override val str: String,
             override val type: MSGTYPE = MSGTYPE.DEFAULT
-        ) : Marquee()
+        ) : Marquee() {
+            override fun toString(): String = "$type$VT$str"
+
+            companion object {
+                fun fromString(s: String): Default {
+                    val parts = s.split("$VT")
+                    return Default(parts[1], MSGTYPE.valueOf(parts[0]))
+                }
+            }
+        }
 
         @Serializable
         data class Chonky(
             override val str: String,
             override val type: MSGTYPE = MSGTYPE.CHONKYMARQUEE
-        ) : Marquee()
+        ) : Marquee() {
+            override fun toString(): String = "$type$VT$str"
+
+            companion object {
+                fun fromString(s: String): Chonky {
+                    val parts = s.split("$VT")
+                    return Chonky(parts[1], MSGTYPE.valueOf(parts[0]))
+                }
+            }
+        }
 
     }
 
@@ -64,7 +81,7 @@ sealed class Message {
         data class ChonkySlide(
             override val str: String,
             @Transient @ColorInt val colorCycle: Int,
-            @SerializedName("dly") val delayMs: Short = 1000,
+            @SerializedName("dly") val delayMs: Int = 1000,
 //            val colorFrom: Color,
 //            val colorTo: Color,
             override val type: MSGTYPE = MSGTYPE.CHONKY_SLIDE,
@@ -87,11 +104,11 @@ sealed class Message {
         }
     }
 
-    sealed class FlashingAnnouncement(override val str: String) : Message() {
+    sealed class FlashingAnnouncement(override val str: String, val time: Short = 200) : Message() {
         override val type: MSGTYPE = MSGTYPE.FLASHY
 
         object NowPlayingAnnouncement : FlashingAnnouncement("NOW${VT}PLAYING")
-        class CustomFlashyAnnouncement(str: String) : FlashingAnnouncement(str)
+        class CustomFlashyAnnouncement(str: String, time: Short = 200) : FlashingAnnouncement(str, time)
     }
 
     sealed class CountDownAnnouncement(override val str: String) : Message() {
