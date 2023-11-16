@@ -17,6 +17,10 @@ android {
         targetSdkVersion 33
         versionCode 1
         versionName "1.0"
+
+        Properties properties = new Properties()
+        properties.load(project.rootProject.file('local.properties').newDataInputStream())
+        buildConfigField("String", "OPENAI_API_KEY", properties.getProperty('OPENAI_API_KEY'))
     }
     buildTypes {
         release {
@@ -104,5 +108,8 @@ dependencies {
 
     implementation 'com.vdurmont:emoji-java:5.1.1'
 
+    implementation platform('com.aallam.openai:openai-client-bom:3.2.0')
+    implementation 'com.aallam.openai:openai-client'
+    implementation 'io.ktor:ktor-client-okhttp'
 
 }

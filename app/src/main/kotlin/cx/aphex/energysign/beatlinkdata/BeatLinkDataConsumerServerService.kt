@@ -70,7 +70,7 @@ class BeatLinkDataConsumerServerService : Service(), KoinComponent {
                 post("/streamPartialSheepThought") {
                     val msg: PostedMessage = call.receive()
                     logW("Received new partial SheepThought: ${msg.message}")
-                    messageManager.processPartialSheepThought(msg.message)
+                    messageManager.processPartialThought(msg.message)
                     call.respond(mapOf("success" to true))
                 }
                 post("/newSheepThought") {

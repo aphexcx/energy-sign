@@ -11,16 +11,19 @@ import cx.aphex.energysign.ext.convertHeartEmojis
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
 import cx.aphex.energysign.ext.toNormalized
+import cx.aphex.energysign.gpt.GPTViewModel
 import cx.aphex.energysign.message.Message.FlashingAnnouncement.NowPlayingAnnouncement
 import io.ktor.util.toUpperCasePreservingASCIIRules
 import kotlinx.atomicfu.AtomicInt
 import kotlinx.atomicfu.atomic
 import kotlinx.atomicfu.getAndUpdate
 import kotlinx.atomicfu.update
+import org.koin.core.component.KoinComponent
+import org.koin.core.component.inject
 import java.io.File
 
 
-class MessageManager(val context: Context, val msgRepo: MessageRepository) {
+class MessageManager(val context: Context, val msgRepo: MessageRepository) : KoinComponent {
     private val gson: Gson = GsonBuilder()
         .registerTypeAdapter(Message::class.java, Message.MessageSerializer())
         .create()
@@ -43,9 +46,9 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
     private var keyboardStringBuilder: StringBuilder = StringBuilder()
 
     private var isGeneratingThought: Boolean = false
-    private var partialSheepThought: String? = null
-    private var partialSheepThoughtRetainforAnother: Int = 5
-    private var partialSheepThoughtStartIdx: Int = 0
+    private var partialThought: String? = null
+    private var partialThoughtRetainforAnother: Int = 5
+    private var partialThoughtStartIdx: Int = 0
 
     //    private var sheepThoughtBuffer = ArrayDeque<Char>()
     private var thoughtOnPanel: String = ""
@@ -59,10 +62,12 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
         Message.ColorMessage.IconInvaders.Enemy2(context.getColor(R.color.icon_defaultblue))
     )
 
-    init {
-        msgRepo.marqueeMessages.addAll(msgRepo.loadUserMessages(context))
+    private val gptViewModel: GPTViewModel by inject()
 
-        //TODO fix deserialization
+    init {
+
+
+        msgRepo.marqueeMessages.addAll(msgRepo.loadUserMessages(context))
         val ads: List<Message> = loadAds()
 
         advertisements.addAll(
@@ -107,6 +112,7 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
     }
 
     private var usrMsgCount: Int = 0
+    private var newUsrMsgsToDisplay: Int = 0
 
     /** Pushes a new user message onto the top of the messages list. */
     fun processNewUserMessage(str: String) {
@@ -121,10 +127,15 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
             )
         )
 
+        newUsrMsgsToDisplay += 1
+
 //        String(value).split("++").filter { it.isNotBlank() }.reversed().forEach {
 //            pushStringOnList(it.replace('•', '*'))
 //        }
 
+        if (str.lowercase().contains("dreamgpt")) {
+            gptViewModel.generateAnswer(str)
+        }
         msgRepo.saveUserMessages(context)
     }
 
@@ -194,66 +205,71 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
                 }
             }
 
-            // Regular marquee mode; display next user message/
+            if (newUsrMsgsToDisplay == 0) {
+                if (msgRepo.oneTimeMessages.isEmpty() && msgRepo.marqueeMessages.isEmpty()) {
+                    logD("No messages to display; injecting advertisement")
+                    pushAdvertisements()
+                }
 
-            if (msgRepo.oneTimeMessages.isEmpty() && msgRepo.marqueeMessages.isEmpty()) {
-                logD("No messages to display; injecting advertisement")
-                pushAdvertisements()
-            }
-
-            if (msgRepo.oneTimeMessages.isEmpty() && partialSheepThought == null && isGeneratingThought) {
-                logD("Sheep is thinking, injecting thinking notification")
-                //TODO how do I make sure new user message has been displayed before showing sheep thinking notification?
-                return Message.ColorMessage.ChonkySlide(
-                    str = "".plus(if (showCaret) '|' else ' ').padEnd(6, ' '),
-                    colorCycle = context.getColor(R.color.chonkyslide_defaultpink),
-                    delayMs = 10,
-                )
+                if (msgRepo.oneTimeMessages.isEmpty() && partialThought == null && isGeneratingThought) {
+                    logD("Sheep is thinking, injecting thinking notification")
+                    //TODO how do I make sure new user message has been displayed before showing sheep thinking notification?
+                    return Message.ColorMessage.ChonkySlide(
+                        str = "".plus(if (showCaret) '|' else ' ').padEnd(6, ' '),
+                        colorCycle = context.getColor(R.color.chonkyslide_defaultpink),
+                        delayMs = 10,
+                    )
 
 //                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("THINKING.", 50))
 //                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("THINKING..", 50))
 //                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("PONDERING.", 50))
-            }
-
-            partialSheepThought?.let { partialThought ->
-                msgRepo.oneTimeMessages.clear()
-
-                if (!isGeneratingThought && partialSheepThoughtStartIdx == partialThought.lastIndex) {
-                    if (partialSheepThoughtRetainforAnother > 0) {
-                        partialSheepThoughtRetainforAnother -= 1
-                    } else {
-                        partialSheepThought = null
-                        msgRepo.pushOneTimeMessage(Message.ColorMessage.IconInvaders.Explosion(context.getColor(R.color.pink)))
-                        partialSheepThoughtRetainforAnother = 5
-                    }
                 }
-                logD("Returning partial sheep thought!")
 
-                val endIdx = (partialSheepThoughtStartIdx + 1).coerceAtMost(partialThought.lastIndex)
+                partialThought?.let { partialThought ->
+                    msgRepo.oneTimeMessages.clear()
 
-                thoughtOnPanel += partialThought
-                    .substring(partialSheepThoughtStartIdx until endIdx)
-                    .toUpperCasePreservingASCIIRules()
-
-                partialSheepThoughtStartIdx = endIdx
-
-                val isPanelFull = thoughtOnPanel.length >= 5 //sheepThoughtBuffer.isEmpty()
-
-                return Message.ColorMessage.ChonkySlide(
-                    str = thoughtOnPanel.plus(if (showCaret) '|' else '_').padEnd(6, ' '),
-                    colorCycle = context.getColor(R.color.chonkyslide_defaultpink),
-                    delayMs = 10,
-                    shouldScrollToLastLetter = isPanelFull
-                ).also {
-                    if (isPanelFull) {
-                        thoughtOnPanel = thoughtOnPanel.takeLast(5)
+                    if (!isGeneratingThought && partialThoughtStartIdx == partialThought.lastIndex) {
+                        if (partialThoughtRetainforAnother > 0) {
+                            partialThoughtRetainforAnother -= 1
+                        } else {
+                            this.partialThought = null
+                            msgRepo.pushOneTimeMessage(Message.ColorMessage.IconInvaders.Explosion(context.getColor(R.color.pink)))
+                            partialThoughtRetainforAnother = 5
+                        }
                     }
-                    showCaret = true
+                    logD("Returning partial sheep thought!")
+
+                    val endIdx = (partialThoughtStartIdx + 1).coerceAtMost(partialThought.lastIndex)
+
+                    thoughtOnPanel += partialThought
+                        .substring(partialThoughtStartIdx until endIdx)
+                        .toUpperCasePreservingASCIIRules()
+
+                    partialThoughtStartIdx = endIdx
+
+                    val isPanelFull = thoughtOnPanel.length >= 5 //sheepThoughtBuffer.isEmpty()
+
+                    return Message.ColorMessage.ChonkySlide(
+                        str = thoughtOnPanel.plus(if (showCaret) '|' else '_').padEnd(6, ' '),
+                        colorCycle = context.getColor(R.color.chonkyslide_defaultpink),
+                        delayMs = 10,
+                        shouldScrollToLastLetter = isPanelFull
+                    ).also {
+                        if (isPanelFull) {
+                            thoughtOnPanel = thoughtOnPanel.takeLast(5)
+                        }
+                        showCaret = true
+                    }
                 }
             }
 
             msgRepo.oneTimeMessages.removeFirstOrNull()?.let {
                 return it
+            }
+
+            // Fallthrough to regular marquee mode; display next user message
+            if (newUsrMsgsToDisplay > 0) {
+                newUsrMsgsToDisplay -= 1
             }
 
             val idx = getIdxAndAdvance()
@@ -655,12 +671,12 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) {
         isGeneratingThought = thinking
     }
 
-    fun processPartialSheepThought(chunk: String) {
-        if (partialSheepThought == null) {
-            partialSheepThought = ""
-            partialSheepThoughtStartIdx = 0
+    fun processPartialThought(chunk: String) {
+        if (partialThought == null) {
+            partialThought = ""
+            partialThoughtStartIdx = 0
         }
-        partialSheepThought += chunk.toNormalized()
+        partialThought += chunk.toNormalized()
     }
 
     companion object {
