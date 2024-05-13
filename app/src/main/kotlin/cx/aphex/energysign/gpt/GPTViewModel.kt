@@ -1,11 +1,13 @@
 package cx.aphex.energysign.gpt
 
+import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.aallam.openai.api.BetaOpenAI
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logE
-import cx.aphex.energysign.message.MessageManager
+import cx.aphex.energysign.ext.logI
+import cx.aphex.energysign.message.Message
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -19,28 +21,28 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.launch
 import org.koin.core.component.KoinComponent
-import org.koin.core.component.inject
 import kotlin.coroutines.CoroutineContext
 
+data class GptAnswerResponse(val answer: String, val inReplyTo: Message.Marquee.GPTQuery)
 @OptIn(BetaOpenAI::class, ExperimentalCoroutinesApi::class)
 class GPTViewModel(
     private val defaultDispatcher: CoroutineContext = Dispatchers.IO.limitedParallelism(1)
 ) : ViewModel(), KoinComponent {
 
-    private val messageManager: MessageManager by inject()
+    val GPTResponse: MutableLiveData<GptAnswerResponse> = MutableLiveData()
+
+    val GPTError: MutableLiveData<Throwable> = MutableLiveData()
 
     private var fetchAnswerJob: Job? = null
 
-    fun generateAnswer(content: String) {
+    fun generateAnswer(replyingToMessage: Message.Marquee.GPTQuery) {
         logD("generateAnswer called!!!!")
 
         viewModelScope.launch(defaultDispatcher) {
-            messageManager.setGeneratingThought(true)
-
             val currentAnswerChunks = mutableListOf<String>()
 
             fetchAnswerJob =
-                OpenAIClient.generateAnswer(content, listOf()) //, chatLog.value)
+                OpenAIClient.generateAnswer(replyingToMessage.str, listOf()) //, chatLog.value)
                     .onStart {
                         currentAnswerChunks.clear()
                     }
@@ -51,23 +53,27 @@ class GPTViewModel(
                     .flowOn(defaultDispatcher)
                     .onEach { content ->
                         logD(
-                            "got $content, currentAnswerChunks= ${currentAnswerChunks}"
+                            "got $content, currentAnswerChunks= $currentAnswerChunks"
                         )
 //                        delay(24)
                         currentAnswerChunks.add(content)
                         logD(
-                            "added to currentAnswerChunks= ${currentAnswerChunks}"
+                            "added to currentAnswerChunks= $currentAnswerChunks"
                         )
-                        messageManager.processPartialThought(content)
+//                        messageManager.processPartialThought(content)
                     }
                     .onCompletion { cause ->
-                        logE("generateAnswer Completed: $cause")
-                        messageManager.setGeneratingThought(false)
-//                        messageManager.processPartialSheepThought(currentAnswerChunks.joinToString(""))
-                        messageManager.processNewSheepThought(currentAnswerChunks.joinToString(""))
+                        logI("generateAnswer Completed: $cause")
+                        GPTResponse.postValue(
+                            GptAnswerResponse(
+                                currentAnswerChunks.joinToString(""),
+                                replyingToMessage
+                            )
+                        )
                     }
                     .catch { cause ->
                         logE("generateAnswer Exception: $cause")
+                        GPTError.postValue(cause)
 //                        updateLastChatMessage(cause.message ?: "Error")
                     }
                     .launchIn(viewModelScope)

@@ -2,9 +2,12 @@ package cx.aphex.energysign.message
 
 import android.content.Context
 import cx.aphex.energysign.ext.logD
+import cx.aphex.energysign.ext.logE
 import cx.aphex.energysign.ext.logW
+import cx.aphex.energysign.gpt.GptAnswerResponse
 import cx.aphex.energysign.message.Message.Companion.VT
 import cx.aphex.energysign.toFile
+import io.ktor.util.toUpperCasePreservingASCIIRules
 import java.io.File
 import java.util.Collections.synchronizedList
 
@@ -31,14 +34,22 @@ class MessageRepository {
         messages.reversed().forEach { pushMarqueeMessage(it) }
     }
 
-    /** Pushes a message into the messages list at the current index. */
+    /** Pushes a message into the messages list at the first index. */
     fun pushMarqueeMessage(marqueeMessage: Message.Marquee) {
         marqueeMessages.add(0, marqueeMessage)
     }
 
-    /** Pushes a message into the messages list at the current index -1. */
-    fun pushMarqueeMessageBeforeCurrent(marqueeMessage: Message.Marquee) {
-        marqueeMessages.add(1, marqueeMessage)
+    /** Inserts a GPT reply after the message it is replying to. */
+    fun insertGPTReply(gptAnswerResponse: GptAnswerResponse) {
+        val replyMsg = Message.Marquee.GPTReply(gptAnswerResponse.answer.toUpperCasePreservingASCIIRules())
+        val queryMsgIdx = marqueeMessages.indexOf(gptAnswerResponse.inReplyTo)
+        if (queryMsgIdx >= 0 && queryMsgIdx < marqueeMessages.size) {
+            marqueeMessages.add(queryMsgIdx + 1, replyMsg)
+        } else {
+            marqueeMessages.add(replyMsg) // Append to the end if index is out of bounds
+        }
+        // Convert the GPTQuery message to a user message
+        marqueeMessages[queryMsgIdx] = gptAnswerResponse.inReplyTo.toUserMessage()
     }
 
     /** Write out the list of strings to the file */
@@ -46,7 +57,6 @@ class MessageRepository {
         try {
             marqueeMessages
                 .map { it.toString() }
-                .reversed()
                 .toFile(File(context.filesDir, SIGN_DB_FILE_NAME))
         } catch (e: Throwable) {
             logW("Exception when saving $SIGN_DB_FILE_NAME! ${e.message}")
@@ -54,7 +64,6 @@ class MessageRepository {
         try {
             marqueeMessages
                 .map { it.str }
-                .reversed()
                 .toFile(File(context.filesDir, SIGN_STRINGS_FILE_NAME))
         } catch (e: Throwable) {
             logW("Exception when saving $SIGN_STRINGS_FILE_NAME! ${e.message}")
@@ -76,13 +85,22 @@ class MessageRepository {
                 val list: MutableList<Message.Marquee> =
                     reader.lineSequence() //.take(MAX_SIGN_STRINGS)
                         .map {
-                            val parts = it.split("$VT")
-                            when (Message.MSGTYPE.valueOf(parts[0])) {
-                                Message.MSGTYPE.DEFAULT -> Message.Marquee.Default.fromString(it)
-                                Message.MSGTYPE.CHONKYMARQUEE -> Message.Marquee.Chonky.fromString(it)
-                                else -> throw IllegalArgumentException("Invalid message type")
+                            try {
+                                val parts = it.split("$VT")
+                                when (Message.MSGTYPE.valueOf(parts[0])) {
+                                    Message.MSGTYPE.DEFAULT -> Message.Marquee.fromString<Message.Marquee.User>(it)
+                                    Message.MSGTYPE.CHONKYMARQUEE -> Message.Marquee.fromString<Message.Marquee.Chonky>(
+                                        it
+                                    )
+
+                                    else -> throw IllegalArgumentException("Invalid message type")
+                                }
+                            } catch (e: Throwable) {
+                                logE("Exception when parsing $SIGN_DB_FILE_NAME! ${e.message}")
+                                null
                             }
                         }
+                        .filterNotNull()
                         .filter { it.str.isNotBlank() }
                         .toMutableList()
                         .asReversed()

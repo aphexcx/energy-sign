@@ -64,20 +64,4 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
     fun onBtStatusUpdate(bluetoothStatusUpdate: BluetoothStatusUpdate) {
         btDeviceStatus.postValue(bluetoothStatusUpdate)
     }
-
-    fun submitKeyboardInput() {
-        messageManager.submitKeyboardInput()
-    }
-
-    fun deleteKey() {
-        messageManager.deleteKey()
-    }
-
-    fun escapeKey() {
-        messageManager.escapeKey()
-    }
-
-    fun processNewKeyboardKey(key: Char) {
-        messageManager.processNewKeyboardKey(key)
-    }
 }

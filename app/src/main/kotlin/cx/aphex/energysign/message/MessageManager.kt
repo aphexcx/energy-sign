@@ -12,6 +12,8 @@ import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
 import cx.aphex.energysign.ext.toNormalized
 import cx.aphex.energysign.gpt.GPTViewModel
+import cx.aphex.energysign.gpt.GptAnswerResponse
+import cx.aphex.energysign.keyboard.KeyboardViewModel
 import cx.aphex.energysign.message.Message.FlashingAnnouncement.NowPlayingAnnouncement
 import io.ktor.util.toUpperCasePreservingASCIIRules
 import kotlinx.atomicfu.AtomicInt
@@ -23,7 +25,11 @@ import org.koin.core.component.inject
 import java.io.File
 
 
-class MessageManager(val context: Context, val msgRepo: MessageRepository) : KoinComponent {
+class MessageManager(
+    private val context: Context,
+    val msgRepo: MessageRepository,
+) :
+    KoinComponent {
     private val gson: Gson = GsonBuilder()
         .registerTypeAdapter(Message::class.java, Message.MessageSerializer())
         .create()
@@ -36,14 +42,10 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) : Koi
 
     // Message type state mess **
     private var isInChooserMode: Boolean = false
-    private var keyboardInputStartedAtMs: Long = 0
-    private var lastKeyboardInputReceivedAtMs: Long = 0
+
     private var isPaused: Boolean = false
     /**/
 
-    private var isInKeyboardInputMode: Boolean = false
-    private var showAsWarning: Boolean = false
-    private var keyboardStringBuilder: StringBuilder = StringBuilder()
 
     private var isGeneratingThought: Boolean = false
     private var partialThought: String? = null
@@ -53,6 +55,8 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) : Koi
     //    private var sheepThoughtBuffer = ArrayDeque<Char>()
     private var thoughtOnPanel: String = ""
     private var showCaret: Boolean = true
+    private var showCaretThink: Boolean = true
+    private var showCaretThinkDots: Int = 0
 
     //How often to advertise, e.g. every 5 user messages
     private var advertiseEvery: Int = 8
@@ -63,9 +67,10 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) : Koi
     )
 
     private val gptViewModel: GPTViewModel by inject()
+    private val keyboardViewModel: KeyboardViewModel by inject()
+
 
     init {
-
 
         msgRepo.marqueeMessages.addAll(msgRepo.loadUserMessages(context))
         val ads: List<Message> = loadAds()
@@ -109,33 +114,53 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) : Koi
 //            )
         )
 //        pushAdvertisements()
+
+        keyboardViewModel.newSubmittedKeyboardMessage.observeForever { msg ->
+            msg?.let {
+                processNewUserMessage(it)
+            }
+        }
+
+        gptViewModel.GPTResponse.observeForever { reply ->
+            reply?.let {
+                processGPTResponse(it)
+            }
+        }
+
+        gptViewModel.GPTError.observeForever {
+            logW("GPT Reply Error: ${it.message}")
+            setGeneratingThought(false)
+            msgRepo.pushOneTimeMessages(
+                Message.ColorMessage.ChonkySlide("NO", context.getColor(R.color.chonkyslide_defaultpink)),
+                Message.ColorMessage.ChonkySlide("BARS", context.getColor(R.color.chonkyslide_defaultpink)),
+                Message.ColorMessage.ChonkySlide(":(", context.getColor(R.color.chonkyslide_defaultpink)),
+            )
+        }
     }
 
     private var usrMsgCount: Int = 0
-    private var newUsrMsgsToDisplay: Int = 0
 
     /** Pushes a new user message onto the top of the messages list. */
     fun processNewUserMessage(str: String) {
         currentIdx.value = 0
 
-        msgRepo.enqueueOneTimeMessage(Message.CountDownAnnouncement.NewMessageAnnouncement)
-        msgRepo.pushMarqueeMessage(
-            Message.Marquee.Default(
-                str
-                    .convertHeartEmojis()
-                    .toNormalized()
-            )
-        )
-
-        newUsrMsgsToDisplay += 1
-
 //        String(value).split("++").filter { it.isNotBlank() }.reversed().forEach {
 //            pushStringOnList(it.replace('•', '*'))
 //        }
 
-        if (str.lowercase().contains("dreamgpt")) {
-            gptViewModel.generateAnswer(str)
+        val normalizedStr = str
+            .convertHeartEmojis()
+            .toNormalized()
+        val newUserMessage = if (str.lowercase().contains("ravegpt")) {
+            Message.Marquee.GPTQuery(normalizedStr).also {
+                setGeneratingThought(true)
+                gptViewModel.generateAnswer(it)
+            }
+        } else {
+            Message.Marquee.User(normalizedStr)
         }
+        msgRepo.enqueueOneTimeMessage(Message.CountDownAnnouncement.NewMessageAnnouncement)
+        msgRepo.pushMarqueeMessage(newUserMessage)
         msgRepo.saveUserMessages(context)
     }
 
@@ -168,121 +193,141 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) : Koi
 
     fun getNextMessage(): Message {
         if (isInChooserMode) {
-            val idx = currentIdx.value
-            val currentUsrMsg: Message.Marquee =
-                msgRepo.marqueeMessages.getOrNull(idx)?.let {
-                    when (it) {
-                        is Message.Marquee.Default -> it.copy(str = it.str.take(7))
-                        is Message.Marquee.Chonky -> it.copy(str = it.str.take(5))
-                    }
-                }
-                    ?: Message.Marquee.Default("<empty>")
-            logD("getNextMessage: currentMessage is now messages[$idx] = $currentUsrMsg")
-            logD("Sending messages[$idx] as chooser!")
-            return Message.Chooser(idx + 1, msgRepo.marqueeMessages.lastIndex + 1, currentUsrMsg)
+            return getNextChooserMessage()
         } else {
-
-            if (isInKeyboardInputMode) {
-                msgRepo.oneTimeMessages.clear()
-
-                val msSinceLastInput = System.currentTimeMillis() - lastKeyboardInputReceivedAtMs
-
-                showAsWarning =
-                    (msSinceLastInput > (KEYBOARD_INPUT_TIMEOUT_MS - KEYBOARD_INPUT_WARNING_MS))
-
-                if (msSinceLastInput > KEYBOARD_INPUT_TIMEOUT_MS) {
-                    endKeyboardInput()
-                    msgRepo.pushOneTimeMessage(Message.Starfield())
-                }
-
-                if (msSinceLastInput < KEYBOARD_INPUT_TIMEOUT_MS) {
-                    if (showAsWarning) {
-                        // Running out of input time! Display this in input warning mode.
-                        return Message.KeyboardEcho.InputWarning(keyboardStringBuilder.toString())
-                    } else {
-                        return Message.KeyboardEcho.Input(keyboardStringBuilder.toString())
-                    }
-                }
+            keyboardViewModel.handleKeyboardInput()?.let {
+                return it
             }
 
-            if (newUsrMsgsToDisplay == 0) {
-                if (msgRepo.oneTimeMessages.isEmpty() && msgRepo.marqueeMessages.isEmpty()) {
-                    logD("No messages to display; injecting advertisement")
-                    pushAdvertisements()
-                }
+            if (msgRepo.marqueeMessages.isNotEmpty()) {
+                when (msgRepo.marqueeMessages[currentIdx.value]) {
+                    is Message.Marquee.GPTQuery -> {
+                        if (isGeneratingThought && msgRepo.oneTimeMessages.isEmpty() && partialThought == null) {
+                            logD("Sheep is thinking, injecting thinking notification")
+                            //TODO how do I make sure new user message has been displayed before showing sheep thinking notification?
+                            return Message.ColorMessage.ChonkySlide(
+                                str = ".".repeat(showCaretThinkDots).plus(if (showCaretThink) '|' else ' ')
+                                    .padEnd(6, ' '),
+                                colorCycle = context.getColor(R.color.chonkyslide_defaultpink),
+                                delayMs = 10,
+                            ).also {
+                                showCaretThink = !showCaretThink
+                                showCaretThinkDots = (showCaretThinkDots + 1).coerceAtMost(5)
+                            }
 
-                if (msgRepo.oneTimeMessages.isEmpty() && partialThought == null && isGeneratingThought) {
-                    logD("Sheep is thinking, injecting thinking notification")
-                    //TODO how do I make sure new user message has been displayed before showing sheep thinking notification?
-                    return Message.ColorMessage.ChonkySlide(
-                        str = "".plus(if (showCaret) '|' else ' ').padEnd(6, ' '),
-                        colorCycle = context.getColor(R.color.chonkyslide_defaultpink),
-                        delayMs = 10,
-                    )
+                            //                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("THINKING.", 50))
+                            //                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("THINKING..", 50))
+                            //                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("PONDERING.", 50))
+                        }
 
-//                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("THINKING.", 50))
-//                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("THINKING..", 50))
-//                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("PONDERING.", 50))
-                }
-
-                partialThought?.let { partialThought ->
-                    msgRepo.oneTimeMessages.clear()
-
-                    if (!isGeneratingThought && partialThoughtStartIdx == partialThought.lastIndex) {
-                        if (partialThoughtRetainforAnother > 0) {
-                            partialThoughtRetainforAnother -= 1
-                        } else {
-                            this.partialThought = null
-                            msgRepo.pushOneTimeMessage(Message.ColorMessage.IconInvaders.Explosion(context.getColor(R.color.pink)))
-                            partialThoughtRetainforAnother = 5
+                        partialThought?.let { partialThought ->
+                            return partialThoughtMessage(partialThought)
                         }
                     }
-                    logD("Returning partial sheep thought!")
 
-                    val endIdx = (partialThoughtStartIdx + 1).coerceAtMost(partialThought.lastIndex)
+                    is Message.Marquee.GPTReply -> {
+                        msgRepo.marqueeMessages[currentIdx.value] =
+                            (msgRepo.marqueeMessages[currentIdx.value] as Message.Marquee.GPTReply).toChonkyMessage()
+                        msgRepo.pushOneTimeMessages(
+                            Message.ColorMessage.ChonkySlide("RAVE", context.getColor(R.color.green)),
+                            Message.ColorMessage.ChonkySlide("RAVEGPT", context.getColor(R.color.green), delayMs = 750),
+                            Message.ColorMessage.ChonkySlide(
+                                "SAYS.",
+                                context.getColor(R.color.green), delayMs = 250
+                            ),
+                            Message.ColorMessage.ChonkySlide(
+                                "SAYS..",
+                                context.getColor(R.color.green), delayMs = 250
+                            ),
+                            Message.ColorMessage.ChonkySlide(
+                                "SAYS...",
+                                context.getColor(R.color.green), delayMs = 250
+                            ),
+//                            Message.Starfield(stars = 100),
 
-                    thoughtOnPanel += partialThought
-                        .substring(partialThoughtStartIdx until endIdx)
-                        .toUpperCasePreservingASCIIRules()
-
-                    partialThoughtStartIdx = endIdx
-
-                    val isPanelFull = thoughtOnPanel.length >= 5 //sheepThoughtBuffer.isEmpty()
-
-                    return Message.ColorMessage.ChonkySlide(
-                        str = thoughtOnPanel.plus(if (showCaret) '|' else '_').padEnd(6, ' '),
-                        colorCycle = context.getColor(R.color.chonkyslide_defaultpink),
-                        delayMs = 10,
-                        shouldScrollToLastLetter = isPanelFull
-                    ).also {
-                        if (isPanelFull) {
-                            thoughtOnPanel = thoughtOnPanel.takeLast(5)
-                        }
-                        showCaret = true
+                            //            Message.ColorMessage.IconInvaders.BAAAHS(context.getColor(R.color.instahandle)),
+                            //            Message.ChonkyMarquee(thought.toUpperCasePreservingASCIIRules())
+                        )
                     }
+
+                    else -> {}
                 }
             }
+            if (msgRepo.marqueeMessages.isEmpty() && msgRepo.oneTimeMessages.isEmpty()) {
+                logD("No messages to display; injecting advertisement")
+                pushAdvertisements()
+            }
 
+            // Display one-time messages first
             msgRepo.oneTimeMessages.removeFirstOrNull()?.let {
                 return it
             }
 
             // Fallthrough to regular marquee mode; display next user message
-            if (newUsrMsgsToDisplay > 0) {
-                newUsrMsgsToDisplay -= 1
-            }
-
             val idx = getIdxAndAdvance()
-            val currentUsrMsg: Message.Marquee = msgRepo.marqueeMessages[idx]
-            logD("getNextMessage: currentMessage is now messages[$idx] = $currentUsrMsg")
-            logD("Sending messages[$idx]")
+            val currentMsg: Message.Marquee = msgRepo.marqueeMessages[idx]
+            logD("getNextMessage: messages[$idx] = $currentMsg")
             usrMsgCount++
             if (usrMsgCount % advertiseEvery == 0) {
                 logD("Advertise period reached; injecting advertisement")
                 pushAdvertisements()
             }
-            return currentUsrMsg
+            return currentMsg
         }
+    }
+
+    private fun partialThoughtMessage(partialThought: String): Message.ColorMessage.ChonkySlide {
+        msgRepo.oneTimeMessages.clear()
+
+        if (!isGeneratingThought && partialThoughtStartIdx == partialThought.lastIndex) {
+            if (partialThoughtRetainforAnother > 0) {
+                partialThoughtRetainforAnother -= 1
+            } else {
+                this.partialThought = null
+                msgRepo.pushOneTimeMessage(Message.ColorMessage.IconInvaders.Explosion(context.getColor(R.color.pink)))
+                partialThoughtRetainforAnother = 5
+            }
+        }
+        logD("Returning partial sheep thought!")
+
+        val endIdx = (partialThoughtStartIdx + 1).coerceAtMost(partialThought.lastIndex)
+
+        thoughtOnPanel += partialThought
+            .substring(partialThoughtStartIdx until endIdx)
+            .toUpperCasePreservingASCIIRules()
+
+        partialThoughtStartIdx = endIdx
+
+        val isPanelFull = thoughtOnPanel.length >= 5 //sheepThoughtBuffer.isEmpty()
+
+        return Message.ColorMessage.ChonkySlide(
+            str = thoughtOnPanel.plus(if (showCaret) '|' else '_').padEnd(6, ' '),
+            colorCycle = context.getColor(R.color.chonkyslide_defaultpink),
+            delayMs = 10,
+            shouldScrollToLastLetter = isPanelFull
+        ).also {
+            if (isPanelFull) {
+                thoughtOnPanel = thoughtOnPanel.takeLast(5)
+            }
+            showCaret = true
+        }
+    }
+
+    private fun getNextChooserMessage(): Message.Chooser {
+        val idx = currentIdx.value
+        val trimmedMessage: Message.Marquee =
+            msgRepo.marqueeMessages.getOrNull(idx)?.let {
+                when (it) {
+                    is Message.Marquee.User -> Message.Marquee.User(str = it.str.take(7))
+                    is Message.Marquee.GPTQuery -> Message.Marquee.GPTQuery(str = it.str.take(7))
+                    is Message.Marquee.Chonky -> Message.Marquee.Chonky(str = it.str.take(5))
+                    is Message.Marquee.GPTReply -> Message.Marquee.GPTReply(str = it.str.take(5))
+                }
+            }
+                ?: Message.Marquee.User("<empty>")
+        logD("getNextMessage: messages[$idx] = $trimmedMessage")
+        logD("Sending messages[$idx] as chooser!")
+        return Message.Chooser(idx + 1, msgRepo.marqueeMessages.lastIndex + 1, trimmedMessage)
     }
 
     private fun getIdxAndAdvance(): Int {
@@ -318,7 +363,6 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) : Koi
                 }
             }
 
-            "!f",
             "!first" -> {
                 currentIdx.value = 0
             }
@@ -560,69 +604,6 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) : Koi
     }
 
 
-    internal fun processNewKeyboardKey(key: Char) {
-        //TODO key.toInt() needed here?
-        if (key.code == 0) {
-            logD("Invalid key!")
-            return
-        }
-        isInKeyboardInputMode = true
-        if (keyboardStringBuilder.isEmpty()) {
-            keyboardInputStartedAtMs = System.currentTimeMillis()
-        }
-        lastKeyboardInputReceivedAtMs = System.currentTimeMillis()
-        keyboardStringBuilder.append(key)
-    }
-
-    internal fun deleteKey() {
-        if (keyboardStringBuilder.isNotEmpty()) {
-            lastKeyboardInputReceivedAtMs = System.currentTimeMillis()
-            keyboardStringBuilder.deleteCharAt(keyboardStringBuilder.lastIndex)
-        }
-    }
-
-    internal fun escapeKey() {
-        //TODO fix bug -- pressing esc key causes type flashy error to be displayed
-
-        // If not blank and esc key was pressed:
-        // First show as warning if we aren't already
-        // Then clear message if we are already warning
-        if (keyboardStringBuilder.isNotBlank() && !showAsWarning) {
-            // ensures we are in warning period
-            lastKeyboardInputReceivedAtMs =
-                System.currentTimeMillis() - KEYBOARD_INPUT_TIMEOUT_MS + KEYBOARD_INPUT_WARNING_MS
-        } else {
-            endKeyboardInput()
-            msgRepo.pushOneTimeMessage(Message.Starfield())
-        }
-    }
-
-    private fun endKeyboardInput() {
-        lastKeyboardInputReceivedAtMs = -1
-        keyboardStringBuilder.clear()
-        isInKeyboardInputMode = false
-    }
-
-    internal fun submitKeyboardInput() {
-        val totalKeyboardInputTimeElapsed = System.currentTimeMillis() - keyboardInputStartedAtMs
-//        if (keyboardStringBuilder.length < 4) {
-//            // LONGER!\
-//
-//
-//        } else if (keyboardStringBuilder.toString().split(' ').any { it in Dictionary.ENGLISH_DICT })
-        // else if ! any words are in dict
-        // NO SPAM!
-
-        if (keyboardStringBuilder.isBlank()) {
-            endKeyboardInput()
-        } else {
-            if (totalKeyboardInputTimeElapsed > MINIMUM_INPUT_ENTRY_PERIOD) {
-                processNewUserMessage(keyboardStringBuilder.toString())
-                endKeyboardInput()
-            }
-        }
-    }
-
     fun processNewBytes(value: ByteArray) {
         if (String(value).startsWith("!")) {
             processUartCommand(value)
@@ -655,19 +636,26 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) : Koi
         }
     }
 
-    fun processNewSheepThought(thought: String) {
+    /* For replies generated by externally running models e.g. Llama running on my laptop */
+    fun onNewPostedGPTReply(reply: String) {
+        processGPTResponse(
+            GptAnswerResponse(
+                answer = reply,
+                inReplyTo = msgRepo.marqueeMessages.first() as Message.Marquee.GPTQuery //TODO inReplyTo message may not always be the first one
+            )
+        )
+    }
 
-//        msgRepo.pushOneTimeMessages(
-//            Message.ColorMessage.ChonkySlide("NEW", context.getColor(R.color.chonkyslide_defaultpink)),
-//            Message.ColorMessage.ChonkySlide("SHEEP", context.getColor(R.color.chonkyslide_defaultpink)),
-//            Message.ColorMessage.ChonkySlide("THOT..", context.getColor(R.color.chonkyslide_defaultpink)),
-//            Message.ColorMessage.IconInvaders.BAAAHS(context.getColor(R.color.instahandle)),
-//            Message.ChonkyMarquee(thought.toUpperCasePreservingASCIIRules())
-//        )
-        msgRepo.pushMarqueeMessageBeforeCurrent(Message.Marquee.Chonky(thought.toUpperCasePreservingASCIIRules()))
+    private fun processGPTResponse(gptAnswerResponse: GptAnswerResponse) {
+        setGeneratingThought(false)
+        msgRepo.insertGPTReply(gptAnswerResponse)
+        msgRepo.saveUserMessages(context)
     }
 
     fun setGeneratingThought(thinking: Boolean) {
+        if (thinking) {
+            showCaretThinkDots = 0
+        }
         isGeneratingThought = thinking
     }
 
@@ -681,10 +669,6 @@ class MessageManager(val context: Context, val msgRepo: MessageRepository) : Koi
 
     companion object {
         private const val ADS_FILE_NAME = "ads.json"
-
-        private const val MINIMUM_INPUT_ENTRY_PERIOD: Int = 5_000
-        private const val KEYBOARD_INPUT_TIMEOUT_MS: Int = 30_000
-        private const val KEYBOARD_INPUT_WARNING_MS: Int = 7_000
 
         private const val MAX_PLAYED_TRACKS_MEMORY: Int = 4
 

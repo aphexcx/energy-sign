@@ -73,10 +73,10 @@ class BeatLinkDataConsumerServerService : Service(), KoinComponent {
                     messageManager.processPartialThought(msg.message)
                     call.respond(mapOf("success" to true))
                 }
-                post("/newSheepThought") {
+                post("/newGPTReply") { // formerly /newSheepThought
                     val msg: PostedMessage = call.receive()
-                    logW("Received new POSTed SheepThought: ${msg.message}")
-                    messageManager.processNewSheepThought(msg.message)
+                    logW("Received new POSTed GPT Reply: ${msg.message}")
+                    messageManager.onNewPostedGPTReply(msg.message)
                     call.respond(mapOf("success" to true))
                 }
                 post("/currentTrack") {

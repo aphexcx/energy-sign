@@ -2,7 +2,12 @@ package cx.aphex.energysign.message
 
 import android.graphics.Color
 import androidx.annotation.ColorInt
-import com.google.gson.*
+import com.google.gson.JsonDeserializationContext
+import com.google.gson.JsonDeserializer
+import com.google.gson.JsonElement
+import com.google.gson.JsonParseException
+import com.google.gson.JsonSerializationContext
+import com.google.gson.JsonSerializer
 import com.google.gson.annotations.JsonAdapter
 import com.google.gson.annotations.SerializedName
 import kotlinx.serialization.Serializable
@@ -19,36 +24,50 @@ sealed class Message {
     }
 
     sealed class Marquee : Message() {
+
         @Serializable
-        data class Default(
+        class User(
+            override val str: String,
+            override val type: MSGTYPE = MSGTYPE.DEFAULT
+        ) : Marquee()
+
+        @Serializable
+        class GPTQuery(
             override val str: String,
             override val type: MSGTYPE = MSGTYPE.DEFAULT
         ) : Marquee() {
-            override fun toString(): String = "$type$VT$str"
-
-            companion object {
-                fun fromString(s: String): Default {
-                    val parts = s.split("$VT")
-                    return Default(parts[1], MSGTYPE.valueOf(parts[0]))
-                }
-            }
+            fun toUserMessage(): User = User(str)
         }
 
         @Serializable
-        data class Chonky(
+        class Chonky(
+            override val str: String,
+            override val type: MSGTYPE = MSGTYPE.CHONKYMARQUEE
+        ) : Marquee()
+
+        @Serializable
+        class GPTReply(
             override val str: String,
             override val type: MSGTYPE = MSGTYPE.CHONKYMARQUEE
         ) : Marquee() {
-            override fun toString(): String = "$type$VT$str"
-
-            companion object {
-                fun fromString(s: String): Chonky {
-                    val parts = s.split("$VT")
-                    return Chonky(parts[1], MSGTYPE.valueOf(parts[0]))
-                }
-            }
+            fun toChonkyMessage(): Chonky = Chonky(str)
         }
 
+        override fun toString(): String = "$type$VT$str"
+
+        companion object {
+            inline fun <reified T : Marquee> fromString(s: String): T {
+                val parts = s.split("$VT")
+                val type = MSGTYPE.valueOf(parts[0])
+                val str = parts[1]
+                return when (T::class) {
+                    User::class -> User(str, type)
+                    GPTQuery::class -> GPTQuery(str, type)
+                    Chonky::class -> Chonky(str, type)
+                    else -> throw IllegalArgumentException("Unknown Marquee subclass")
+                } as T
+            }
+        }
     }
 
     @Serializable
@@ -239,10 +258,10 @@ sealed class Message {
                         }
                     }
 
-                    MSGTYPE.DEFAULT -> context.deserialize(json, Marquee.Default::class.java)
+                    MSGTYPE.DEFAULT -> context.deserialize(json, Marquee.User::class.java)
                 }
             } catch (e: JsonParseException) {
-                context.deserialize(json, Marquee.Default::class.java)
+                context.deserialize(json, Marquee.User::class.java)
             }
         }
     }

@@ -19,14 +19,14 @@ class EnergySignUartManager(val viewModel: MainViewModel) : UartDeviceCallback {
     init {
         // UART
         uartDevice = configureUart()
-        logD("UART device ${UART_DEVICE_NAME} opened and configured!")
+        logD("UART device $UART_DEVICE_NAME opened and configured!")
 
-        logD("Uart device ${UART_DEVICE_NAME} callback registered")
+        logD("Uart device $UART_DEVICE_NAME callback registered")
         uartDevice.registerUartDeviceCallback(this)
     }
 
     fun stop() {
-        logD("Uart device ${UART_DEVICE_NAME} callback unregistered")
+        logD("Uart device $UART_DEVICE_NAME callback unregistered")
         uartDevice.unregisterUartDeviceCallback(this)
 
         try {
@@ -71,10 +71,10 @@ class EnergySignUartManager(val viewModel: MainViewModel) : UartDeviceCallback {
             } else {
                 logD("List of available UART devices: $deviceList")
             }
-            logD("Opening UART device ${UART_DEVICE_NAME}")
+            logD("Opening UART device $UART_DEVICE_NAME")
             return manager.openUartDevice(UART_DEVICE_NAME).apply {
                 // Configure the UART port
-                logD("Configuring UART device ${UART_DEVICE_NAME}")
+                logD("Configuring UART device $UART_DEVICE_NAME")
                 setBaudrate(UART_BAUD_RATE)
                 setDataSize(8)
                 setParity(UartDevice.PARITY_NONE)
@@ -105,7 +105,7 @@ class EnergySignUartManager(val viewModel: MainViewModel) : UartDeviceCallback {
         logD("Writing >${value}< to ${uartDevice.name}...")
 
         val bytes = value.toByteArray()
-        logD("Bytes: >${bytes.asList()}<")
+//        logD("Bytes: >${bytes.asList()}<")
 
         uartDevice.write(bytes)
     }
@@ -114,7 +114,7 @@ class EnergySignUartManager(val viewModel: MainViewModel) : UartDeviceCallback {
 
         private const val UART_DEVICE_NAME: String = "UART6"
         private const val UART_BAUD_RATE: Int = 14400
-        private const val ARDUINO_RECEVIED_STRING_LEN: Int = 64
+        private const val ARDUINO_RECEVIED_STRING_LEN: Int = 32
         private const val MAX_ARDUINO_JSON_SIZE: Int = 700
 
     }

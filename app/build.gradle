@@ -71,7 +71,7 @@ dependencies {
     implementation 'com.google.code.gson:gson:2.10.1'
     implementation "org.jetbrains.kotlin:kotlin-serialization:$kotlin_version"
     implementation "org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.2"
-    ext.koin_version = "3.4.3"
+    ext.koin_version = "3.5.6"
     implementation "io.insert-koin:koin-android:$koin_version"
     // Koin for Ktor
 //    implementation "io.insert-koin:koin-ktor:$koin_version"
