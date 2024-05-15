@@ -53,7 +53,7 @@ class MessageRepository {
     }
 
     /** Write out the list of strings to the file */
-    fun saveUserMessages(context: Context) {
+    fun saveMarqueeMessages(context: Context) {
         try {
             marqueeMessages
                 .map { it.toString() }

@@ -22,7 +22,11 @@ import kotlin.time.Duration.Companion.seconds
 object OpenAIClient {
     private val config = OpenAIConfig(
         token = BuildConfig.OPENAI_API_KEY,
-        timeout = Timeout(socket = 60.seconds),
+        timeout = Timeout(
+            request = 30.seconds,
+            connect = 30.seconds,
+            socket = 30.seconds
+        ),
     )
 
     private val openAI = OpenAI(config)

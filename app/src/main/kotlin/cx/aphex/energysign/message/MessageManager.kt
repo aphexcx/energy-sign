@@ -158,7 +158,7 @@ class MessageManager(
         }
         msgRepo.enqueueOneTimeMessage(Message.CountDownAnnouncement.NewMessageAnnouncement)
         msgRepo.pushMarqueeMessage(newUserMessage)
-        msgRepo.saveUserMessages(context)
+        msgRepo.saveMarqueeMessages(context)
     }
 
 
@@ -191,97 +191,92 @@ class MessageManager(
     fun getNextMessage(): Message {
         if (isInChooserMode) {
             return getNextChooserMessage()
-        } else {
-            keyboardViewModel.handleKeyboardInput()?.let {
-                return it
-            }
-
-            if (msgRepo.oneTimeMessages.isEmpty()) {
-                when (val curMsg = msgRepo.marqueeMessages.getOrNull(currentIdx.value)) {
-                    is Message.Marquee.GPTQuery -> {
-                        if (!isGeneratingThought) {
-                            setGeneratingThought(true) // mebbe push a GPTThinking message here instead to represent the thinking state
-                            gptViewModel.generateAnswer(curMsg)
-                            return curMsg
-                        } else {
-                            if (partialThought == null) { // && msgRepo.oneTimeMessages.isEmpty()) {
-                                logD("Sheep is thinking, injecting thinking notification")
-                                //TODO how do I make sure new user message has been displayed before showing sheep thinking notification?
-                                return Message.ColorMessage.ChonkySlide(
-                                    str = ".".repeat(showCaretThinkDots).plus(if (showCaretThink) '|' else ' ')
-                                        .padEnd(6, ' '),
-                                    colorCycle = context.getColor(R.color.chonkyslide_defaultpink),
-                                    delayMs = 200,
-                                ).also {
-                                    if (showCaretThinkDots == 6) {
-                                        showCaretThink = !showCaretThink
-                                    } else {
-                                        showCaretThinkDots = (showCaretThinkDots + 1).coerceAtMost(6)
-                                    }
-                                }
-
-                                //                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("THINKING.", 50))
-                                //                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("THINKING..", 50))
-                                //                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("PONDERING.", 50))
-                            }
-                        }
-
-                        partialThought?.let { partialThought ->
-                            return partialThoughtMessage(partialThought)
-                        }
-                    }
-
-                    is Message.Marquee.GPTReply -> {
-                        logD("Converting GPTReply to User message!")
-                        msgRepo.marqueeMessages[currentIdx.value] = curMsg.toChonkyMessage()
-                        msgRepo.saveUserMessages(context)
-                        msgRepo.pushOneTimeMessages(
-                            Message.ColorMessage.ChonkySlide("RAVE", context.getColor(R.color.green)),
-                            Message.ColorMessage.ChonkySlide("RAVEGPT", context.getColor(R.color.green), delayMs = 750),
-                            Message.ColorMessage.ChonkySlide(
-                                "SAYS.",
-                                context.getColor(R.color.green), delayMs = 250
-                            ),
-                            Message.ColorMessage.ChonkySlide(
-                                "SAYS..",
-                                context.getColor(R.color.green), delayMs = 250
-                            ),
-                            Message.ColorMessage.ChonkySlide(
-                                "SAYS...",
-                                context.getColor(R.color.green), delayMs = 250
-                            ),
-//                            Message.Starfield(stars = 100),
-
-                            //            Message.ColorMessage.IconInvaders.BAAAHS(context.getColor(R.color.instahandle)),
-                            //            Message.ChonkyMarquee(thought.toUpperCasePreservingASCIIRules())
-                        )
-                    }
-
-                    else -> {}
-                }
-            }
-
-            if (msgRepo.marqueeMessages.isEmpty() && msgRepo.oneTimeMessages.isEmpty()) {
-                logD("No messages to display; injecting advertisement")
-                pushAdvertisements()
-            }
-
-            // Display one-time messages first
-            msgRepo.oneTimeMessages.removeFirstOrNull()?.let {
-                return it
-            }
-
-            // Fallthrough to regular marquee mode; display next user message
-            val idx = getIdxAndAdvance()
-            val currentMsg: Message.Marquee = msgRepo.marqueeMessages[idx]
-            logD("getNextMessage: messages[$idx] = $currentMsg")
-            usrMsgCount++
-            if (usrMsgCount % advertiseEvery == 0) {
-                logD("Advertise period reached; injecting advertisement")
-                pushAdvertisements()
-            }
-            return currentMsg
         }
+        keyboardViewModel.handleKeyboardInput()?.let {
+            return it
+        }
+
+        if (msgRepo.oneTimeMessages.isEmpty()) {
+            when (val curMsg = msgRepo.marqueeMessages.getOrNull(currentIdx.value)) {
+                is Message.Marquee.GPTQuery -> {
+                    if (!isGeneratingThought) {
+                        setGeneratingThought(true) // mebbe push a GPTThinking message here instead to represent the thinking state
+                        gptViewModel.generateAnswer(curMsg)
+                        return curMsg
+                    }
+                    //isGeneratingThought
+                    partialThought?.let { partialThought ->
+                        return partialThoughtMessage(partialThought)
+                    }
+
+                    logD("GPT is thinking, injecting thinking notification")
+                    return Message.ColorMessage.ChonkySlide(
+                        str = ".".repeat(showCaretThinkDots).plus(if (showCaretThink) '|' else ' ')
+                            .padEnd(6, ' '),
+                        colorCycle = context.getColor(R.color.chonkyslide_defaultpink),
+                        delayMs = 200,
+                    ).also {
+                        if (showCaretThinkDots == 6) {
+                            showCaretThink = !showCaretThink
+                        } else {
+                            showCaretThinkDots = (showCaretThinkDots + 1).coerceAtMost(6)
+                        }
+                    }
+                    // msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("THINKING.", 50))
+                    // msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("THINKING..", 50))
+                    // msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("PONDERING.", 50))
+                }
+
+                is Message.Marquee.GPTReply -> {
+                    logD("Converting GPTReply to User message!")
+                    msgRepo.marqueeMessages[currentIdx.value] = curMsg.toChonkyMessage()
+                    msgRepo.saveMarqueeMessages(context)
+                    msgRepo.pushOneTimeMessages(
+                        Message.ColorMessage.ChonkySlide("RAVE", context.getColor(R.color.green)),
+                        Message.ColorMessage.ChonkySlide("RAVEGPT", context.getColor(R.color.green), delayMs = 750),
+                        Message.ColorMessage.ChonkySlide(
+                            "SAYS.",
+                            context.getColor(R.color.green), delayMs = 250
+                        ),
+                        Message.ColorMessage.ChonkySlide(
+                            "SAYS..",
+                            context.getColor(R.color.green), delayMs = 250
+                        ),
+                        Message.ColorMessage.ChonkySlide(
+                            "SAYS...",
+                            context.getColor(R.color.green), delayMs = 250
+                        ),
+                        // Message.Starfield(stars = 100),
+                        // Message.ColorMessage.IconInvaders.BAAAHS(context.getColor(R.color.instahandle)),
+                        // Message.ChonkyMarquee(thought.toUpperCasePreservingASCIIRules())
+                    )
+                }
+
+                else -> {}
+            }
+        }
+
+        if (msgRepo.marqueeMessages.isEmpty() && msgRepo.oneTimeMessages.isEmpty()) {
+            logD("No messages to display; injecting advertisement")
+            pushAdvertisements()
+        }
+
+        // Display one-time messages first
+        msgRepo.oneTimeMessages.removeFirstOrNull()?.let {
+            return it
+        }
+
+        // Fallthrough to regular marquee mode; display next user message
+        val idx = getIdxAndAdvance()
+        val currentMsg: Message.Marquee = msgRepo.marqueeMessages[idx]
+        logD("getNextMessage: messages[$idx] = $currentMsg")
+        usrMsgCount++
+        if (usrMsgCount % advertiseEvery == 0) {
+            logD("Advertise period reached; injecting advertisement")
+            pushAdvertisements()
+        }
+        return currentMsg
+
     }
 
     private fun partialThoughtMessage(partialThought: String): Message.ColorMessage.ChonkySlide {
@@ -387,7 +382,7 @@ class MessageManager(
                     currentIdx.update {
                         if (it >= msgRepo.marqueeMessages.lastIndex) msgRepo.marqueeMessages.lastIndex else it
                     }
-                    msgRepo.saveUserMessages(context)
+                    msgRepo.saveMarqueeMessages(context)
                 }
             }
 
@@ -658,7 +653,7 @@ class MessageManager(
         setGeneratingThought(false)
         msgRepo.insertGPTReply(gptAnswerResponse)
         getIdxAndAdvance() // FIXME eww not good, have to do this to advance past the gptquery that is now a user message so it doesn't display again before the gptreply
-        msgRepo.saveUserMessages(context)
+        msgRepo.saveMarqueeMessages(context)
     }
 
     fun setGeneratingThought(thinking: Boolean) {
