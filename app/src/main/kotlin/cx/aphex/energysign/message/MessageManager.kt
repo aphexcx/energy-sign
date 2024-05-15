@@ -133,7 +133,7 @@ class MessageManager(
             msgRepo.pushOneTimeMessages(
                 Message.ColorMessage.ChonkySlide("NO", context.getColor(R.color.instahandle), delayMs = 750),
                 Message.ColorMessage.ChonkySlide("NO BARS", context.getColor(R.color.instahandle), delayMs = 750),
-                Message.ColorMessage.ChonkySlide("SORRY :(", context.getColor(R.color.instahandle)),
+                Message.ColorMessage.ChonkySlide("SORRY!", context.getColor(R.color.instahandle)),
             )
         }
     }
@@ -196,24 +196,28 @@ class MessageManager(
                 return it
             }
 
-            if (msgRepo.marqueeMessages.isNotEmpty()) {
-                when (val curMsg = msgRepo.marqueeMessages[currentIdx.value]) {
+            if (msgRepo.oneTimeMessages.isEmpty()) {
+                when (val curMsg = msgRepo.marqueeMessages.getOrNull(currentIdx.value)) {
                     is Message.Marquee.GPTQuery -> {
                         if (!isGeneratingThought) {
                             setGeneratingThought(true) // mebbe push a GPTThinking message here instead to represent the thinking state
                             gptViewModel.generateAnswer(curMsg)
+                            return curMsg
                         } else {
-                            if (msgRepo.oneTimeMessages.isEmpty() && partialThought == null) {
+                            if (partialThought == null) { // && msgRepo.oneTimeMessages.isEmpty()) {
                                 logD("Sheep is thinking, injecting thinking notification")
                                 //TODO how do I make sure new user message has been displayed before showing sheep thinking notification?
                                 return Message.ColorMessage.ChonkySlide(
                                     str = ".".repeat(showCaretThinkDots).plus(if (showCaretThink) '|' else ' ')
                                         .padEnd(6, ' '),
                                     colorCycle = context.getColor(R.color.chonkyslide_defaultpink),
-                                    delayMs = 10,
+                                    delayMs = 200,
                                 ).also {
-                                    showCaretThink = !showCaretThink
-                                    showCaretThinkDots = (showCaretThinkDots + 1).coerceAtMost(5)
+                                    if (showCaretThinkDots == 6) {
+                                        showCaretThink = !showCaretThink
+                                    } else {
+                                        showCaretThinkDots = (showCaretThinkDots + 1).coerceAtMost(6)
+                                    }
                                 }
 
                                 //                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("THINKING.", 50))
@@ -228,7 +232,9 @@ class MessageManager(
                     }
 
                     is Message.Marquee.GPTReply -> {
+                        logD("Converting GPTReply to User message!")
                         msgRepo.marqueeMessages[currentIdx.value] = curMsg.toChonkyMessage()
+                        msgRepo.saveUserMessages(context)
                         msgRepo.pushOneTimeMessages(
                             Message.ColorMessage.ChonkySlide("RAVE", context.getColor(R.color.green)),
                             Message.ColorMessage.ChonkySlide("RAVEGPT", context.getColor(R.color.green), delayMs = 750),
@@ -254,6 +260,7 @@ class MessageManager(
                     else -> {}
                 }
             }
+
             if (msgRepo.marqueeMessages.isEmpty() && msgRepo.oneTimeMessages.isEmpty()) {
                 logD("No messages to display; injecting advertisement")
                 pushAdvertisements()
@@ -650,14 +657,17 @@ class MessageManager(
     private fun processGPTResponse(gptAnswerResponse: GptAnswerResponse) {
         setGeneratingThought(false)
         msgRepo.insertGPTReply(gptAnswerResponse)
+        getIdxAndAdvance() // FIXME eww not good, have to do this to advance past the gptquery that is now a user message so it doesn't display again before the gptreply
         msgRepo.saveUserMessages(context)
     }
 
     fun setGeneratingThought(thinking: Boolean) {
         if (thinking) {
+            showCaretThink = true
             showCaretThinkDots = 0
         }
         isGeneratingThought = thinking
+        logD("Set generating thought to $thinking")
     }
 
     fun processPartialThought(chunk: String) {

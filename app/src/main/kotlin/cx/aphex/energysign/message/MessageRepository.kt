@@ -39,7 +39,7 @@ class MessageRepository {
         marqueeMessages.add(0, marqueeMessage)
     }
 
-    /** Inserts a GPT reply after the message it is replying to. */
+    /** Inserts a GPT reply after the query it is replying to, and converts the query to a user message. */
     fun insertGPTReply(gptAnswerResponse: GptAnswerResponse) {
         val replyMsg = Message.Marquee.GPTReply(gptAnswerResponse.answer.toUpperCasePreservingASCIIRules())
         val queryMsgIdx = marqueeMessages.indexOf(gptAnswerResponse.inReplyTo)

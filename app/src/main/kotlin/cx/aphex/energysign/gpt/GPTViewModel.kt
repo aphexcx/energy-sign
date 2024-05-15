@@ -44,6 +44,8 @@ class GPTViewModel(
             fetchAnswerJob =
                 OpenAIClient.generateAnswer(replyingToMessage.str, listOf()) //, chatLog.value)
                     .onStart {
+//                        delay(15000)
+//                        throw IllegalStateException("Test")
                         currentAnswerChunks.clear()
                     }
                     .mapNotNull { chunk ->
