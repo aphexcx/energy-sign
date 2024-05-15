@@ -131,9 +131,9 @@ class MessageManager(
             logW("GPT Reply Error: ${it.message}")
             setGeneratingThought(false)
             msgRepo.pushOneTimeMessages(
-                Message.ColorMessage.ChonkySlide("NO", context.getColor(R.color.chonkyslide_defaultpink)),
-                Message.ColorMessage.ChonkySlide("BARS", context.getColor(R.color.chonkyslide_defaultpink)),
-                Message.ColorMessage.ChonkySlide(":(", context.getColor(R.color.chonkyslide_defaultpink)),
+                Message.ColorMessage.ChonkySlide("NO", context.getColor(R.color.instahandle), delayMs = 750),
+                Message.ColorMessage.ChonkySlide("NO BARS", context.getColor(R.color.instahandle), delayMs = 750),
+                Message.ColorMessage.ChonkySlide("SORRY :(", context.getColor(R.color.instahandle)),
             )
         }
     }
@@ -152,10 +152,7 @@ class MessageManager(
             .convertHeartEmojis()
             .toNormalized()
         val newUserMessage = if (str.lowercase().contains("ravegpt")) {
-            Message.Marquee.GPTQuery(normalizedStr).also {
-                setGeneratingThought(true)
-                gptViewModel.generateAnswer(it)
-            }
+            Message.Marquee.GPTQuery(normalizedStr)
         } else {
             Message.Marquee.User(normalizedStr)
         }
@@ -200,24 +197,29 @@ class MessageManager(
             }
 
             if (msgRepo.marqueeMessages.isNotEmpty()) {
-                when (msgRepo.marqueeMessages[currentIdx.value]) {
+                when (val curMsg = msgRepo.marqueeMessages[currentIdx.value]) {
                     is Message.Marquee.GPTQuery -> {
-                        if (isGeneratingThought && msgRepo.oneTimeMessages.isEmpty() && partialThought == null) {
-                            logD("Sheep is thinking, injecting thinking notification")
-                            //TODO how do I make sure new user message has been displayed before showing sheep thinking notification?
-                            return Message.ColorMessage.ChonkySlide(
-                                str = ".".repeat(showCaretThinkDots).plus(if (showCaretThink) '|' else ' ')
-                                    .padEnd(6, ' '),
-                                colorCycle = context.getColor(R.color.chonkyslide_defaultpink),
-                                delayMs = 10,
-                            ).also {
-                                showCaretThink = !showCaretThink
-                                showCaretThinkDots = (showCaretThinkDots + 1).coerceAtMost(5)
-                            }
+                        if (!isGeneratingThought) {
+                            setGeneratingThought(true) // mebbe push a GPTThinking message here instead to represent the thinking state
+                            gptViewModel.generateAnswer(curMsg)
+                        } else {
+                            if (msgRepo.oneTimeMessages.isEmpty() && partialThought == null) {
+                                logD("Sheep is thinking, injecting thinking notification")
+                                //TODO how do I make sure new user message has been displayed before showing sheep thinking notification?
+                                return Message.ColorMessage.ChonkySlide(
+                                    str = ".".repeat(showCaretThinkDots).plus(if (showCaretThink) '|' else ' ')
+                                        .padEnd(6, ' '),
+                                    colorCycle = context.getColor(R.color.chonkyslide_defaultpink),
+                                    delayMs = 10,
+                                ).also {
+                                    showCaretThink = !showCaretThink
+                                    showCaretThinkDots = (showCaretThinkDots + 1).coerceAtMost(5)
+                                }
 
-                            //                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("THINKING.", 50))
-                            //                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("THINKING..", 50))
-                            //                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("PONDERING.", 50))
+                                //                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("THINKING.", 50))
+                                //                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("THINKING..", 50))
+                                //                msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("PONDERING.", 50))
+                            }
                         }
 
                         partialThought?.let { partialThought ->
@@ -226,8 +228,7 @@ class MessageManager(
                     }
 
                     is Message.Marquee.GPTReply -> {
-                        msgRepo.marqueeMessages[currentIdx.value] =
-                            (msgRepo.marqueeMessages[currentIdx.value] as Message.Marquee.GPTReply).toChonkyMessage()
+                        msgRepo.marqueeMessages[currentIdx.value] = curMsg.toChonkyMessage()
                         msgRepo.pushOneTimeMessages(
                             Message.ColorMessage.ChonkySlide("RAVE", context.getColor(R.color.green)),
                             Message.ColorMessage.ChonkySlide("RAVEGPT", context.getColor(R.color.green), delayMs = 750),
