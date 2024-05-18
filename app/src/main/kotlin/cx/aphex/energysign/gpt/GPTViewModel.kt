@@ -11,6 +11,7 @@ import cx.aphex.energysign.message.Message
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.flowOn
@@ -44,8 +45,10 @@ class GPTViewModel(
             fetchAnswerJob =
                 OpenAIClient.generateAnswer(replyingToMessage.str, listOf()) //, chatLog.value)
                     .onStart {
-//                        delay(15000)
-//                        throw IllegalStateException("Test")
+                        if (replyingToMessage.str.contains("aphextestnetwork", ignoreCase = true)) {
+                            delay(18000)
+                            throw IllegalStateException("Test")
+                        }
                         currentAnswerChunks.clear()
                     }
                     .mapNotNull { chunk ->

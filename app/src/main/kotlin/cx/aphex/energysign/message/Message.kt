@@ -97,15 +97,35 @@ sealed class Message {
             override val type: MSGTYPE = MSGTYPE.ONE_BY_ONE
         ) : ColorMessage(color)
 
-        data class ChonkySlide(
+        open class ChonkySlide(
             override val str: String,
             @Transient @ColorInt val colorCycle: Int,
-            @SerializedName("dly") val delayMs: Int = 1000,
+            @SerializedName("dly") val delayMs: Short = 1000,
 //            val colorFrom: Color,
 //            val colorTo: Color,
             override val type: MSGTYPE = MSGTYPE.CHONKY_SLIDE,
             @SerializedName("scroll") val shouldScrollToLastLetter: Boolean = false
         ) : ColorMessage(colorCycle)
+
+        class GPTThinking(
+            str: String = ".",
+            @ColorInt colorCycle: Int,
+            delayMs: Short = 250,
+            private val showCaret: Boolean = true,
+            private val thinkDots: Int = 0,
+        ) : ChonkySlide(str, colorCycle, delayMs) {
+            fun thinkMore(): GPTThinking {
+                val newStr = ".".repeat(thinkDots)
+                    .plus(if (showCaret) '|' else ' ')
+                    .padEnd(6, ' ')
+
+                return if (thinkDots == 6) {
+                    GPTThinking(newStr, colorCycle, 150, !showCaret, thinkDots)
+                } else {
+                    GPTThinking(newStr, colorCycle, delayMs, showCaret = true, thinkDots + 1)
+                }
+            }
+        }
 
         sealed class IconInvaders(
             override val str: String,

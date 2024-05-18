@@ -15,7 +15,6 @@ import cx.aphex.energysign.gpt.GPTViewModel
 import cx.aphex.energysign.gpt.GptAnswerResponse
 import cx.aphex.energysign.keyboard.KeyboardViewModel
 import cx.aphex.energysign.message.Message.FlashingAnnouncement.NowPlayingAnnouncement
-import io.ktor.util.toUpperCasePreservingASCIIRules
 import kotlinx.atomicfu.AtomicInt
 import kotlinx.atomicfu.atomic
 import kotlinx.atomicfu.getAndUpdate
@@ -47,16 +46,16 @@ class MessageManager(
     /**/
 
 
-    private var isGeneratingThought: Boolean = false
-    private var partialThought: String? = null
-    private var partialThoughtRetainforAnother: Int = 5
-    private var partialThoughtStartIdx: Int = 0
+//    private var isGeneratingThought: Boolean = false
+//    private var partialThought: String? = null
+//    private var partialThoughtRetainforAnother: Int = 5
+//    private var partialThoughtStartIdx: Int = 0
 
     //    private var sheepThoughtBuffer = ArrayDeque<Char>()
-    private var thoughtOnPanel: String = ""
-    private var showCaret: Boolean = true
-    private var showCaretThink: Boolean = true
-    private var showCaretThinkDots: Int = 0
+//    private var thoughtOnPanel: String = ""
+//    private var showCaret: Boolean = true
+//    private var showCaretThink: Boolean = true
+//    private var showCaretThinkDots: Int = 0
 
     //How often to advertise, e.g. every 5 user messages
     private var advertiseEvery: Int = 8
@@ -129,11 +128,14 @@ class MessageManager(
 
         gptViewModel.GPTError.observeForever {
             logW("GPT Reply Error: ${it.message}")
-            setGeneratingThought(false)
+            togglePersistentThinkingMessage(false)
             msgRepo.pushOneTimeMessages(
                 Message.ColorMessage.ChonkySlide("NO", context.getColor(R.color.instahandle), delayMs = 750),
                 Message.ColorMessage.ChonkySlide("NO BARS", context.getColor(R.color.instahandle), delayMs = 750),
-                Message.ColorMessage.ChonkySlide("SORRY!", context.getColor(R.color.instahandle)),
+                Message.ColorMessage.ChonkySlide("TRYING", context.getColor(R.color.instahandle), delayMs = 500),
+                Message.ColorMessage.ChonkySlide("AGAIN", context.getColor(R.color.instahandle), delayMs = 500),
+                Message.ColorMessage.ChonkySlide("LATER!", context.getColor(R.color.instahandle), delayMs = 500),
+                Message.Starfield()
             )
         }
     }
@@ -198,34 +200,17 @@ class MessageManager(
 
         if (msgRepo.oneTimeMessages.isEmpty()) {
             when (val curMsg = msgRepo.marqueeMessages.getOrNull(currentIdx.value)) {
-                is Message.Marquee.GPTQuery -> {
-                    if (!isGeneratingThought) {
-                        setGeneratingThought(true) // mebbe push a GPTThinking message here instead to represent the thinking state
-                        gptViewModel.generateAnswer(curMsg)
-                        return curMsg
-                    }
-                    //isGeneratingThought
-                    partialThought?.let { partialThought ->
-                        return partialThoughtMessage(partialThought)
-                    }
-
-                    logD("GPT is thinking, injecting thinking notification")
-                    return Message.ColorMessage.ChonkySlide(
-                        str = ".".repeat(showCaretThinkDots).plus(if (showCaretThink) '|' else ' ')
-                            .padEnd(6, ' '),
-                        colorCycle = context.getColor(R.color.chonkyslide_defaultpink),
-                        delayMs = 200,
-                    ).also {
-                        if (showCaretThinkDots == 6) {
-                            showCaretThink = !showCaretThink
-                        } else {
-                            showCaretThinkDots = (showCaretThinkDots + 1).coerceAtMost(6)
-                        }
-                    }
-                    // msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("THINKING.", 50))
-                    // msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("THINKING..", 50))
-                    // msgRepo.pushOneTimeMessage(Message.FlashingAnnouncement.CustomFlashyAnnouncement("PONDERING.", 50))
-                }
+//                is Message.Marquee.GPTQuery -> {
+////                    if (!isGeneratingThought) {
+//                    setGeneratingThought(true)
+//                    gptViewModel.generateAnswer(curMsg)
+//                    return curMsg
+////                    }
+//                    //isGeneratingThought
+////                    partialThought?.let { partialThought ->
+////                        return partialThoughtMessage(partialThought)
+////                    }
+//                }
 
                 is Message.Marquee.GPTReply -> {
                     logD("Converting GPTReply to User message!")
@@ -263,6 +248,10 @@ class MessageManager(
 
         // Display one-time messages first
         msgRepo.oneTimeMessages.removeFirstOrNull()?.let {
+            if (it is Message.ColorMessage.GPTThinking) {
+                logD("GPT is still thinking, injecting another thinking notification")
+                msgRepo.pushOneTimeMessage(it.thinkMore())
+            }
             return it
         }
 
@@ -271,50 +260,55 @@ class MessageManager(
         val currentMsg: Message.Marquee = msgRepo.marqueeMessages[idx]
         logD("getNextMessage: messages[$idx] = $currentMsg")
         usrMsgCount++
-        if (usrMsgCount % advertiseEvery == 0) {
-            logD("Advertise period reached; injecting advertisement")
-            pushAdvertisements()
+        if (currentMsg is Message.Marquee.GPTQuery) {
+            togglePersistentThinkingMessage(true)
+            gptViewModel.generateAnswer(currentMsg)
+        } else {
+            if (usrMsgCount % advertiseEvery == 0) {
+                logD("Advertise period reached; injecting advertisement")
+                pushAdvertisements()
+            }
         }
         return currentMsg
 
     }
 
-    private fun partialThoughtMessage(partialThought: String): Message.ColorMessage.ChonkySlide {
-        msgRepo.oneTimeMessages.clear()
-
-        if (!isGeneratingThought && partialThoughtStartIdx == partialThought.lastIndex) {
-            if (partialThoughtRetainforAnother > 0) {
-                partialThoughtRetainforAnother -= 1
-            } else {
-                this.partialThought = null
-                msgRepo.pushOneTimeMessage(Message.ColorMessage.IconInvaders.Explosion(context.getColor(R.color.pink)))
-                partialThoughtRetainforAnother = 5
-            }
-        }
-        logD("Returning partial sheep thought!")
-
-        val endIdx = (partialThoughtStartIdx + 1).coerceAtMost(partialThought.lastIndex)
-
-        thoughtOnPanel += partialThought
-            .substring(partialThoughtStartIdx until endIdx)
-            .toUpperCasePreservingASCIIRules()
-
-        partialThoughtStartIdx = endIdx
-
-        val isPanelFull = thoughtOnPanel.length >= 5 //sheepThoughtBuffer.isEmpty()
-
-        return Message.ColorMessage.ChonkySlide(
-            str = thoughtOnPanel.plus(if (showCaret) '|' else '_').padEnd(6, ' '),
-            colorCycle = context.getColor(R.color.chonkyslide_defaultpink),
-            delayMs = 10,
-            shouldScrollToLastLetter = isPanelFull
-        ).also {
-            if (isPanelFull) {
-                thoughtOnPanel = thoughtOnPanel.takeLast(5)
-            }
-            showCaret = true
-        }
-    }
+//    private fun partialThoughtMessage(partialThought: String): Message.ColorMessage.ChonkySlide {
+//        msgRepo.oneTimeMessages.clear()
+//
+//        if (!isGeneratingThought && partialThoughtStartIdx == partialThought.lastIndex) {
+//            if (partialThoughtRetainforAnother > 0) {
+//                partialThoughtRetainforAnother -= 1
+//            } else {
+//                this.partialThought = null
+//                msgRepo.pushOneTimeMessage(Message.ColorMessage.IconInvaders.Explosion(context.getColor(R.color.pink)))
+//                partialThoughtRetainforAnother = 5
+//            }
+//        }
+//        logD("Returning partial sheep thought!")
+//
+//        val endIdx = (partialThoughtStartIdx + 1).coerceAtMost(partialThought.lastIndex)
+//
+//        thoughtOnPanel += partialThought
+//            .substring(partialThoughtStartIdx until endIdx)
+//            .toUpperCasePreservingASCIIRules()
+//
+//        partialThoughtStartIdx = endIdx
+//
+//        val isPanelFull = thoughtOnPanel.length >= 5 //sheepThoughtBuffer.isEmpty()
+//
+//        return Message.ColorMessage.ChonkySlide(
+//            str = thoughtOnPanel.plus(if (showCaret) '|' else '_').padEnd(6, ' '),
+//            colorCycle = context.getColor(R.color.chonkyslide_defaultpink),
+//            delayMs = 10,
+//            shouldScrollToLastLetter = isPanelFull
+//        ).also {
+//            if (isPanelFull) {
+//                thoughtOnPanel = thoughtOnPanel.takeLast(5)
+//            }
+//            showCaret = true
+//        }
+//    }
 
     private fun getNextChooserMessage(): Message.Chooser {
         val idx = currentIdx.value
@@ -482,7 +476,7 @@ class MessageManager(
                     Message.ColorMessage.ChonkySlide(
                         str,
                         color ?: context.getColor(R.color.chonkyslide_defaultpink),
-                        delay
+                        delay.toShort()
                     )
                 }
 
@@ -650,28 +644,37 @@ class MessageManager(
     }
 
     private fun processGPTResponse(gptAnswerResponse: GptAnswerResponse) {
-        setGeneratingThought(false)
+        logD("Processing GPT Response: $gptAnswerResponse")
+        togglePersistentThinkingMessage(false)
+        if (gptAnswerResponse.answer.isBlank()) {
+            logW("GPT Response is blank; not adding to messages.")
+            return
+        }
         msgRepo.insertGPTReply(gptAnswerResponse)
-        getIdxAndAdvance() // FIXME eww not good, have to do this to advance past the gptquery that is now a user message so it doesn't display again before the gptreply
+//        getIdxAndAdvance() // FIXME eww not good, have to do this to advance past the gptquery that is now a user message so it doesn't display again before the gptreply
         msgRepo.saveMarqueeMessages(context)
     }
 
-    fun setGeneratingThought(thinking: Boolean) {
+    fun togglePersistentThinkingMessage(thinking: Boolean) {
         if (thinking) {
-            showCaretThink = true
-            showCaretThinkDots = 0
+//            showCaretThink = true
+//            showCaretThinkDots = 0
+//            msgRepo.marqueeMessages.add(currentIdx.value +1, Message.Marquee.GPTThinking())
+            msgRepo.pushOneTimeMessage(Message.ColorMessage.GPTThinking(colorCycle = context.getColor(R.color.chonkyslide_defaultpink)))
+        } else {
+            msgRepo.oneTimeMessages.removeIf { it is Message.ColorMessage.GPTThinking }
         }
-        isGeneratingThought = thinking
+//        isGeneratingThought = thinking
         logD("Set generating thought to $thinking")
     }
 
-    fun processPartialThought(chunk: String) {
-        if (partialThought == null) {
-            partialThought = ""
-            partialThoughtStartIdx = 0
-        }
-        partialThought += chunk.toNormalized()
-    }
+//    fun processPartialThought(chunk: String) {
+//        if (partialThought == null) {
+//            partialThought = ""
+//            partialThoughtStartIdx = 0
+//        }
+//        partialThought += chunk.toNormalized()
+//    }
 
     companion object {
         private const val ADS_FILE_NAME = "ads.json"

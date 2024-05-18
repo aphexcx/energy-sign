@@ -64,15 +64,15 @@ class BeatLinkDataConsumerServerService : Service(), KoinComponent {
                 post("/isGeneratingThought") {
                     val msg: SheepIsGeneratingThought = call.receive()
                     logW("Received new POSTed generating thought notification: ${msg.isGenerating}")
-                    messageManager.setGeneratingThought(msg.isGenerating)
+                    messageManager.togglePersistentThinkingMessage(msg.isGenerating)
                     call.respond(mapOf("success" to true))
                 }
-                post("/streamPartialSheepThought") {
-                    val msg: PostedMessage = call.receive()
-                    logW("Received new partial SheepThought: ${msg.message}")
-                    messageManager.processPartialThought(msg.message)
-                    call.respond(mapOf("success" to true))
-                }
+//                post("/streamPartialSheepThought") {
+//                    val msg: PostedMessage = call.receive()
+//                    logW("Received new partial SheepThought: ${msg.message}")
+//                    messageManager.processPartialThought(msg.message)
+//                    call.respond(mapOf("success" to true))
+//                }
                 post("/newGPTReply") { // formerly /newSheepThought
                     val msg: PostedMessage = call.receive()
                     logW("Received new POSTed GPT Reply: ${msg.message}")
