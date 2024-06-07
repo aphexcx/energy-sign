@@ -84,6 +84,58 @@ class GPTViewModel(
                     .launchIn(viewModelScope)
         }
     }
+    fun generateReplyToMultipleMessages(messages: List<Message.Marquee.User>) {
+        logD("generateReplyToMultipleMessages called!!!!")
 
+        viewModelScope.launch(defaultDispatcher) {
+            val currentAnswerChunks = mutableListOf<String>()
+
+            val prompt: String = """
+                Here are the last several messages users have written, from oldest to most recent:
+            """.trimIndent() + messages.joinToString { "\n" }
+
+            fetchAnswerJob =
+                OpenAIClient.generateAnswer(prompt, listOf()) //, chatLog.value)
+                    .onStart {
+                        if (prompt.contains("aphextestnetwork", ignoreCase = true)) {
+                            delay(18000)
+                            throw IllegalStateException("Test")
+                        }
+                        currentAnswerChunks.clear()
+                    }
+                    .mapNotNull { chunk ->
+                        chunk.choices.firstOrNull()?.delta?.content
+                    }
+                    .buffer()
+                    .flowOn(defaultDispatcher)
+                    .onEach { content ->
+                        logD(
+                            "got $content, currentAnswerChunks= $currentAnswerChunks"
+                        )
+//                        delay(24)
+                        currentAnswerChunks.add(content)
+                        logD(
+                            "added to currentAnswerChunks= $currentAnswerChunks"
+                        )
+//                        messageManager.processPartialThought(content)
+                    }
+                    .onCompletion { cause ->
+                        logI("generateAnswer Completed: $cause")
+                        //TODO
+//                        GPTResponse.postValue(
+//                            GptAnswerResponse(
+//                                currentAnswerChunks.joinToString(""),
+//                                messages.last()
+//                            )
+//                        )
+                    }
+                    .catch { cause ->
+                        logE("generateAnswer Exception: $cause")
+                        GPTError.postValue(cause)
+//                        updateLastChatMessage(cause.message ?: "Error")
+                    }
+                    .launchIn(viewModelScope)
+        }
+    }
 
 }

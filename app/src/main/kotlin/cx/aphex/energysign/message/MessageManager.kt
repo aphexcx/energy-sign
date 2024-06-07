@@ -268,6 +268,10 @@ class MessageManager(
                 logD("Advertise period reached; injecting advertisement")
                 pushAdvertisements()
             }
+//            if (timeSinceLastGPTMessage == 5) {
+//                gptViewModel.generateReplyToMultipleMessages(
+//                    msgRepo.marqueeMessages.filterIsInstance<Message.Marquee.User>().takeLast(5))
+//            }
         }
         return currentMsg
 
