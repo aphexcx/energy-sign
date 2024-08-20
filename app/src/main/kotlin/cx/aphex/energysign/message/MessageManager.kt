@@ -13,12 +13,14 @@ import cx.aphex.energysign.ext.logW
 import cx.aphex.energysign.ext.toNormalized
 import cx.aphex.energysign.gpt.GPTViewModel
 import cx.aphex.energysign.gpt.GptAnswerResponse
-import cx.aphex.energysign.keyboard.KeyboardViewModel
+import cx.aphex.energysign.keyboard.KeyboardManager
 import cx.aphex.energysign.message.Message.FlashingAnnouncement.NowPlayingAnnouncement
-import kotlinx.atomicfu.AtomicInt
 import kotlinx.atomicfu.atomic
 import kotlinx.atomicfu.getAndUpdate
 import kotlinx.atomicfu.update
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 import java.io.File
@@ -37,7 +39,7 @@ class MessageManager(
     private val playedTracks: LinkedHashSet<BeatLinkTrack> = linkedSetOf()
     private var nowPlayingTrack: Message.NowPlayingTrackMessage? = null
 
-    private val currentIdx: AtomicInt = atomic(0)
+    private val currentIdx = atomic<Int>(0)
 
     // Message type state mess **
     private var isInChooserMode: Boolean = false
@@ -66,7 +68,7 @@ class MessageManager(
     )
 
     private val gptViewModel: GPTViewModel by inject()
-    private val keyboardViewModel: KeyboardViewModel by inject()
+    private val keyboardManager = KeyboardManager
 
 
     init {
@@ -114,9 +116,11 @@ class MessageManager(
         )
 //        pushAdvertisements()
 
-        keyboardViewModel.newSubmittedKeyboardMessage.observeForever { msg ->
-            msg?.let {
-                processNewUserMessage(it)
+        CoroutineScope(Dispatchers.Main).launch {
+            keyboardManager.newSubmittedKeyboardMessage.collect { msg ->
+                msg?.let {
+                    processNewUserMessage(it)
+                }
             }
         }
 
@@ -194,7 +198,7 @@ class MessageManager(
         if (isInChooserMode) {
             return getNextChooserMessage()
         }
-        keyboardViewModel.handleKeyboardInput()?.let {
+        keyboardManager.handleKeyboardInput()?.let {
             return it
         }
 

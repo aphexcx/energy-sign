@@ -1,17 +1,20 @@
 package cx.aphex.energysign.keyboard
 
-import androidx.lifecycle.MutableLiveData
-import androidx.lifecycle.ViewModel
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.message.Message
 import cx.aphex.energysign.message.MessageRepository
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 
-class KeyboardViewModel : ViewModel(), KoinComponent {
+object KeyboardManager : KoinComponent {
     private val msgRepo: MessageRepository by inject()
 
-    val newSubmittedKeyboardMessage: MutableLiveData<String> = MutableLiveData()
+    private val _newSubmittedKeyboardMessage = MutableStateFlow<String?>(null)
+    val newSubmittedKeyboardMessage: StateFlow<String?> = _newSubmittedKeyboardMessage.asStateFlow()
 
 
     private var keyboardInputStartedAtMs: Long = 0
@@ -23,7 +26,7 @@ class KeyboardViewModel : ViewModel(), KoinComponent {
     private var keyboardStringBuilder: StringBuilder = StringBuilder()
 
     private fun notifyNewKeyboardString(input: String) {
-        newSubmittedKeyboardMessage.postValue(input)
+        _newSubmittedKeyboardMessage.update { input }
     }
 
     fun processNewKeyboardKey(key: Char) {
@@ -40,7 +43,7 @@ class KeyboardViewModel : ViewModel(), KoinComponent {
         keyboardStringBuilder.append(key)
     }
 
-    internal fun submitKeyboardInput() {
+    fun submitKeyboardInput() {
         val totalKeyboardInputTimeElapsed = System.currentTimeMillis() - keyboardInputStartedAtMs
 //        if (keyboardStringBuilder.length < 4) {
 //            // LONGER!\
@@ -66,7 +69,7 @@ class KeyboardViewModel : ViewModel(), KoinComponent {
         isInKeyboardInputMode = false
     }
 
-    internal fun deleteKey() {
+    fun deleteKey() {
         if (keyboardStringBuilder.isNotEmpty()) {
             lastKeyboardInputReceivedAtMs = System.currentTimeMillis()
             keyboardStringBuilder.deleteCharAt(keyboardStringBuilder.lastIndex)
@@ -74,7 +77,7 @@ class KeyboardViewModel : ViewModel(), KoinComponent {
     }
 
 
-    internal fun escapeKey() {
+    fun escapeKey() {
         //TODO fix bug -- pressing esc key causes type flashy error to be displayed
 
         // If not blank and esc key was pressed:
@@ -119,10 +122,9 @@ class KeyboardViewModel : ViewModel(), KoinComponent {
         }
     }
 
-    companion object {
-        private const val MINIMUM_INPUT_ENTRY_PERIOD: Int = 5_000
+    private const val MINIMUM_INPUT_ENTRY_PERIOD: Int = 5_000
 
-        private const val KEYBOARD_INPUT_TIMEOUT_MS: Int = 30_000
-        private const val KEYBOARD_INPUT_WARNING_MS: Int = 7_000
-    }
+    private const val KEYBOARD_INPUT_TIMEOUT_MS: Int = 30_000
+    private const val KEYBOARD_INPUT_WARNING_MS: Int = 7_000
+
 }

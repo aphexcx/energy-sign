@@ -4,21 +4,21 @@ import android.app.Service
 import android.content.Intent
 import android.os.Binder
 import android.os.IBinder
+import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
 import cx.aphex.energysign.message.MessageManager
-import io.ktor.application.call
-import io.ktor.application.install
-import io.ktor.features.ContentNegotiation
-import io.ktor.gson.gson
-import io.ktor.request.receive
-import io.ktor.response.respond
-import io.ktor.routing.get
-import io.ktor.routing.post
-import io.ktor.routing.routing
+import io.ktor.serialization.gson.gson
+import io.ktor.server.application.call
+import io.ktor.server.application.install
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
-import io.netty.util.internal.logging.InternalLoggerFactory
-import io.netty.util.internal.logging.JdkLoggerFactory
+import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.server.request.receive
+import io.ktor.server.response.respond
+import io.ktor.server.response.respondText
+import io.ktor.server.routing.get
+import io.ktor.server.routing.post
+import io.ktor.server.routing.routing
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 
@@ -43,16 +43,28 @@ class BeatLinkDataConsumerServerService : Service(), KoinComponent {
 
     val HTTP_PORT = 8080
 
+    private lateinit var server: io.ktor.server.engine.ApplicationEngine
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        return super.onStartCommand(intent, flags, startId)
+    }
+
     override fun onCreate() {
-        InternalLoggerFactory.setDefaultFactory(JdkLoggerFactory.INSTANCE)
 
-        embeddedServer(Netty, HTTP_PORT) {
-
+        logD("Starting embedded server on port $HTTP_PORT")
+        server = embeddedServer(Netty, HTTP_PORT) {
             install(ContentNegotiation) {
                 gson {}
             }
+//            install(CallLogging)
             routing {
+                get("/") {
+                    logD("GET /")
+                    call.respondText("Hello, world!")
+                }
+
                 get("/messages") {
+                    logD("GET /messages")
                     call.respond(messageManager.msgRepo.marqueeMessages)
                 }
                 post("/newUserMessage") {
@@ -68,7 +80,7 @@ class BeatLinkDataConsumerServerService : Service(), KoinComponent {
                     call.respond(mapOf("success" to true))
                 }
 //                post("/streamPartialSheepThought") {
-//                    val msg: PostedMessage = call.receive()
+//                    val msg: PostedMessage = call.receive()7
 //                    logW("Received new partial SheepThought: ${msg.message}")
 //                    messageManager.processPartialThought(msg.message)
 //                    call.respond(mapOf("success" to true))
@@ -88,7 +100,12 @@ class BeatLinkDataConsumerServerService : Service(), KoinComponent {
             }
 
         }.start(wait = false)
+        logD("Embedded server started")
         super.onCreate()
+    }
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        return super.onUnbind(intent)
     }
 
     data class PostedMessage(val message: String)

@@ -33,9 +33,8 @@ import cx.aphex.energysign.beatlinkdata.BeatLinkDataConsumerServerService
 import cx.aphex.energysign.databinding.ActivityServerBinding
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.observeNonNull
-import cx.aphex.energysign.keyboard.KeyboardViewModel
+import cx.aphex.energysign.keyboard.KeyboardManager
 import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers
-import org.koin.androidx.viewmodel.ext.android.viewModel
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -44,7 +43,7 @@ import java.util.concurrent.TimeUnit
 class GattServerActivity : AppCompatActivity() {
 
     private val viewModel: MainViewModel by viewModels()
-    private val keyboardViewModel: KeyboardViewModel by viewModel()
+    private val keyboardManager = KeyboardManager
 
     /* Local UI */
     private lateinit var logAdapter: LogAdapter
@@ -120,11 +119,11 @@ class GattServerActivity : AppCompatActivity() {
         if (event.action == ACTION_DOWN) {
             logD("Keypress! $key")
             when {
-                event.keyCode == KeyEvent.KEYCODE_ENTER -> keyboardViewModel.submitKeyboardInput()
-                event.keyCode == KeyEvent.KEYCODE_DEL -> keyboardViewModel.deleteKey()
-                event.keyCode == KeyEvent.KEYCODE_ESCAPE -> keyboardViewModel.escapeKey()
-                event.keyCode == KeyEvent.KEYCODE_SPACE -> keyboardViewModel.processNewKeyboardKey(' ')
-                event.isPrintingKey -> keyboardViewModel.processNewKeyboardKey(key)
+                event.keyCode == KeyEvent.KEYCODE_ENTER -> keyboardManager.submitKeyboardInput()
+                event.keyCode == KeyEvent.KEYCODE_DEL -> keyboardManager.deleteKey()
+                event.keyCode == KeyEvent.KEYCODE_ESCAPE -> keyboardManager.escapeKey()
+                event.keyCode == KeyEvent.KEYCODE_SPACE -> keyboardManager.processNewKeyboardKey(' ')
+                event.isPrintingKey -> keyboardManager.processNewKeyboardKey(key)
                 else -> return true // super.dispatchKeyEvent(event)
             }
         }
