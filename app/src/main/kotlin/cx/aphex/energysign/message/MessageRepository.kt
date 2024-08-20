@@ -5,6 +5,7 @@ import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logE
 import cx.aphex.energysign.ext.logW
 import cx.aphex.energysign.gpt.GptAnswerResponse
+import cx.aphex.energysign.gpt.PostedGptAnswer
 import cx.aphex.energysign.message.Message.Companion.VT
 import cx.aphex.energysign.toFile
 import io.ktor.util.toUpperCasePreservingASCIIRules
@@ -45,11 +46,29 @@ class MessageRepository {
         val queryMsgIdx = marqueeMessages.indexOf(gptAnswerResponse.inReplyTo)
         if (queryMsgIdx >= 0 && queryMsgIdx < marqueeMessages.size) {
             marqueeMessages.add(queryMsgIdx + 1, replyMsg)
+            // Convert the GPTQuery message to a user message
+            marqueeMessages[queryMsgIdx] = gptAnswerResponse.inReplyTo.toUserMessage()
+            logD("Inserted GPT reply after messages[${queryMsgIdx}]: ${gptAnswerResponse.inReplyTo}")
         } else {
-            marqueeMessages.add(replyMsg) // Append to the end if index is out of bounds
+            marqueeMessages.add(1, replyMsg) // "Reply" to the first message if index is out of bounds
+            logD("Inserted GPT reply after first message")
+            marqueeMessages[0] = gptAnswerResponse.inReplyTo.toUserMessage()
         }
-        // Convert the GPTQuery message to a user message
-        marqueeMessages[queryMsgIdx] = gptAnswerResponse.inReplyTo.toUserMessage()
+    }
+
+    fun insertGPTReplyToUserMessage(postedGptAnswer: PostedGptAnswer) {
+        val inReplyTo: Message.Marquee =
+            marqueeMessages.firstOrNull { it.str == postedGptAnswer.inReplyTo } ?: marqueeMessages.first()
+
+        val replyMsg = Message.Marquee.GPTReply(postedGptAnswer.answer.toUpperCasePreservingASCIIRules())
+        val queryMsgIdx = marqueeMessages.indexOf(inReplyTo)
+        if (queryMsgIdx >= 0 && queryMsgIdx < marqueeMessages.size) {
+            marqueeMessages.add(queryMsgIdx + 1, replyMsg)
+            logD("Inserted GPT reply after messages[${queryMsgIdx}]: $inReplyTo")
+        } else {
+            marqueeMessages.add(1, replyMsg) // "Reply" to the first message if index is out of bounds
+            logD("Inserted GPT reply after first message")
+        }
     }
 
     /** Write out the list of strings to the file */

@@ -25,6 +25,8 @@ import org.koin.core.component.KoinComponent
 import kotlin.coroutines.CoroutineContext
 
 data class GptAnswerResponse(val answer: String, val inReplyTo: Message.Marquee.GPTQuery)
+data class PostedGptAnswer(val answer: String, val inReplyTo: String)
+
 @OptIn(BetaOpenAI::class, ExperimentalCoroutinesApi::class)
 class GPTViewModel(
     private val defaultDispatcher: CoroutineContext = Dispatchers.IO.limitedParallelism(1)
