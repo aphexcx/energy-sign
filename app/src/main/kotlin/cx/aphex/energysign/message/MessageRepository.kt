@@ -57,6 +57,7 @@ class MessageRepository {
         try {
             marqueeMessages
                 .map { it.toString() }
+                .reversed()
                 .toFile(File(context.filesDir, SIGN_DB_FILE_NAME))
         } catch (e: Throwable) {
             logW("Exception when saving $SIGN_DB_FILE_NAME! ${e.message}")
@@ -64,6 +65,7 @@ class MessageRepository {
         try {
             marqueeMessages
                 .map { it.str }
+                .reversed()
                 .toFile(File(context.filesDir, SIGN_STRINGS_FILE_NAME))
         } catch (e: Throwable) {
             logW("Exception when saving $SIGN_STRINGS_FILE_NAME! ${e.message}")
@@ -74,7 +76,7 @@ class MessageRepository {
     /** Return the
      * //TODO last [MAX_SIGN_STRINGS]
      * strings from the sign strings file. */
-    fun loadUserMessages(context: Context): MutableList<Message.Marquee> {
+    fun loadUserMessages(context: Context): List<Message.Marquee> {
         with(File(context.filesDir, SIGN_DB_FILE_NAME)) {
             when (createNewFile()) {
                 true -> logD("$SIGN_DB_FILE_NAME does not exist; created new.")
@@ -82,7 +84,7 @@ class MessageRepository {
             }
 
             bufferedReader().use { reader ->
-                val list: MutableList<Message.Marquee> =
+                val list: List<Message.Marquee> =
                     reader.lineSequence() //.take(MAX_SIGN_STRINGS)
                         .map {
                             try {
@@ -102,7 +104,7 @@ class MessageRepository {
                         }
                         .filterNotNull()
                         .filter { it.str.isNotBlank() }
-                        .toMutableList()
+                        .toList()
                         .asReversed()
 
                 logD(
