@@ -1,9 +1,6 @@
 package cx.aphex.energysign.message
 
 import android.content.Context
-import com.google.gson.Gson
-import com.google.gson.GsonBuilder
-import com.google.gson.reflect.TypeToken
 import com.vdurmont.emoji.EmojiParser
 import cx.aphex.energysign.R
 import cx.aphex.energysign.beatlinkdata.BeatLinkTrack
@@ -22,6 +19,8 @@ import kotlinx.atomicfu.update
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 import java.io.File
@@ -32,9 +31,10 @@ class MessageManager(
     val msgRepo: MessageRepository,
 ) :
     KoinComponent {
-    private val gson: Gson = GsonBuilder()
-        .registerTypeAdapter(Message::class.java, Message.MessageSerializer())
-        .create()
+    private val json = Json {
+        ignoreUnknownKeys = true
+        classDiscriminator = "_class"
+    }
 
     private val advertisements: MutableList<Message> = mutableListOf()
     private val playedTracks: LinkedHashSet<BeatLinkTrack> = linkedSetOf()
@@ -576,14 +576,13 @@ class MessageManager(
             with(File(context.filesDir, ADS_FILE_NAME)) {
                 if (createNewFile()) {
                     logD("$ADS_FILE_NAME does not exist; created new, with default ad of <Invaders>.")
-                    writeText(gson.toJson(DEFAULT_ADS))
+                    writeText(json.encodeToString(DEFAULT_ADS))
                     return DEFAULT_ADS
                 }
 //                val typeOfT: Type =
 //                    TypeToken.getParameterized(List::class.java, Message::class.java).type
 //                object : TypeToken<List<Message>>() {}.type
-                val messagesType = object : TypeToken<List<Message>>() {}.type
-                val ads = gson.fromJson<List<Message>>(readText(), messagesType)
+                val ads = json.decodeFromString<List<Message>>(readText())
 //                val jsonString = json.encodeToString(Message.serializer(), message)
 
 //                val ads = json.decodeFromString(Message.serializer(), readText())
@@ -602,7 +601,7 @@ class MessageManager(
                     true -> logD("$ADS_FILE_NAME does not exist; created new.")
                     else -> logD("$ADS_FILE_NAME exists. Writing ads...")
                 }
-                writeText(gson.toJson(advertisements))
+                writeText(json.encodeToString(advertisements))
             }
         } catch (e: Throwable) {
             logW("Exception when saving $ADS_FILE_NAME! ${e.message}")
@@ -670,7 +669,7 @@ class MessageManager(
 //            showCaretThink = true
 //            showCaretThinkDots = 0
 //            msgRepo.marqueeMessages.add(currentIdx.value +1, Message.Marquee.GPTThinking())
-            msgRepo.pushOneTimeMessage(Message.ColorMessage.GPTThinking(colorCycle = context.getColor(R.color.chonkyslide_defaultpink)))
+            msgRepo.pushOneTimeMessage(Message.ColorMessage.GPTThinking(color = context.getColor(R.color.chonkyslide_defaultpink)))
         } else {
             msgRepo.oneTimeMessages.removeIf { it is Message.ColorMessage.GPTThinking }
         }

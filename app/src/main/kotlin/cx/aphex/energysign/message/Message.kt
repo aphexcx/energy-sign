@@ -1,21 +1,21 @@
 package cx.aphex.energysign.message
 
-import android.graphics.Color
 import androidx.annotation.ColorInt
-import com.google.gson.JsonDeserializationContext
-import com.google.gson.JsonDeserializer
-import com.google.gson.JsonElement
-import com.google.gson.JsonParseException
-import com.google.gson.JsonSerializationContext
-import com.google.gson.JsonSerializer
-import com.google.gson.annotations.JsonAdapter
-import com.google.gson.annotations.SerializedName
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
-import java.lang.reflect.Type
+import kotlinx.serialization.Transient
+import kotlinx.serialization.descriptors.PrimitiveKind
+import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
 
 @Serializable
 sealed class Message {
     abstract val str: String
+
+    @SerialName("type")
     protected abstract val type: MSGTYPE
 
     companion object {
@@ -23,6 +23,19 @@ sealed class Message {
         const val HEART: Char = '\u007F' //heart char (DEL)
     }
 
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is Message) return false
+        return str == other.str && type == other.type
+    }
+
+    override fun hashCode(): Int {
+        var result = str.hashCode()
+        result = 31 * result + type.hashCode()
+        return result
+    }
+
+    @Serializable
     sealed class Marquee : Message() {
 
         @Serializable
@@ -55,6 +68,12 @@ sealed class Message {
 
         override fun toString(): String = "$type$VT$str"
 
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is Marquee) return false
+            return super.equals(other)
+        }
+
         companion object {
             inline fun <reified T : Marquee> fromString(s: String): T {
                 val parts = s.split("$VT")
@@ -83,112 +102,214 @@ sealed class Message {
         override val type: MSGTYPE = MSGTYPE.TRACKID
     ) : Message()
 
-    sealed class ColorMessage(
-        @ColorInt color: Int,
-        val r: Int = Color.red(color),
-        val g: Int = Color.green(color),
-        val b: Int = Color.blue(color)
-    ) : Message() {
+    @Serializable
+    sealed class ColorMessage : Message() {
+        companion object {
+            const val DEFAULT_PINK = 0xff0080
 
+            fun red(color: Int): Int = (color shr 16) and 0xFF
+            fun green(color: Int): Int = (color shr 8) and 0xFF
+            fun blue(color: Int): Int = color and 0xFF
+        }
+
+        @Transient
+        abstract val color: Int
+
+        @Serializable
+        abstract class SerializableColorMessage : ColorMessage() {
+            abstract val r: Int
+            abstract val g: Int
+            abstract val b: Int
+        }
+
+        @Serializable
+        abstract class SerializableColorMessageWithDelay : SerializableColorMessage() {
+            @SerialName("dly")
+            abstract val delayMs: Short
+        }
+
+        @Serializable
         data class OneByOneMessage(
             override val str: String,
-            @Transient @ColorInt val color: Int,
-            @SerializedName("dly") val delayMs: Short = 1000,
+            @Transient @ColorInt override val color: Int = DEFAULT_PINK,
+            @SerialName("dly") override val delayMs: Short = 1000,
             override val type: MSGTYPE = MSGTYPE.ONE_BY_ONE
-        ) : ColorMessage(color)
+        ) : SerializableColorMessageWithDelay() {
+            override val r: Int = red(color)
+            override val g: Int = green(color)
+            override val b: Int = blue(color)
+        }
 
-        open class ChonkySlide(
+        @Serializable
+        abstract class ChonkyBaseMessage : SerializableColorMessageWithDelay() {
+            override val type: MSGTYPE = MSGTYPE.CHONKY_SLIDE
+        }
+
+        @Serializable
+        data class ChonkySlide(
             override val str: String,
-            @Transient @ColorInt val colorCycle: Int,
-            @SerializedName("dly") val delayMs: Short = 1000,
-//            val colorFrom: Color,
-//            val colorTo: Color,
-            override val type: MSGTYPE = MSGTYPE.CHONKY_SLIDE,
-            @SerializedName("scroll") val shouldScrollToLastLetter: Boolean = false
-        ) : ColorMessage(colorCycle)
+            @Transient @ColorInt override val color: Int = DEFAULT_PINK,
+            @SerialName("dly") override val delayMs: Short = 1000,
+            @SerialName("scroll") val shouldScrollToLastLetter: Boolean = false
+        ) : ChonkyBaseMessage() {
+            override val r: Int = red(color)
+            override val g: Int = green(color)
+            override val b: Int = blue(color)
+        }
 
-        class GPTThinking(
-            str: String = ".",
-            @ColorInt colorCycle: Int,
-            delayMs: Short = 250,
+        @Serializable
+        data class GPTThinking(
+            override val str: String = ".",
+            @Transient @ColorInt override val color: Int = DEFAULT_PINK,
+            @SerialName("dly") override val delayMs: Short = 250,
             private val showCaret: Boolean = true,
             private val thinkDots: Int = 0,
-        ) : ChonkySlide(str, colorCycle, delayMs) {
+        ) : ChonkyBaseMessage() {
+            override val r: Int = red(color)
+            override val g: Int = green(color)
+            override val b: Int = blue(color)
+
+            override fun equals(other: Any?): Boolean {
+                if (this === other) return true
+                if (javaClass != other?.javaClass) return false
+                other as GPTThinking
+                return str == other.str &&
+                        color == other.color &&
+                        delayMs == other.delayMs &&
+                        showCaret == other.showCaret &&
+                        thinkDots == other.thinkDots &&
+                        r == other.r &&
+                        g == other.g &&
+                        b == other.b
+            }
+
+            override fun hashCode(): Int {
+                var result = str.hashCode()
+                result = 31 * result + color
+                result = 31 * result + delayMs
+                result = 31 * result + showCaret.hashCode()
+                result = 31 * result + thinkDots
+                result = 31 * result + r
+                result = 31 * result + g
+                result = 31 * result + b
+                return result
+            }
+
             fun thinkMore(): GPTThinking {
                 val newStr = ".".repeat(thinkDots)
                     .plus(if (showCaret) '|' else ' ')
                     .padEnd(6, ' ')
 
                 return if (thinkDots == 6) {
-                    GPTThinking(newStr, colorCycle, 150, !showCaret, thinkDots)
+                    GPTThinking(newStr, color, 150, !showCaret, thinkDots)
                 } else {
-                    GPTThinking(newStr, colorCycle, delayMs, showCaret = true, thinkDots + 1)
+                    GPTThinking(newStr, color, delayMs, showCaret = true, thinkDots + 1)
                 }
             }
         }
 
+        @Serializable
         sealed class IconInvaders(
             override val str: String,
-            @ColorInt color: Int
-        ) : ColorMessage(color) {
+            @Transient @ColorInt override val color: Int = DEFAULT_PINK
+        ) : SerializableColorMessage() {
             override val type: MSGTYPE = MSGTYPE.ICON
 
-            class Enemy1(color: Int) : IconInvaders("1", color)
-            class Enemy2(color: Int) : IconInvaders("2", color)
-            class Explosion(color: Int) : IconInvaders("X", color)
-            class ANJUNA(color: Int) : IconInvaders("A", color)
-            class BAAAHS(color: Int) : IconInvaders("B", color)
-            class DREAMSTATE(color: Int) : IconInvaders("D", color)
-            class EDC(color: Int) : IconInvaders("E", color)
+            override val r: Int = red(color)
+            override val g: Int = green(color)
+            override val b: Int = blue(color)
+
+            @Serializable
+            class Enemy1(@ColorInt override val color: Int) : IconInvaders("1", color)
+
+            @Serializable
+            class Enemy2(@ColorInt override val color: Int) : IconInvaders("2", color)
+
+            @Serializable
+            class Explosion(@ColorInt override val color: Int) : IconInvaders("X", color)
+
+            @Serializable
+            class ANJUNA(@ColorInt override val color: Int) : IconInvaders("A", color)
+
+            @Serializable
+            class BAAAHS(@ColorInt override val color: Int) : IconInvaders("B", color)
+
+            @Serializable
+            class DREAMSTATE(@ColorInt override val color: Int) : IconInvaders("D", color)
+
+            @Serializable
+            class EDC(@ColorInt override val color: Int) : IconInvaders("E", color)
         }
     }
 
-    sealed class FlashingAnnouncement(override val str: String, val time: Short = 200) : Message() {
+    @Serializable
+    sealed class FlashingAnnouncement : Message() {
         override val type: MSGTYPE = MSGTYPE.FLASHY
 
-        object NowPlayingAnnouncement : FlashingAnnouncement("NOW${VT}PLAYING")
-        class CustomFlashyAnnouncement(str: String, time: Short = 200) : FlashingAnnouncement(str, time)
+        @Serializable
+        object NowPlayingAnnouncement : FlashingAnnouncement() {
+            override val str: String = "NOW${VT}PLAYING"
+            val time: Short = 200
+        }
+
+        @Serializable
+        class CustomFlashyAnnouncement(
+            override val str: String,
+            val time: Short = 200
+        ) : FlashingAnnouncement()
     }
 
+    @Serializable
     sealed class CountDownAnnouncement(override val str: String) : Message() {
         override val type: MSGTYPE = MSGTYPE.COUNTDOWN
 
+        @Serializable
         object NewMessageAnnouncement : CountDownAnnouncement("NEW${VT}MSG$VT")
     }
 
     /* Messages that control admin-only device modes or settings.
  */
+    @Serializable
     sealed class UtilityMessage(override val str: String, val subtype: Char) : Message() {
         override val type: MSGTYPE = MSGTYPE.UTILITY
 
+        @Serializable
         object EnableMic : UtilityMessage("E", 'M')
+
+        @Serializable
         object DisableMic : UtilityMessage("D", 'M')
-        class BrightnessShift(amount: Int?) : UtilityMessage(amount?.toString() ?: "", 'B')
+
+        @Serializable
+        class BrightnessShift(val amount: Int?) : UtilityMessage(amount?.toString() ?: "", 'B')
     }
 
+    @Serializable
     class Chooser(
-        currentIndex: Int,
-        lastIndex: Int,
-        currentMessage: Marquee
+        val currentIndex: Int,
+        val lastIndex: Int,
+        val currentMessage: Marquee
     ) : Message() {
         override val str: String = currentMessage.str
         private val flashy: String = "$currentIndex/${lastIndex}"
         override val type: MSGTYPE = MSGTYPE.CHOOSER
     }
 
-    sealed class KeyboardEcho(currentString: String, val mode: Char) : Message() {
+    @Serializable
+    sealed class KeyboardEcho(@Transient val currentString: String = "", val mode: Char) : Message() {
         override val str: String = currentString.takeLast(19) + '_'
         override val type: MSGTYPE = MSGTYPE.KEYBOARD
 
-        data class Input(@Transient val currentInput: String) :
+        @Serializable
+        data class Input(@Transient val currentInput: String = "") :
             KeyboardEcho(currentInput, 'I')
 
-        data class InputWarning(@Transient val currentInput: String) :
+        @Serializable
+        data class InputWarning(@Transient val currentInput: String = "") :
             KeyboardEcho(currentInput, 'W')
     }
 
 
-    @JsonAdapter(MSGTYPE.MsgTypeSerializer::class)
+    @Serializable(with = MSGTYPESerializer::class)
     enum class MSGTYPE(val value: Char) {
         CHONKY_SLIDE('C'),
         ONE_BY_ONE('O'),
@@ -202,25 +323,18 @@ sealed class Message {
         TRACKID('T'),
         CHONKYMARQUEE('N'),
         DEFAULT('D');
+    }
 
-        class MsgTypeSerializer : JsonSerializer<MSGTYPE>, JsonDeserializer<MSGTYPE> {
-            override fun serialize(
-                src: MSGTYPE,
-                typeOfSrc: Type,
-                context: JsonSerializationContext
-            ): JsonElement =
-                context.serialize(src.value)
+    object MSGTYPESerializer : KSerializer<MSGTYPE> {
+        override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("MSGTYPE", PrimitiveKind.CHAR)
 
-            override fun deserialize(
-                json: JsonElement,
-                typeOfT: Type,
-                context: JsonDeserializationContext
-            ): MSGTYPE =
-                try {
-                    values().firstOrNull { it.value == json.asString.firstOrNull() } ?: DEFAULT
-                } catch (e: JsonParseException) {
-                    DEFAULT
-                }
+        override fun serialize(encoder: Encoder, value: MSGTYPE) {
+            encoder.encodeChar(value.value)
+        }
+
+        override fun deserialize(decoder: Decoder): MSGTYPE {
+            val char = decoder.decodeChar()
+            return MSGTYPE.values().first { it.value == char }
         }
     }
 
@@ -232,58 +346,9 @@ sealed class Message {
 //        }.objectInstance
 //    }
 
-    class MessageSerializer : JsonSerializer<Message>, JsonDeserializer<Message> {
-        override fun serialize(
-            src: Message,
-            typeOfSrc: Type,
-            context: JsonSerializationContext
-        ): JsonElement {
-            return when (src) {
-//                is KeyboardEcho -> {
-//                    JsonPrimitive(src.str)
-//                }
-                else -> context.serialize(src)
-            }
-        }
-
-        override fun deserialize(
-            json: JsonElement,
-            typeOfT: Type,
-            context: JsonDeserializationContext
-        ): Message {
-            return try {
-                val type: MSGTYPE =
-                    MSGTYPE.MsgTypeSerializer().deserialize(json.asJsonObject["type"], Char::class.java, context)
-                when (type) {
-                    MSGTYPE.CHONKY_SLIDE -> context.deserialize(json, ColorMessage.ChonkySlide::class.java) as Message
-                    MSGTYPE.ONE_BY_ONE -> context.deserialize(json, ColorMessage.OneByOneMessage::class.java) as Message
-                    MSGTYPE.FLASHY -> context.deserialize(json, FlashingAnnouncement::class.java)
-                    MSGTYPE.COUNTDOWN -> context.deserialize(json, CountDownAnnouncement::class.java)
-                    MSGTYPE.UTILITY -> context.deserialize(json, UtilityMessage::class.java)
-                    MSGTYPE.CHOOSER -> context.deserialize(json, Chooser::class.java)
-                    MSGTYPE.KEYBOARD -> context.deserialize(json, KeyboardEcho::class.java)
-                    MSGTYPE.STARFIELD -> context.deserialize(json, Starfield::class.java)
-                    MSGTYPE.TRACKID -> context.deserialize(json, NowPlayingTrackMessage::class.java)
-                    MSGTYPE.CHONKYMARQUEE -> context.deserialize(json, Marquee.Chonky::class.java)
-                    MSGTYPE.ICON -> {
-                        when (json.asJsonObject["str"].asString) {
-                            "1" -> context.deserialize(json, ColorMessage.IconInvaders.Enemy1::class.java)
-                            "2" -> context.deserialize(json, ColorMessage.IconInvaders.Enemy2::class.java)
-                            "X" -> context.deserialize(json, ColorMessage.IconInvaders.Explosion::class.java)
-                            "A" -> context.deserialize(json, ColorMessage.IconInvaders.ANJUNA::class.java)
-                            "B" -> context.deserialize(json, ColorMessage.IconInvaders.BAAAHS::class.java)
-                            "D" -> context.deserialize(json, ColorMessage.IconInvaders.DREAMSTATE::class.java)
-                            "E" -> context.deserialize(json, ColorMessage.IconInvaders.EDC::class.java)
-                            else -> throw JsonParseException("Unknown IconInvader: ${json.asJsonObject["str"].asString}")
-                        }
-                    }
-
-                    MSGTYPE.DEFAULT -> context.deserialize(json, Marquee.User::class.java)
-                }
-            } catch (e: JsonParseException) {
-                context.deserialize(json, Marquee.User::class.java)
-            }
-        }
+    @Serializable
+    sealed class MessageSerializer {
+        // The actual implementation will be provided by kotlinx.serialization
     }
 }
 

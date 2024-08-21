@@ -29,6 +29,7 @@ android {
     }
     sourceSets {
         main.java.srcDirs += 'src/main/kotlin'
+        test.java.srcDirs += 'src/test/kotlin'
     }
 
     compileOptions {
@@ -54,6 +55,12 @@ android {
     }
 
     namespace 'cx.aphex.energysign'
+
+    testOptions {
+        unitTests.all {
+            useJUnitPlatform()
+        }
+    }
 }
 
 dependencies {
@@ -69,7 +76,6 @@ dependencies {
     implementation 'androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.4'
     implementation 'com.ibm.icu:icu4j:67.1'
     implementation 'com.google.code.gson:gson:2.10.1'
-    implementation "org.jetbrains.kotlin:kotlin-serialization:$kotlin_version"
     implementation "org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.2"
     ext.koin_version = "3.5.6"
     implementation "io.insert-koin:koin-android:$koin_version"
@@ -114,4 +120,14 @@ dependencies {
     implementation platform('com.aallam.openai:openai-client-bom:3.7.2')
     implementation 'com.aallam.openai:openai-client'
 
+    // JUnit 5
+    testImplementation 'org.junit.jupiter:junit-jupiter-api:5.9.2'
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.9.2'
+
+    // Kotlin Test
+    testImplementation 'org.jetbrains.kotlin:kotlin-test:1.8.10'
+
+    // Mockito
+    testImplementation 'org.mockito:mockito-core:3.12.4'
+    testImplementation 'org.mockito:mockito-inline:3.12.4'
 }
