@@ -3,18 +3,20 @@ package cx.aphex.energysign.keyboard
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.message.Message
 import cx.aphex.energysign.message.MessageRepository
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.launch
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 
 object KeyboardManager : KoinComponent {
     private val msgRepo: MessageRepository by inject()
 
-    private val _newSubmittedKeyboardMessage = MutableStateFlow<String?>(null)
-    val newSubmittedKeyboardMessage: StateFlow<String?> = _newSubmittedKeyboardMessage.asStateFlow()
+    private val _newSubmittedKeyboardMessage = MutableSharedFlow<String>()
+    val newSubmittedKeyboardMessage: SharedFlow<String> = _newSubmittedKeyboardMessage.asSharedFlow()
 
 
     private var keyboardInputStartedAtMs: Long = 0
@@ -25,8 +27,8 @@ object KeyboardManager : KoinComponent {
 
     private var keyboardStringBuilder: StringBuilder = StringBuilder()
 
-    private fun notifyNewKeyboardString(input: String) {
-        _newSubmittedKeyboardMessage.update { input }
+    suspend fun notifyNewKeyboardString(input: String) {
+        _newSubmittedKeyboardMessage.emit(input)
     }
 
     fun processNewKeyboardKey(key: Char) {
@@ -36,6 +38,7 @@ object KeyboardManager : KoinComponent {
             return
         }
         isInKeyboardInputMode = true
+        msgRepo.oneTimeMessages.clear()
         if (keyboardStringBuilder.isEmpty()) {
             keyboardInputStartedAtMs = System.currentTimeMillis()
         }
@@ -57,8 +60,11 @@ object KeyboardManager : KoinComponent {
             endKeyboardInput()
         } else {
             if (totalKeyboardInputTimeElapsed > MINIMUM_INPUT_ENTRY_PERIOD) {
-                notifyNewKeyboardString(keyboardStringBuilder.toString())
-                endKeyboardInput()
+                CoroutineScope(Dispatchers.Main).launch {
+                    val newSubmission = keyboardStringBuilder.toString()
+                    notifyNewKeyboardString(newSubmission)
+                    endKeyboardInput()
+                }
             }
         }
     }
@@ -95,7 +101,6 @@ object KeyboardManager : KoinComponent {
 
     fun handleKeyboardInput(): Message.KeyboardEcho? {
         if (isInKeyboardInputMode) {
-            msgRepo.oneTimeMessages.clear()
 
             val msSinceLastInput = System.currentTimeMillis() - lastKeyboardInputReceivedAtMs
 

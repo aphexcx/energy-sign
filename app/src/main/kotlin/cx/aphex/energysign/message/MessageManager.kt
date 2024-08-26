@@ -21,6 +21,7 @@ import kotlinx.atomicfu.getAndUpdate
 import kotlinx.atomicfu.update
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
@@ -118,10 +119,9 @@ class MessageManager(
 //        pushAdvertisements()
 
         CoroutineScope(Dispatchers.Main).launch {
-            keyboardManager.newSubmittedKeyboardMessage.collect { msg ->
-                msg?.let {
-                    processNewUserMessage(it)
-                }
+            keyboardManager.newSubmittedKeyboardMessage.collectLatest { msg ->
+                logD("Processing new submitted keyboard message: $msg")
+                processNewUserMessage(msg)
             }
         }
 
@@ -149,7 +149,7 @@ class MessageManager(
 
     /** Pushes a new user message onto the top of the messages list. */
     fun processNewUserMessage(str: String) {
-        currentIdx.value = 0
+        currentIdx.update { 0 }
 
 //        String(value).split("++").filter { it.isNotBlank() }.reversed().forEach {
 //            pushStringOnList(it.replace('•', '*'))
@@ -159,6 +159,7 @@ class MessageManager(
             .convertHeartEmojis()
             .toNormalized()
         val newUserMessage = if (str.lowercase().contains("ravegpt")) {
+            //TODO: could turn messages with 'baaahs' into GPTQueries
             Message.Marquee.GPTQuery(normalizedStr)
         } else {
             Message.Marquee.User(normalizedStr)
@@ -222,8 +223,8 @@ class MessageManager(
                     msgRepo.marqueeMessages[currentIdx.value] = curMsg.toChonkyMessage()
                     msgRepo.saveMarqueeMessages(context)
                     msgRepo.pushOneTimeMessages(
-                        Message.ColorMessage.ChonkySlide("SHEEP", context.getColor(R.color.green)),
-                        Message.ColorMessage.ChonkySlide("SHEEPGPT", context.getColor(R.color.green), delayMs = 750),
+                        Message.ColorMessage.ChonkySlide("BAAAHS", context.getColor(R.color.green)),
+//                        Message.ColorMessage.ChonkySlide("RAVEGPT", context.getColor(R.color.green), delayMs = 750),
                         Message.ColorMessage.ChonkySlide(
                             "SAYS.",
                             context.getColor(R.color.green), delayMs = 250
