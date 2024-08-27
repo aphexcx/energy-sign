@@ -35,6 +35,10 @@ class MessageManager(
     KoinComponent {
     private val gson: Gson = GsonBuilder()
         .registerTypeAdapter(Message::class.java, Message.MessageSerializer())
+        .registerTypeAdapter(
+            Message.ColorMessage.IconInvaders::class.java,
+            Message.ColorMessage.IconInvaders.IconInvadersSerializer()
+        )
         .create()
 
     private val advertisements: MutableList<Message> = mutableListOf()
@@ -121,7 +125,7 @@ class MessageManager(
         CoroutineScope(Dispatchers.Main).launch {
             keyboardManager.newSubmittedKeyboardMessage.collectLatest { msg ->
                 logD("Processing new submitted keyboard message: $msg")
-                processNewUserMessage(msg)
+                processNewUserMessage(msg, isQuery = true)
             }
         }
 
@@ -148,7 +152,7 @@ class MessageManager(
     private var usrMsgCount: Int = 0
 
     /** Pushes a new user message onto the top of the messages list. */
-    fun processNewUserMessage(str: String) {
+    fun processNewUserMessage(str: String, isQuery: Boolean = false) {
         currentIdx.update { 0 }
 
 //        String(value).split("++").filter { it.isNotBlank() }.reversed().forEach {
@@ -158,7 +162,7 @@ class MessageManager(
         val normalizedStr = str
             .convertHeartEmojis()
             .toNormalized()
-        val newUserMessage = if (str.lowercase().contains("ravegpt")) {
+        val newUserMessage = if (isQuery || str.lowercase().contains("ravegpt")) {
             //TODO: could turn messages with 'baaahs' into GPTQueries
             Message.Marquee.GPTQuery(normalizedStr)
         } else {
@@ -268,7 +272,7 @@ class MessageManager(
         usrMsgCount++
         if (currentMsg is Message.Marquee.GPTQuery) {
             togglePersistentThinkingMessage(true)
-            gptViewModel.generateAnswer(currentMsg)
+//            gptViewModel.generateAnswer(currentMsg)
         } else {
             if (usrMsgCount % advertiseEvery == 0) {
                 logD("Advertise period reached; injecting advertisement")
