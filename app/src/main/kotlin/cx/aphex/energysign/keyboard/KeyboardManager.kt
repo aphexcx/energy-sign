@@ -24,10 +24,12 @@ object KeyboardManager : KoinComponent {
     private var showAsWarning: Boolean = false
 
     private var isInKeyboardInputMode: Boolean = false
+    private var isMessageSubmitted: Boolean = false
 
     private var keyboardStringBuilder: StringBuilder = StringBuilder()
 
     suspend fun notifyNewKeyboardString(input: String) {
+        isMessageSubmitted = true
         _newSubmittedKeyboardMessage.emit(input)
     }
 
@@ -38,6 +40,7 @@ object KeyboardManager : KoinComponent {
             return
         }
         isInKeyboardInputMode = true
+        isMessageSubmitted = false
         msgRepo.oneTimeMessages.clear()
         if (keyboardStringBuilder.isEmpty()) {
             keyboardInputStartedAtMs = System.currentTimeMillis()
@@ -56,7 +59,7 @@ object KeyboardManager : KoinComponent {
         // else if ! any words are in dict
         // NO SPAM!
 
-        if (keyboardStringBuilder.isBlank()) {
+        if (keyboardStringBuilder.isBlank() || isMessageSubmitted) {
             endKeyboardInput()
         } else {
             if (totalKeyboardInputTimeElapsed > MINIMUM_INPUT_ENTRY_PERIOD) {
