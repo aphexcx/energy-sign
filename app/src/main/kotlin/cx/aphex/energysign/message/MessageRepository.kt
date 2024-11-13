@@ -57,17 +57,24 @@ class MessageRepository {
     }
 
     fun insertGPTReplyToUserMessage(postedGptAnswer: PostedGptAnswer) {
+        val replyMsg = Message.Marquee.GPTReply(postedGptAnswer.answer.toUpperCasePreservingASCIIRules())
         val inReplyTo: Message.Marquee =
             marqueeMessages.firstOrNull { it.str == postedGptAnswer.inReplyTo } ?: marqueeMessages.first()
-
-        val replyMsg = Message.Marquee.GPTReply(postedGptAnswer.answer.toUpperCasePreservingASCIIRules())
         val queryMsgIdx = marqueeMessages.indexOf(inReplyTo)
         if (queryMsgIdx >= 0 && queryMsgIdx < marqueeMessages.size) {
+            // Convert the GPTQuery message to a user message
+            (inReplyTo as? Message.Marquee.GPTQuery)?.let {
+                marqueeMessages[queryMsgIdx] = it.toUserMessage()
+            }
             marqueeMessages.add(queryMsgIdx + 1, replyMsg)
             logD("Inserted GPT reply after messages[${queryMsgIdx}]: $inReplyTo")
         } else {
             marqueeMessages.add(1, replyMsg) // "Reply" to the first message if index is out of bounds
             logD("Inserted GPT reply after first message")
+            // Convert the GPTQuery message to a user message
+            (marqueeMessages[0] as? Message.Marquee.GPTQuery)?.let {
+                marqueeMessages[0] = it.toUserMessage()
+            }
         }
     }
 

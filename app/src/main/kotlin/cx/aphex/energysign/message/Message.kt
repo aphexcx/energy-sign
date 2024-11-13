@@ -1,10 +1,10 @@
 package cx.aphex.energysign.message
 
-import android.graphics.Color
 import androidx.annotation.ColorInt
 import com.google.gson.JsonDeserializationContext
 import com.google.gson.JsonDeserializer
 import com.google.gson.JsonElement
+import com.google.gson.JsonObject
 import com.google.gson.JsonParseException
 import com.google.gson.JsonSerializationContext
 import com.google.gson.JsonSerializer
@@ -85,10 +85,17 @@ sealed class Message {
 
     sealed class ColorMessage(
         @ColorInt color: Int,
-        val r: Int = Color.red(color),
-        val g: Int = Color.green(color),
-        val b: Int = Color.blue(color)
+        val r: Int = red(color),
+        val g: Int = green(color),
+        val b: Int = blue(color)
     ) : Message() {
+        companion object {
+            const val DEFAULT_PINK = 0xff0080
+
+            fun red(color: Int): Int = (color shr 16) and 0xFF
+            fun green(color: Int): Int = (color shr 8) and 0xFF
+            fun blue(color: Int): Int = color and 0xFF
+        }
 
         data class OneByOneMessage(
             override val str: String,
@@ -125,21 +132,80 @@ sealed class Message {
                     GPTThinking(newStr, colorCycle, delayMs, showCaret = true, thinkDots + 1)
                 }
             }
+            override fun equals(other: Any?): Boolean {
+                if (this === other) return true
+                if (javaClass != other?.javaClass) return false
+                other as GPTThinking
+                return str == other.str &&
+                        colorCycle == other.colorCycle &&
+                        delayMs == other.delayMs &&
+                        showCaret == other.showCaret &&
+                        thinkDots == other.thinkDots &&
+                        r == other.r &&
+                        g == other.g &&
+                        b == other.b
+            }
+
+            override fun hashCode(): Int {
+                var result = str.hashCode()
+                result = 31 * result + colorCycle
+                result = 31 * result + delayMs
+                result = 31 * result + showCaret.hashCode()
+                result = 31 * result + thinkDots
+                result = 31 * result + r
+                result = 31 * result + g
+                result = 31 * result + b
+                return result
+            }
         }
 
+        @JsonAdapter(IconInvaders.IconInvadersSerializer::class)
         sealed class IconInvaders(
             override val str: String,
             @ColorInt color: Int
         ) : ColorMessage(color) {
             override val type: MSGTYPE = MSGTYPE.ICON
 
-            class Enemy1(color: Int) : IconInvaders("1", color)
-            class Enemy2(color: Int) : IconInvaders("2", color)
-            class Explosion(color: Int) : IconInvaders("X", color)
-            class ANJUNA(color: Int) : IconInvaders("A", color)
-            class BAAAHS(color: Int) : IconInvaders("B", color)
-            class DREAMSTATE(color: Int) : IconInvaders("D", color)
-            class EDC(color: Int) : IconInvaders("E", color)
+            class Enemy1(@ColorInt color: Int) : IconInvaders("1", color)
+            class Enemy2(@ColorInt color: Int) : IconInvaders("2", color)
+            class Explosion(@ColorInt color: Int) : IconInvaders("X", color)
+            class ANJUNA(@ColorInt color: Int) : IconInvaders("A", color)
+            class BAAAHS(@ColorInt color: Int) : IconInvaders("B", color)
+            class DREAMSTATE(@ColorInt color: Int) : IconInvaders("D", color)
+            class EDC(@ColorInt color: Int) : IconInvaders("E", color)
+
+            class IconInvadersSerializer : JsonSerializer<IconInvaders>, JsonDeserializer<IconInvaders> {
+                override fun serialize(
+                    src: IconInvaders,
+                    typeOfSrc: Type,
+                    context: JsonSerializationContext
+                ): JsonElement {
+                    val jsonObject = JsonObject()
+                    jsonObject.addProperty("str", src.str)
+                    jsonObject.addProperty("color", src.r shl 16 or (src.g shl 8) or src.b)
+                    return jsonObject
+                }
+
+                override fun deserialize(
+                    json: JsonElement,
+                    typeOfT: Type,
+                    context: JsonDeserializationContext
+                ): IconInvaders {
+                    val jsonObject = json.asJsonObject
+                    val str = jsonObject.get("str").asString
+                    val color = jsonObject.get("color").asInt
+                    return when (str) {
+                        "1" -> Enemy1(color)
+                        "2" -> Enemy2(color)
+                        "X" -> Explosion(color)
+                        "A" -> ANJUNA(color)
+                        "B" -> BAAAHS(color)
+                        "D" -> DREAMSTATE(color)
+                        "E" -> EDC(color)
+                        else -> throw JsonParseException("Unknown IconInvaders str: $str")
+                    }
+                }
+            }
         }
     }
 
