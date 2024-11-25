@@ -88,7 +88,7 @@ Your task is to write one reply to the last several messages users have written.
     ): Flow<ChatCompletionChunk> {
 
         val chatCompletionRequest = ChatCompletionRequest(
-            model = ModelId("gpt-4o"),
+            model = ModelId("gpt-4o-2024-11-20"),
             messages = listOf(
                 ChatMessage(
                     role = ChatRole.System,

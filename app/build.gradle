@@ -20,6 +20,7 @@ android {
         Properties properties = new Properties()
         properties.load(project.rootProject.file('local.properties').newDataInputStream())
         buildConfigField("String", "OPENAI_API_KEY", properties.getProperty('OPENAI_API_KEY'))
+        buildConfigField("String", "DEEPGRAM_API_KEY", properties.getProperty('DEEPGRAM_API_KEY'))
     }
     buildTypes {
         release {
@@ -118,7 +119,7 @@ dependencies {
 
     implementation 'com.vdurmont:emoji-java:5.1.1'
 
-    implementation platform('com.aallam.openai:openai-client-bom:3.7.2')
+    implementation platform('com.aallam.openai:openai-client-bom:3.8.2')
     implementation 'com.aallam.openai:openai-client'
 
     // JUnit 5

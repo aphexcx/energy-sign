@@ -139,11 +139,11 @@ class MessageManager(
             logW("GPT Reply Error: ${it.message}")
             togglePersistentThinkingMessage(false)
             msgRepo.pushOneTimeMessages(
-                Message.ColorMessage.ChonkySlide("NO", context.getColor(R.color.instahandle), delayMs = 750),
-                Message.ColorMessage.ChonkySlide("NO BARS", context.getColor(R.color.instahandle), delayMs = 750),
-                Message.ColorMessage.ChonkySlide("TRYING", context.getColor(R.color.instahandle), delayMs = 500),
-                Message.ColorMessage.ChonkySlide("AGAIN", context.getColor(R.color.instahandle), delayMs = 500),
-                Message.ColorMessage.ChonkySlide("LATER!", context.getColor(R.color.instahandle), delayMs = 500),
+                Message.ColorMessage.ChonkySlide("NO", context.getColor(R.color.instahandle), delayMs = 650),
+                Message.ColorMessage.ChonkySlide("NO BARS", context.getColor(R.color.instahandle), delayMs = 650),
+                Message.ColorMessage.ChonkySlide("TRYING", context.getColor(R.color.instahandle), delayMs = 400),
+                Message.ColorMessage.ChonkySlide("AGAIN", context.getColor(R.color.instahandle), delayMs = 400),
+                Message.ColorMessage.ChonkySlide("LATER!", context.getColor(R.color.instahandle), delayMs = 400),
                 Message.Starfield()
             )
         }
@@ -227,8 +227,10 @@ class MessageManager(
                     msgRepo.marqueeMessages[currentIdx.value] = curMsg.toChonkyMessage()
                     msgRepo.saveMarqueeMessages(context)
                     msgRepo.pushOneTimeMessages(
-                        Message.ColorMessage.ChonkySlide("BAAAHS", context.getColor(R.color.green)),
-//                        Message.ColorMessage.ChonkySlide("RAVEGPT", context.getColor(R.color.green), delayMs = 750),
+//                        Message.ColorMessage.ChonkySlide("BAAAHS", context.getColor(R.color.green)),
+                        Message.ColorMessage.ChonkySlide("RAVEGPT", context.getColor(R.color.green), delayMs = 750),
+//                        Message.ColorMessage.ChonkySlide("GARBAGE", context.getColor(R.color.green), delayMs = 750),
+//                        Message.ColorMessage.ChonkySlide("MOTHER", context.getColor(R.color.green), delayMs = 750),
                         Message.ColorMessage.ChonkySlide(
                             "SAYS.",
                             context.getColor(R.color.green), delayMs = 250
@@ -272,7 +274,7 @@ class MessageManager(
         usrMsgCount++
         if (currentMsg is Message.Marquee.GPTQuery) {
             togglePersistentThinkingMessage(true)
-//            gptViewModel.generateAnswer(currentMsg)
+            gptViewModel.generateAnswer(currentMsg)
         } else {
             if (usrMsgCount % advertiseEvery == 0) {
                 logD("Advertise period reached; injecting advertisement")
