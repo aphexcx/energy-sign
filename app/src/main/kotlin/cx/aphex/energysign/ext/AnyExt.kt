@@ -2,44 +2,57 @@ package cx.aphex.energysign.ext
 
 
 import android.util.Log
+import arrow.core.MemoizedDeepRecursiveFunction
 import com.google.firebase.crashlytics.FirebaseCrashlytics
 import cx.aphex.energysign.ScreenLogger
-import org.funktionale.memoization.memoize
 import kotlin.reflect.KClass
 
+/**
+ * Extension property that provides a standardized tag for logging purposes.
+ *
+ * This property is commonly used with Android's Log utility methods to
+ * provide consistent class identification in log output.
+ *
+ * @return A String representing the class name appropriate for logging
+ */
 val Any.TAG: String
     get() = memoizedTag(this::class)
 
 /**
- * A val that stores a memoized function that takes a KClass and returns a String.
+ * Memoized recursive function that derives appropriate tag names from Kotlin classes.
  *
- * This lets us memoize the tag calculation so it's only done once for each given KClass.
+ * This implementation uses Arrow's MemoizedDeepRecursiveFunction for efficient caching
+ * of computed values, ensuring each class type is processed only once, regardless of
+ * how many instances are created. That's why we pass in kClass as the inner function param;
+ * it's used as the key to retrieve future memoized calls.
  *
- * Why do we pass the KClass in as the inner function param? Because memoize() uses that param under the hood
- * as the key to retrieve future memoized calls.
+ * The function handles three specific cases:
+ * 1. Anonymous classes - recursively finds the enclosing non-anonymous class name
+ * 2. Companion objects - returns the name of the declaring class
+ * 3. Regular classes - returns the simple class name
+ *
+ * @param kClass The Kotlin class to derive a tag from
+ * @return A String tag appropriate for logging
  */
-private val memoizedTag: (KClass<out Any>) -> String =
-    { kClass: KClass<out Any> ->
-        when {
-            kClass.java.isAnonymousClass -> kClass.java.firstNonLambdaEnclosingClass.simpleName
-            kClass.isCompanion -> kClass.java.declaringClass?.simpleName ?: kClass.java.name
-            else -> kClass.java.simpleName
+private val memoizedTag = MemoizedDeepRecursiveFunction<KClass<out Any>, String> { kClass ->
+    when {
+        kClass.java.isAnonymousClass -> {
+            // For anonymous classes, recursively find the enclosing class
+            val enclosingClass = kClass.java.enclosingClass
+            if (enclosingClass != null) {
+                callRecursive(enclosingClass.kotlin)
+            } else {
+                kClass.java.name // Fallback if no enclosing class
+            }
         }
-    }.memoize()
 
-/**
- * Finds and returns the first non-anonymous enclosing class found by walking up the enclosingClass tree.
- */
-private val Class<out Any>.firstNonLambdaEnclosingClass: Class<out Any>
-    get() {
-        tailrec fun walkUp(clazz: Class<out Any>): Class<out Any> {
-            val enclosingClass = clazz.enclosingClass
-            if (enclosingClass == null)
-                return clazz
-            return walkUp(enclosingClass)
-        }
-        return walkUp(this)
+        kClass.isCompanion ->
+            kClass.java.declaringClass?.simpleName ?: kClass.java.name
+
+        else ->
+            kClass.java.simpleName
     }
+}
 
 /**
  * Log a crashlytics message and exception as *Non-fatal*, or logs to the Android system in **INTERNAL builds**.
