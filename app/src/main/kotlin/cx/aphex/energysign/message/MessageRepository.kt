@@ -1,12 +1,15 @@
 package cx.aphex.energysign.message
 
 import android.content.Context
+import cx.aphex.energysign.ext.convertHeartEmojis
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logE
 import cx.aphex.energysign.ext.logW
+import cx.aphex.energysign.ext.toNormalized
 import cx.aphex.energysign.gpt.GptAnswerResponse
 import cx.aphex.energysign.gpt.PostedGptAnswer
 import cx.aphex.energysign.message.Message.Companion.VT
+import cx.aphex.energysign.message.MessageRepository.Companion.MAX_SIGN_STRINGS
 import cx.aphex.energysign.toFile
 import io.ktor.util.toUpperCasePreservingASCIIRules
 import java.io.File
@@ -42,7 +45,12 @@ class MessageRepository {
 
     /** Inserts a GPT reply after the query it is replying to, and converts the query to a user message. */
     fun insertGPTReply(gptAnswerResponse: GptAnswerResponse) {
-        val replyMsg = Message.Marquee.GPTReply(gptAnswerResponse.answer.toUpperCasePreservingASCIIRules())
+        val replyMsg = Message.Marquee.GPTReply(
+            gptAnswerResponse.answer
+                .convertHeartEmojis()
+                .toNormalized()
+                .toUpperCasePreservingASCIIRules()
+        )
         val queryMsgIdx = marqueeMessages.indexOf(gptAnswerResponse.inReplyTo)
         if (queryMsgIdx >= 0 && queryMsgIdx < marqueeMessages.size) {
             marqueeMessages.add(queryMsgIdx + 1, replyMsg)
@@ -57,7 +65,12 @@ class MessageRepository {
     }
 
     fun insertGPTReplyToUserMessage(postedGptAnswer: PostedGptAnswer) {
-        val replyMsg = Message.Marquee.GPTReply(postedGptAnswer.answer.toUpperCasePreservingASCIIRules())
+        val replyMsg = Message.Marquee.GPTReply(
+            postedGptAnswer.answer
+                .convertHeartEmojis()
+                .toNormalized()
+                .toUpperCasePreservingASCIIRules()
+        )
         val inReplyTo: Message.Marquee =
             marqueeMessages.firstOrNull { it.str == postedGptAnswer.inReplyTo } ?: marqueeMessages.first()
         val queryMsgIdx = marqueeMessages.indexOf(inReplyTo)

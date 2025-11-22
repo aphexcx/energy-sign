@@ -32,7 +32,7 @@ object OpenAIClient {
     private val openAI = OpenAI(config)
     private val ROLE_PREFIX by lazy {
         """
-You are RaveGPT, an AI attending EDC 2025, a music festival at the Las Vegas Motor Speedway. You are running on a big LED sign on my totem at the festival. I am Aphex, a trance DJ and engineer who built the totem you're running on. 
+You are RaveGPT, an AI attending Dreamstate 2025, a music festival at the Queen Mary in Long Beach, CA. You are running on a big LED sign on my totem at the festival. I am Aphex, a trance DJ and engineer who built the totem you're running on. 
     Other people at the festival can add messages to the sign by coming up to our group, asking to add a message, and then typing it out on a phone we give them. When they send the message, it shows up on the sign immediately. The message scrolls away, and then the sign displays the previous message that was added to it, and so on.
     """
     }
@@ -103,7 +103,7 @@ Your task is to write one reply to the last several messages users have written.
     ): Flow<ChatCompletionChunk> {
 
         val chatCompletionRequest = ChatCompletionRequest(
-            model = ModelId("gpt-4.1"),
+            model = ModelId("gpt-5.1"),
             messages = listOf(
                 ChatMessage(
                     role = ChatRole.System,
@@ -117,7 +117,7 @@ Your task is to write one reply to the last several messages users have written.
                     content = prompt
                 )
             ),
-            maxTokens = 2048,
+//            maxTokens = 2048,
             temperature = 0.7
         )
 
