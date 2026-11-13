@@ -3,11 +3,11 @@ package cx.aphex.energysign.message
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import cx.aphex.energysign.message.ChooserProtocol.CHOOSER_MAX_CHARS
-import cx.aphex.energysign.message.ChooserProtocol.UNCHANGED_REPLY
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotEquals
 
-/** The pure parts of the chooser contract: the text rule, the request classifier, the poll decision. */
+/** The pure parts of the chooser contract: the text rule, the request classifier, the checksum, the poll reply. */
 class ChooserProtocolTest {
 
     private val long200 = (1..200).joinToString("") { ('A' + it % 26).toString() }
@@ -136,33 +136,94 @@ class ChooserProtocolTest {
         assertEquals(SignRequest.NEXT_MESSAGE, ChooserProtocol.classifyRequest(bytes("?~"), 99))
     }
 
-    // ---- poll decision ----
-
-    private val chooserJson = """{"str":"HELLO","flashy":"3/12","type":"H"}"""
+    // ---- the checksum (CRC-16/CCITT-FALSE) ----
 
     @Test
-    fun `a poll in chooser mode with nothing changed is answered with two bytes`() {
-        assertEquals("{}", UNCHANGED_REPLY)
-        assertEquals(UNCHANGED_REPLY, ChooserProtocol.pollReply(true, chooserJson, chooserJson))
+    fun `the CRC has the standard check value`() {
+        assertEquals(0x29B1, ChooserProtocol.crc16CcittFalse(bytes("123456789")))
+        assertEquals(10673, ChooserProtocol.crc16CcittFalse(bytes("123456789")))
     }
 
     @Test
-    fun `a poll in chooser mode with a changed chooser message gets the full message`() {
-        val previous = """{"str":"HELLO","flashy":"2/12","type":"H"}"""
-
-        assertEquals(chooserJson, ChooserProtocol.pollReply(true, chooserJson, previous))
+    fun `the CRC of no bytes is the initial value`() {
+        assertEquals(0xFFFF, ChooserProtocol.crc16CcittFalse(ByteArray(0)))
     }
 
     @Test
-    fun `a poll before anything was written gets the full message`() {
-        assertEquals(chooserJson, ChooserProtocol.pollReply(true, chooserJson, null))
+    fun `the seven contract vectors`() {
+        val quick = "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG AND KEEPS ON RUNNING"
+        assertEquals(64, quick.length)
+
+        assertEquals(13345, ChooserProtocol.checksum("HELLO W", "3/12"))
+        assertEquals(36894, ChooserProtocol.checksum(quick, "7/12"))
+        assertEquals(7805, ChooserProtocol.checksum("<empty>", "1/0"))
+        assertEquals(18175, ChooserProtocol.checksum("", "1/1"))
+        assertEquals(26634, ChooserProtocol.checksum("A", "1/1"))
+        assertEquals(47554, ChooserProtocol.checksum("A", "11/1"))
+        assertEquals(46267, ChooserProtocol.checksum("I ${Message.HEART} U", "12/345"))
     }
 
     @Test
-    fun `a poll outside chooser mode always gets the full message`() {
-        val ordinary = """{"str":"HELLO","type":"D"}"""
+    fun `the zero byte keeps the text and the count apart`() {
+        // without the separator both would be the bytes "A11/1"
+        assertNotEquals(ChooserProtocol.checksum("A1", "1/1"), ChooserProtocol.checksum("A", "11/1"))
+    }
 
-        assertEquals(ordinary, ChooserProtocol.pollReply(false, ordinary, ordinary))
+    @Test
+    fun `a chooser message is summed over the str and flashy it puts on the wire`() {
+        val stored = (1..12).map { Message.Marquee.User(if (it == 3) "HELLO W" else "MESSAGE $it") }
+        val message = ChooserProtocol.chooserMessage(stored, 2)
+        val json = wireJson(message)
+
+        assertEquals(13345, ChooserProtocol.checksum(message))
+        assertEquals(ChooserProtocol.checksum(json["str"].asString, json["flashy"].asString), ChooserProtocol.checksum(message))
+    }
+
+    @Test
+    fun `a message longer than the limit is summed over the 64 characters that are sent`() {
+        val quick = "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG AND KEEPS ON RUNNING"
+        val stored = (1..12).map { Message.Marquee.User(if (it == 7) quick + " AND RUNNING AND RUNNING" else "MESSAGE $it") }
+
+        assertEquals(36894, ChooserProtocol.checksum(ChooserProtocol.chooserMessage(stored, 6)))
+    }
+
+    @Test
+    fun `the empty placeholder is summed like any other text`() {
+        assertEquals(7805, ChooserProtocol.checksum(ChooserProtocol.chooserMessage(emptyList(), 0)))
+    }
+
+    @Test
+    fun `text outside ASCII is summed over its UTF-8 bytes`() {
+        val utf8 = "\u00e9".toByteArray(Charsets.UTF_8) + byteArrayOf(0) + bytes("1/1")
+        assertEquals(6, utf8.size)
+
+        assertEquals(ChooserProtocol.crc16CcittFalse(utf8), ChooserProtocol.checksum("\u00e9", "1/1"))
+    }
+
+    // ---- the poll reply ----
+
+    @Test
+    fun `the poll reply is exactly the object c with the decimal checksum`() {
+        assertEquals("{\"c\":13345}", ChooserProtocol.pollReply(13345))
+        assertEquals("{\"c\":0}", ChooserProtocol.pollReply(0))
+        assertEquals("{\"c\":65535}", ChooserProtocol.pollReply(65535))
+    }
+
+    @Test
+    fun `every checksum gives a reply of plain ASCII with no space, sign, exponent or other key`() {
+        val shape = Regex("""\{"c":(0|[1-9][0-9]{0,4})\}""")
+        (0..0xFFFF).forEach { n ->
+            val reply = ChooserProtocol.pollReply(n)
+            assertEquals(n.toString(), shape.matchEntire(reply)?.groupValues?.get(1), "reply for $n was $reply")
+        }
+    }
+
+    @Test
+    fun `the poll reply is never the version 1 empty object and never carries a type`() {
+        val reply = JsonParser.parseString(ChooserProtocol.pollReply(7805)).asJsonObject
+
+        assertEquals(setOf("c"), reply.keySet())
+        assertEquals(7805, reply["c"].asInt)
     }
 
     // ---- the chooser message on the wire ----
@@ -177,6 +238,14 @@ class ChooserProtocolTest {
         assertEquals("H", json["type"].asString)
         assertEquals("MESSAGE 3", json["str"].asString)
         assertEquals("3/12", json["flashy"].asString)
+    }
+
+    @Test
+    fun `the chooser JSON is byte for byte what it was before the count became readable`() {
+        assertEquals(
+            """{"str":"MESSAGE 3","flashy":"3/12","type":"H"}""",
+            SignResponder.GSON.toJson(ChooserProtocol.chooserMessage(stored(12), 2))
+        )
     }
 
     @Test

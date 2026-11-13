@@ -6,7 +6,6 @@ import cx.aphex.energysign.beatlinkdata.DnsSdAnnouncer
 import cx.aphex.energysign.bluetooth.BluetoothStatusUpdate
 import cx.aphex.energysign.bluetooth.EnergySignBluetoothManager
 import cx.aphex.energysign.ext.NonNullMutableLiveData
-import cx.aphex.energysign.message.ChooserProtocol
 import cx.aphex.energysign.message.MessageManager
 import cx.aphex.energysign.message.SignResponder
 import cx.aphex.energysign.uart.EnergySignUartManager
@@ -25,8 +24,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
     private val energySignUartManager: EnergySignUartManager = EnergySignUartManager(this)
     private val signResponder = SignResponder(
         nextMessage = { messageManager.getNextMessage() },
-        // An unchanged-poll reply goes out about five times a second: keep it out of the log.
-        write = { json -> energySignUartManager.write(json, log = json != ChooserProtocol.UNCHANGED_REPLY) },
+        // A chooser poll report goes out about five times a second: keep it out of the log.
+        write = { reply, isPollReport -> energySignUartManager.write(reply, log = !isPollReport) },
     )
     private val dnsSdAnnouncer: DnsSdAnnouncer
 
@@ -53,7 +52,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
 
     /**
      * The sign asked for something: [count] request bytes were read into [buffer].
-     * `~` gets the next message; a chooser poll (`?`) gets `{}` while nothing has changed.
+     * `~` gets the next message; a chooser poll (`?`) in chooser mode gets the checksum of the
+     * current chooser message, which is nothing new for the screen.
      */
     fun onSignRequest(buffer: ByteArray, count: Int) {
         signResponder.onRequest(buffer, count)?.let { sentMessage ->

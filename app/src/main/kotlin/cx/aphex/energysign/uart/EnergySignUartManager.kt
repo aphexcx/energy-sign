@@ -90,8 +90,8 @@ class EnergySignUartManager(val viewModel: MainViewModel) : UartDeviceCallback {
         }
     }
 
-    /** Returns whether the whole buffer was written. */
-    private fun UartDevice.write(buffer: ByteArray, log: Boolean): Boolean {
+    /** A short write is logged even when [log] is off. */
+    private fun UartDevice.write(buffer: ByteArray, log: Boolean) {
         try {
             if (buffer.size > MAX_ARDUINO_JSON_SIZE) {
                 logE("JSON string (${buffer.size}) is probably bigger than the maximum size the arduino will accept ($MAX_ARDUINO_JSON_SIZE)! ")
@@ -103,15 +103,13 @@ class EnergySignUartManager(val viewModel: MainViewModel) : UartDeviceCallback {
             if (log || count != buffer.size) {
                 logD("Wrote $count of ${buffer.size} bytes to $name")
             }
-            return count == buffer.size
         } catch (e: Exception) {
             logW("Unable to write to UART device $name: $e")
-            return false
         }
     }
 
-    /** Writes [value] to the sign. Returns whether all of it was written. */
-    fun write(value: String, log: Boolean = true): Boolean {
+    /** Writes [value] to the sign. [log] is off for chooser poll reports (about five a second). */
+    fun write(value: String, log: Boolean = true) {
         if (log) {
             logD("Writing >${value}< to ${uartDevice.name}...")
         }
@@ -119,7 +117,7 @@ class EnergySignUartManager(val viewModel: MainViewModel) : UartDeviceCallback {
         val bytes = value.toByteArray()
 //        logD("Bytes: >${bytes.asList()}<")
 
-        return uartDevice.write(bytes, log)
+        uartDevice.write(bytes, log)
     }
 
     companion object {

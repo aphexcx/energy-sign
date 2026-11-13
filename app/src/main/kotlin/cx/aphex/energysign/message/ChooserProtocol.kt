@@ -4,10 +4,13 @@ import com.google.gson.Gson
 
 /*
  * Chooser mode, app side of the wire contract with the sign (firmware: aphexcx/arduino-led-marquee).
+ * Contract VERSION 2.
  *
  * The SIGN scrolls the chooser preview. The app sends the message text once and holds no scroll
- * state: no timer, no offset. While the sign shows a chooser message it asks `?` ("anything
- * changed?") instead of `~` ("send the next message"), and the app answers `{}` when nothing has.
+ * state: no timer, no offset, and no memory of what it sent. While the sign shows a chooser
+ * message it asks `?` instead of `~` ("send the next message"), and the app answers with a state
+ * report: `{"c":N}`, N = the checksum of the chooser message it would send right now. The sign
+ * compares N with the checksum of what it is showing and asks `~` when they differ.
  *
  * Nothing in this file touches Android, so all of it runs in JVM unit tests.
  */
@@ -17,7 +20,7 @@ enum class SignRequest {
     /** `~`, or anything that is not a poll: send the next message in full. */
     NEXT_MESSAGE,
 
-    /** `?`: the sign is showing a chooser message and asks whether it changed. */
+    /** `?`: the sign is showing a chooser message and asks which one the app is on now. */
     CHOOSER_POLL,
 }
 
@@ -30,9 +33,6 @@ object ChooserProtocol {
 
     /** Request byte of a chooser poll. Every other byte means "send the next message". */
     const val POLL_REQUEST: Char = '?'
-
-    /** Reply to a chooser poll when the sign already has the current chooser message. */
-    const val UNCHANGED_REPLY: String = "{}"
 
     /**
      * The chooser text for [message]: from its first character, cut at [CHOOSER_MAX_CHARS], no
@@ -60,47 +60,68 @@ object ChooserProtocol {
     }
 
     /**
-     * What to write in reply to a chooser poll: [UNCHANGED_REPLY] only when the app is in chooser
-     * mode AND the chooser JSON it would send now ([nextJson]) is equal to the last message JSON
-     * it wrote to the UART. Otherwise [nextJson], the same reply a normal request gets.
+     * CRC-16/CCITT-FALSE of [bytes]: width 16, polynomial 0x1021, initial value 0xFFFF, no
+     * reflection, no final xor. The check value over the ASCII bytes `123456789` is 0x29B1.
      */
-    fun pollReply(inChooserMode: Boolean, nextJson: String, lastJsonWritten: String?): String =
-        if (inChooserMode && nextJson == lastJsonWritten) UNCHANGED_REPLY else nextJson
+    fun crc16CcittFalse(bytes: ByteArray): Int {
+        var crc = 0xFFFF
+        for (byte in bytes) {
+            crc = crc xor ((byte.toInt() and 0xFF) shl 8)
+            repeat(8) {
+                crc = if (crc and 0x8000 != 0) (crc shl 1) xor 0x1021 else crc shl 1
+                crc = crc and 0xFFFF
+            }
+        }
+        return crc
+    }
+
+    /**
+     * The contract's checksum of a chooser message, 0..65535: the CRC of the UTF-8 bytes of
+     * [str] (as sent, already cut to [CHOOSER_MAX_CHARS]), one zero byte, the UTF-8 bytes of
+     * [flashy]. The sign computes the same over the bytes it stored.
+     */
+    fun checksum(str: String, flashy: String): Int =
+        crc16CcittFalse(str.toByteArray(Charsets.UTF_8) + byteArrayOf(0) + flashy.toByteArray(Charsets.UTF_8))
+
+    /** The checksum of [message], over the same `str` and `flashy` that go into its JSON. */
+    fun checksum(message: Message.Chooser): Int = checksum(message.str, message.flashy)
+
+    /**
+     * The reply to a chooser poll while the app is in chooser mode: exactly `{"c":N}`, N in
+     * decimal, no spaces and no other key. Built by hand because an 8-bit parser reads it.
+     */
+    fun pollReply(checksum: Int): String = "{\"c\":$checksum}"
 }
 
 /**
- * Answers the sign's requests. Holds the one piece of state the poll needs: the last message JSON
- * that was written to the UART.
+ * Answers the sign's requests. Keeps no state: every reply is made from what [nextMessage]
+ * returns at that moment, never from what was written before.
  *
  * [nextMessage] is evaluated exactly once per request. That is safe for a poll because the message
  * source has no side effects while it is in chooser mode; a message that is not a chooser message
  * has been consumed and is always sent.
  *
- * [write] returns whether the whole reply reached the UART.
+ * [write] gets the reply and whether it is a poll report (about five a second in chooser mode;
+ * the caller keeps those out of the log).
  */
 class SignResponder(
     private val nextMessage: () -> Message,
-    private val write: (String) -> Boolean,
+    private val write: (reply: String, isPollReport: Boolean) -> Unit,
 ) {
-    private var lastJsonWritten: String? = null
-
     /**
      * Replies to the first [count] bytes of [buffer], read in one UART callback. Returns the
-     * message that was sent, or null when a poll was answered with [ChooserProtocol.UNCHANGED_REPLY].
+     * message that was sent, or null when a chooser poll was answered with its state report.
      */
     fun onRequest(buffer: ByteArray, count: Int): Message? {
         val message = nextMessage()
-        val json = GSON.toJson(message)
 
-        val isUnchangedPoll = ChooserProtocol.classifyRequest(buffer, count) == SignRequest.CHOOSER_POLL &&
-                ChooserProtocol.pollReply(message is Message.Chooser, json, lastJsonWritten) == ChooserProtocol.UNCHANGED_REPLY
-        if (isUnchangedPoll) {
-            write(ChooserProtocol.UNCHANGED_REPLY)
+        if (message is Message.Chooser && ChooserProtocol.classifyRequest(buffer, count) == SignRequest.CHOOSER_POLL) {
+            write(ChooserProtocol.pollReply(ChooserProtocol.checksum(message)), true)
             return null
         }
 
-        // A message that did not reach the sign must not count as "the sign already has it".
-        lastJsonWritten = if (write(json)) json else null
+        // `~`, garbled bytes, or a poll outside chooser mode: the next message in full.
+        write(GSON.toJson(message), false)
         return message
     }
 
