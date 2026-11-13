@@ -2,20 +2,18 @@ package cx.aphex.energysign
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
-import com.google.gson.Gson
 import cx.aphex.energysign.beatlinkdata.DnsSdAnnouncer
 import cx.aphex.energysign.bluetooth.BluetoothStatusUpdate
 import cx.aphex.energysign.bluetooth.EnergySignBluetoothManager
 import cx.aphex.energysign.ext.NonNullMutableLiveData
-import cx.aphex.energysign.message.Message
+import cx.aphex.energysign.message.ChooserProtocol
 import cx.aphex.energysign.message.MessageManager
+import cx.aphex.energysign.message.SignResponder
 import cx.aphex.energysign.uart.EnergySignUartManager
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 
 class MainViewModel(application: Application) : AndroidViewModel(application), KoinComponent {
-    private val gson: Gson = Gson()
-
     val currentString: NonNullMutableLiveData<String> = NonNullMutableLiveData("")
 
     val btAdvertiseStatus: NonNullMutableLiveData<String> = NonNullMutableLiveData("")
@@ -25,6 +23,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
     private val messageManager: MessageManager by inject()
     private val energySignBluetoothManager: EnergySignBluetoothManager
     private val energySignUartManager: EnergySignUartManager = EnergySignUartManager(this)
+    private val signResponder = SignResponder(
+        nextMessage = { messageManager.getNextMessage() },
+        // An unchanged-poll reply goes out about five times a second: keep it out of the log.
+        write = { json -> energySignUartManager.write(json, log = json != ChooserProtocol.UNCHANGED_REPLY) },
+    )
     private val dnsSdAnnouncer: DnsSdAnnouncer
 
     init {
@@ -48,13 +51,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
         energySignBluetoothManager.stop()
     }
 
-    fun onReadyForNextMessage() {
-        val message: Message = messageManager.getNextMessage()
-        currentString.value = message.str
-
-        val jsonString = gson.toJson(message)
-
-        energySignUartManager.write(jsonString)
+    /**
+     * The sign asked for something: [count] request bytes were read into [buffer].
+     * `~` gets the next message; a chooser poll (`?`) gets `{}` while nothing has changed.
+     */
+    fun onSignRequest(buffer: ByteArray, count: Int) {
+        signResponder.onRequest(buffer, count)?.let { sentMessage ->
+            currentString.value = sentMessage.str
+        }
     }
 
     fun updateAdvertiseStatus(status: String) {

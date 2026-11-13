@@ -7,6 +7,8 @@ import cx.aphex.energysign.MainViewModel
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logE
 import cx.aphex.energysign.ext.logW
+import cx.aphex.energysign.message.ChooserProtocol
+import cx.aphex.energysign.message.SignRequest
 import io.reactivex.rxjava3.subjects.BehaviorSubject
 import java.io.IOException
 
@@ -42,13 +44,15 @@ class EnergySignUartManager(val viewModel: MainViewModel) : UartDeviceCallback {
      * else -> write next string from list
      */
     override fun onUartDeviceDataAvailable(uart: UartDevice): Boolean {
-        logD("Data available on ${uart.name}! Reading...")
         // Read available data from the UART device
         try {
             val bytes = ByteArray(ARDUINO_RECEVIED_STRING_LEN)
             val count = uart.read(bytes, bytes.size)
-            logD("Read $count bytes from ${uart.name}: [${String(bytes)}]")
-            viewModel.onReadyForNextMessage()
+            // A chooser poll arrives about five times a second: keep it out of the log.
+            if (ChooserProtocol.classifyRequest(bytes, count) != SignRequest.CHOOSER_POLL) {
+                logD("Read $count bytes from ${uart.name}: [${String(bytes, 0, count.coerceIn(0, bytes.size))}]")
+            }
+            viewModel.onSignRequest(bytes, count)
         } catch (e: IOException) {
             logW("Unable to read from UART device ${uart.name}: $e")
         }
@@ -86,7 +90,8 @@ class EnergySignUartManager(val viewModel: MainViewModel) : UartDeviceCallback {
         }
     }
 
-    private fun UartDevice.write(buffer: ByteArray) {
+    /** Returns whether the whole buffer was written. */
+    private fun UartDevice.write(buffer: ByteArray, log: Boolean): Boolean {
         try {
             if (buffer.size > MAX_ARDUINO_JSON_SIZE) {
                 logE("JSON string (${buffer.size}) is probably bigger than the maximum size the arduino will accept ($MAX_ARDUINO_JSON_SIZE)! ")
@@ -95,19 +100,26 @@ class EnergySignUartManager(val viewModel: MainViewModel) : UartDeviceCallback {
 //            val finalBuffer = buffer + '\r'.toByte()
 //            val count = write(finalBuffer, finalBuffer.size)
             val count = write(buffer, buffer.size)
-            logD("Wrote $count bytes to $name")
+            if (log || count != buffer.size) {
+                logD("Wrote $count of ${buffer.size} bytes to $name")
+            }
+            return count == buffer.size
         } catch (e: Exception) {
             logW("Unable to write to UART device $name: $e")
+            return false
         }
     }
 
-    fun write(value: String) {
-        logD("Writing >${value}< to ${uartDevice.name}...")
+    /** Writes [value] to the sign. Returns whether all of it was written. */
+    fun write(value: String, log: Boolean = true): Boolean {
+        if (log) {
+            logD("Writing >${value}< to ${uartDevice.name}...")
+        }
 
         val bytes = value.toByteArray()
 //        logD("Bytes: >${bytes.asList()}<")
 
-        uartDevice.write(bytes)
+        return uartDevice.write(bytes, log)
     }
 
     companion object {
