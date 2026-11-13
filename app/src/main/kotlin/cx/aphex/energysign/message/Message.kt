@@ -238,7 +238,9 @@ sealed class Message {
         currentMessage: Marquee
     ) : Message() {
         override val str: String = currentMessage.str
-        private val flashy: String = "$currentIndex/${lastIndex}"
+
+        /** The count shown beside the text, "<i>/<n>". Part of the JSON and of the chooser checksum. */
+        val flashy: String = "$currentIndex/${lastIndex}"
         override val type: MSGTYPE = MSGTYPE.CHOOSER
     }
 
