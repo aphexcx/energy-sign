@@ -26,10 +26,17 @@ class AIReplyServiceTest {
 
     private class RecordingGenerator(var answer: (AIReplyRequest) -> AIReplyResult) : AIReplyGenerator {
         val requests = mutableListOf<AIReplyRequest>()
+        var timeChecks = 0
+        var onTimeCheck: () -> Unit = {}
         override val name = "fake"
         override suspend fun generateReply(request: AIReplyRequest): AIReplyResult {
             requests.add(request)
             return answer(request)
+        }
+
+        override fun syncClock() {
+            timeChecks++
+            onTimeCheck()
         }
     }
 
@@ -44,7 +51,8 @@ class AIReplyServiceTest {
         ),
     )
 
-    private var now: Instant = LocalDateTime.parse("2026-11-20T21:30").atZone(la).toInstant()
+    /** The time the service is told, or null for "not known". */
+    private var now: Instant? = LocalDateTime.parse("2026-11-20T21:30").atZone(la).toInstant()
     private var setTimes: SetTimesLoad = SetTimesLoad.Loaded(table, "test")
 
     private fun service(generator: AIReplyGenerator) = AIReplyService(
@@ -62,7 +70,7 @@ class AIReplyServiceTest {
         val service = service(generator)
 
         runBlocking { service.replyTo("first") }
-        now = now.plus(Duration.ofMinutes(47))
+        now = now!!.plus(Duration.ofMinutes(47))
         runBlocking { service.replyTo("second") }
 
         val (first, second) = generator.requests
@@ -101,18 +109,49 @@ class AIReplyServiceTest {
         assertFalse(prompt.contains("Current local time"), prompt)
         assertFalse(prompt.contains("2008"), prompt)
         assertFalse(prompt.contains("On stage now"), prompt)
-        assertTrue(log.any { it.contains("clock", ignoreCase = true) }, "the log says the clock is not believed: $log")
+        assertTrue(log.any { it.contains("cannot be right") }, "the log says the time is not believed: $log")
     }
 
     @Test
-    fun `a reply that is too long for the sign is cut before it is handed on`() {
-        val long = (1..400).joinToString(" ") { "word$it" }
+    fun `a reply that is too long for the sign is cut before it is handed on, after a whole word`() {
+        // 300 words of ten letters and a space: 3,299 characters. The sign takes 700 bytes of
+        // JSON for a message, the app allows itself 660, and the JSON around the text takes 21.
+        // So 639 characters fit: 58 whole words and their 57 spaces are 637, the 59th does not.
+        val long = (1..300).joinToString(" ") { "abcdefghij" }
 
         val result = runBlocking { service(RecordingGenerator { AIReplyResult.Reply(long) }).replyTo("hello") }
 
         val reply = assertIs<AIReplyResult.Reply>(result)
-        assertEquals(AIReplyLimits.fitToSign(long), reply.text)
-        assertTrue(reply.text.length < long.length)
+        assertEquals((1..58).joinToString(" ") { "abcdefghij" }, reply.text)
+        assertEquals(637, reply.text.length)
+    }
+
+    @Test
+    fun `a reply is one line, whatever the model sends - the saved list is one message a line`() {
+        val result = runBlocking {
+            service(RecordingGenerator { AIReplyResult.Reply("first line\nsecond\r\nthird\u000Bfourth\tfifth") }).replyTo("hello")
+        }
+
+        assertEquals(AIReplyResult.Reply("first line second third fourth fifth"), result)
+    }
+
+    @Test
+    fun `a reply of which not one whole word fits is no reply`() {
+        val result = runBlocking { service(RecordingGenerator { AIReplyResult.Reply("A".repeat(5_000)) }).replyTo("hello") }
+
+        assertEquals(NoReplyReason.EMPTY, assertIs<AIReplyResult.NoReply>(result).reason)
+    }
+
+    @Test
+    fun `a text with nothing in it is not sent at all`() {
+        val generator = RecordingGenerator { AIReplyResult.Reply("ok") }
+
+        for (blank in listOf("", "   ", "\n")) {
+            val result = runBlocking { service(generator).replyTo(blank) }
+            assertEquals(NoReplyReason.NOTHING_TO_ASK, assertIs<AIReplyResult.NoReply>(result).reason)
+        }
+
+        assertTrue(generator.requests.isEmpty(), "no request may be made for a blank text")
     }
 
     @Test
@@ -136,7 +175,9 @@ class AIReplyServiceTest {
 
         assertEquals(NoReplyReason.UNEXPECTED_FAILURE, assertIs<AIReplyResult.NoReply>(exception).reason)
         assertEquals(NoReplyReason.UNEXPECTED_FAILURE, assertIs<AIReplyResult.NoReply>(error).reason)
-        assertTrue(log.any { it.contains("boom") }, "$log")
+        // The kind of the failure is logged; what a library wrote into its message is not.
+        assertTrue(log.any { it.contains("IllegalStateException") }, "$log")
+        assertFalse(log.any { it.contains("boom") || it.contains("some/sdk/Class") }, "$log")
     }
 
     @Test
@@ -193,6 +234,110 @@ class AIReplyServiceTest {
         }
         assertTrue(log.isNotEmpty())
         assertFalse(log.any { it.contains("made-up-key") }, "$log")
+    }
+
+    // ---- what the prompt says about time is true or absent (class E)
+
+    @Test
+    fun `while the time is not known the prompt says nothing about time, and the reply still comes`() {
+        val generator = RecordingGenerator { AIReplyResult.Reply("ok") }
+        now = null
+
+        val result = runBlocking { service(generator).replyTo("hello") }
+
+        assertEquals(AIReplyResult.Reply("ok"), result)
+        val prompt = generator.requests.single().systemPrompt
+        assertFalse(prompt.contains("Current local time"), prompt)
+        assertFalse(prompt.contains("On stage now"), prompt)
+        assertFalse(prompt.contains("Full schedule"), prompt)
+        assertTrue(log.any { it.contains("not known") }, "$log")
+    }
+
+    @Test
+    fun `when the time is not known the provider is asked for it once, before the prompt is made`() {
+        val generator = RecordingGenerator { AIReplyResult.Reply("ok") }
+        now = null
+        generator.onTimeCheck = { now = LocalDateTime.parse("2026-11-20T21:30").atZone(la).toInstant() }
+
+        runBlocking { service(generator).replyTo("first") }
+        runBlocking { service(generator).replyTo("second") }
+
+        assertEquals(1, generator.timeChecks, "once the time is known it is not asked for again")
+        assertTrue(generator.requests[0].systemPrompt.contains("Current local time: Friday 2026-11-20, 9:30 pm"))
+    }
+
+    @Test
+    fun `the clock is read after the set times, so slow storage cannot put an old time into the prompt`() {
+        val generator = RecordingGenerator { AIReplyResult.Reply("ok") }
+        val service = AIReplyService(
+            generator = generator, log = { log.add(it) }, now = { now }, deviceZone = { la },
+            setTimes = {
+                // while the table was being read, the set on stage changed
+                now = LocalDateTime.parse("2026-11-20T22:00:30").atZone(la).toInstant()
+                SetTimesLoad.Loaded(table, "test")
+            },
+            buildDate = null,
+        )
+
+        runBlocking { service.replyTo("hello") }
+
+        val prompt = generator.requests.single().systemPrompt
+        assertTrue(prompt.contains("Current local time: Friday 2026-11-20, 10:00 pm"), prompt)
+        assertTrue(prompt.contains("- The Dream: Late until 11:00 pm."), prompt)
+    }
+
+    @Test
+    fun `set times that take too long to read are left behind - the reply goes out without them, in time`() {
+        val generator = RecordingGenerator { AIReplyResult.Reply("ok") }
+        val stuck = java.util.concurrent.CountDownLatch(1)
+        val service = AIReplyService(
+            generator = generator, log = { log.add(it) }, now = { now }, deviceZone = { la },
+            setTimes = {
+                stuck.await() // storage that does not answer
+                SetTimesLoad.Loaded(table, "test")
+            },
+            buildDate = null,
+            setTimesLimit = Duration.ofMillis(200),
+        )
+
+        val startedAt = System.nanoTime()
+        val result = runBlocking { service.replyTo("hello") }
+        val tookMs = (System.nanoTime() - startedAt) / 1_000_000
+        stuck.countDown()
+
+        assertEquals(AIReplyResult.Reply("ok"), result)
+        assertTrue(tookMs < 2_000, "the reply waited $tookMs ms for storage")
+        val prompt = generator.requests.single().systemPrompt
+        assertTrue(prompt.contains("Current local time"), prompt)
+        assertFalse(prompt.contains("On stage now"), prompt)
+        assertTrue(log.any { it.contains("took longer") }, "$log")
+    }
+
+    @Test
+    fun `a failure while the context is being built costs the context, not the reply`() {
+        val generator = RecordingGenerator { AIReplyResult.Reply("ok") }
+        val service = AIReplyService(
+            generator = generator, log = { log.add(it) }, now = { now },
+            deviceZone = { throw java.time.DateTimeException("no such zone") },
+            setTimes = { SetTimesLoad.Unusable("none") }, buildDate = null,
+        )
+
+        val result = runBlocking { service.replyTo("hello") }
+
+        assertEquals(AIReplyResult.Reply("ok"), result)
+        assertFalse(generator.requests.single().systemPrompt.contains("Current local time"))
+        assertTrue(log.any { it.contains("goes without it") }, "$log")
+    }
+
+    @Test
+    fun `a date in the table that no arithmetic can handle does not disable the replies`() {
+        val generator = RecordingGenerator { AIReplyResult.Reply("ok") }
+        setTimes = SetTimesLoad.Loaded(table.copy(updated = LocalDate.MIN), "test")
+
+        val result = runBlocking { service(generator).replyTo("hello") }
+
+        assertEquals(AIReplyResult.Reply("ok"), result)
+        assertTrue(generator.requests.single().systemPrompt.contains("Current local time: Friday 2026-11-20, 9:30 pm"))
     }
 
     @Test

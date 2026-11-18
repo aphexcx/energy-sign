@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
@@ -31,7 +32,7 @@ class AIProviderTest {
 
         assertEquals(AIProvider.ANTHROPIC, AIProvider.fromSetting("opnai") { warnings.add(it) })
         assertEquals(1, warnings.size)
-        assertTrue(warnings.single().contains("opnai"))
+        assertTrue(warnings.single().contains("AI_PROVIDER"))
     }
 
     // ---- the effort: a build setting, and a file on the device that overrides it ----
@@ -59,7 +60,7 @@ class AIProviderTest {
 
         assertEquals(AIEffort.HIGH, AIEffort.fromSetting("turbo") { warnings.add(it) })
         assertEquals(1, warnings.size)
-        assertTrue(warnings.single().contains("turbo"))
+        assertTrue(warnings.single().contains("AI_EFFORT"))
     }
 
     @Test
@@ -98,8 +99,8 @@ class AIProviderTest {
 
     @Test
     fun `each provider gets its own generator`() {
-        val anthropic = AIReplyGenerators.forProvider(AIProvider.ANTHROPIC, "a", "o", { AIEffort.DEFAULT }) {}
-        val openAi = AIReplyGenerators.forProvider(AIProvider.OPENAI, "a", "o", { AIEffort.DEFAULT }) {}
+        val anthropic = AIReplyGenerators.forProvider(AIProvider.ANTHROPIC, "a", "o", { AIEffort.DEFAULT }, {})
+        val openAi = AIReplyGenerators.forProvider(AIProvider.OPENAI, "a", "o", { AIEffort.DEFAULT }, {})
 
         assertIs<AnthropicReplyGenerator>(anthropic)
         assertIs<OpenAIReplyGenerator>(openAi)
@@ -108,63 +109,67 @@ class AIProviderTest {
     }
 
     @Test
-    fun `the OpenAI generator without a key is no reply too`() {
-        val log = mutableListOf<String>()
+    fun `each provider is sent its own key and never the other one`() {
+        FakeMessagesApi().use { anthropicApi ->
+            FakeMessagesApi().use { openAiApi ->
+                anthropicApi.answer = FakeMessagesApi.Answer(401, FakeMessagesApi.error("authentication_error", "no"))
+                openAiApi.answer = FakeMessagesApi.Answer(401, """{"error":{"message":"no","type":"invalid_request_error"}}""")
+                fun generator(provider: AIProvider) = AIReplyGenerators.forProvider(
+                    provider = provider,
+                    anthropicApiKey = "anthropic-key-made-up",
+                    openAiApiKey = "openai-key-made-up",
+                    effort = { AIEffort.DEFAULT },
+                    log = {},
+                    anthropicBaseUrl = anthropicApi.baseUrl,
+                    openAiBaseUrl = "${openAiApi.baseUrl}/v1/",
+                )
 
-        val result = runBlocking { OpenAIReplyGenerator(apiKey = "", log = { log.add(it) }).generateReply(AIReplyRequest("s", "u")) }
+                runBlocking { generator(AIProvider.ANTHROPIC).generateReply(AIReplyRequest("s", "u")) }
+                assertTrue(openAiApi.received.isEmpty(), "choosing anthropic must not reach openai")
+                runBlocking { generator(AIProvider.OPENAI).generateReply(AIReplyRequest("s", "u")) }
 
-        assertEquals(NoReplyReason.MISSING_KEY, assertIs<AIReplyResult.NoReply>(result).reason)
-        assertEquals(1, log.size)
-    }
-
-    // ---- how a result reaches the sign: the two things MessageManager already does ----
-
-    @Test
-    fun `a reply is delivered as an answer`() {
-        assertEquals(AIReplyDelivery.Answer("Hydrate."), AIReplyResult.Reply("Hydrate.").toDelivery())
-    }
-
-    @Test
-    fun `a refusal, an empty or cut-off answer and a missing key are quiet - the thinking notice goes and nothing else happens`() {
-        for (reason in listOf(
-            NoReplyReason.REFUSED, NoReplyReason.EMPTY, NoReplyReason.TRUNCATED,
-            NoReplyReason.MISSING_KEY, NoReplyReason.UNEXPECTED_RESPONSE,
-        )) {
-            assertEquals(AIReplyDelivery.Quiet, AIReplyResult.NoReply(reason).toDelivery(), "$reason")
+                val toAnthropic = anthropicApi.received.single()
+                val toOpenAi = openAiApi.received.single()
+                assertEquals(listOf("authorization"), toAnthropic.headersContaining("anthropic-key-made-up"))
+                assertEquals(emptyList(), toAnthropic.headersContaining("openai-key-made-up"))
+                assertEquals(listOf("authorization"), toOpenAi.headersContaining("openai-key-made-up"))
+                assertEquals(emptyList(), toOpenAi.headersContaining("anthropic-key-made-up"))
+            }
         }
     }
 
-    @Test
-    fun `a failed call is delivered as an error, as it always was`() {
-        for (reason in NoReplyReason.values().filter { it.isFailure }) {
-            val delivery = assertIs<AIReplyDelivery.Failure>(AIReplyResult.NoReply(reason, "why").toDelivery(), "$reason")
-            assertEquals(reason, delivery.error.reason)
-        }
-        assertTrue(NoReplyReason.TIMEOUT.isFailure)
-        assertTrue(NoReplyReason.NETWORK.isFailure)
-        assertTrue(NoReplyReason.RATE_LIMITED.isFailure)
-        assertTrue(NoReplyReason.CERTIFICATE_CLOCK.isFailure)
-    }
-
-    // ---- one request per query at a time ----
+    // ---- no setting's VALUE is ever logged (class B): it may be anything, a key included
 
     @Test
-    fun `a query that is being answered is not asked a second time until the first answer is in`() {
-        val inFlight = InFlightQueries()
-        val query = Any()
+    fun `a wrong setting is reported without the value it holds`() {
+        val key = "made-up-key-0123456789-0123456789"
+        val warnings = mutableListOf<String>()
 
-        assertTrue(inFlight.start(query))
-        assertEquals(false, inFlight.start(query))
-        assertTrue(inFlight.start(Any()), "another query is its own request")
-        inFlight.finish(query)
-        assertTrue(inFlight.start(query), "after the answer the query may be asked again")
+        AIProvider.fromSetting(key) { warnings.add(it) }
+        AIEffort.fromSetting(key) { warnings.add(it) }
+
+        assertEquals(2, warnings.size)
+        assertFalse(warnings.any { it.contains("made-up-key") || it.contains(key.take(8)) }, "$warnings")
     }
 
     @Test
-    fun `two queries with the same text are two queries`() {
-        val inFlight = InFlightQueries()
+    fun `a wrong effort file is reported without anything of what it holds`(@TempDir dir: File) {
+        val key = "made-up-key-0123456789-0123456789"
+        val file = File(dir, "ai_effort.txt").apply { writeText(key) }
+        val warnings = mutableListOf<String>()
 
-        assertTrue(inFlight.start(String(charArrayOf('h', 'i'))))
-        assertTrue(inFlight.start(String(charArrayOf('h', 'i'))))
+        assertEquals(AIEffort.MEDIUM, AIEffort.forRequest(AIEffort.MEDIUM, file) { warnings.add(it) })
+
+        assertEquals(1, warnings.size)
+        assertFalse(warnings.single().contains("made-up") || warnings.single().contains(key.take(6)), warnings.single())
+    }
+
+    @Test
+    fun `an effort file too big to be a level name is not read at all`(@TempDir dir: File) {
+        val file = File(dir, "ai_effort.txt").apply { writeText("low" + " ".repeat(10_000)) }
+        val warnings = mutableListOf<String>()
+
+        assertEquals(AIEffort.HIGH, AIEffort.forRequest(AIEffort.HIGH, file) { warnings.add(it) })
+        assertEquals(1, warnings.size)
     }
 }

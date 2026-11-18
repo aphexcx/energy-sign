@@ -5,7 +5,7 @@ import android.content.ContextWrapper
 import androidx.arch.core.executor.ArchTaskExecutor
 import androidx.arch.core.executor.TaskExecutor
 import cx.aphex.energysign.beatlinkdata.BeatLinkTrack
-import cx.aphex.energysign.gpt.GPTViewModel
+import cx.aphex.energysign.ai.AIReplySource
 import cx.aphex.energysign.gpt.PostedGptAnswer
 import cx.aphex.energysign.keyboard.KeyboardManager
 import org.junit.jupiter.api.AfterAll
@@ -66,7 +66,7 @@ class MessageManagerOwnerTest {
             modules(module {
                 single { repo }
                 single { owner }
-                single { GPTViewModel() }
+                single<AIReplySource> { FakeReplies() }
             })
         }
         manager = MessageManager(context, repo, owner)

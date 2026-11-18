@@ -174,11 +174,19 @@ class FestivalContextTest {
         val block = describe("2026-11-21T00:30")
 
         assertEquals("Current local time: Saturday 2026-11-21, 12:30 am (America/Los_Angeles).", block.lines().first())
-        assertEquals("- The Dream: Friday Closer until 1:00 am. Nothing after that.", block.lineFor("The Dream"))
-        assertEquals("- The Void: Void Late until 1:00 am. Nothing after that.", block.lineFor("The Void"))
+        // Who is next comes from the whole table, not from the night that is ending.
+        assertEquals(
+            "- The Dream: Friday Closer until 1:00 am. Next: Saturday Opener on Saturday at 4:00 pm.",
+            block.lineFor("The Dream"),
+        )
+        assertEquals(
+            "- The Void: Void Late until 1:00 am. Next: Saturday Void on Saturday at 8:00 pm.",
+            block.lineFor("The Void"),
+        )
         assertTrue(block.contains("Full schedule for Friday 2026-11-20"), block)
         assertTrue(block.contains("The Void: 12:00 am-1:00 am Void Late"), block)
-        assertFalse(block.contains("Saturday Opener"), block)
+        // Saturday's sets are not in the printed schedule of Friday's night.
+        assertFalse(block.contains("4:00 pm-5:00 pm Saturday Opener"), block)
     }
 
     @Test
@@ -236,8 +244,21 @@ class FestivalContextTest {
 
     @Test
     fun `a clock before the table's updated date gives no date, no time and no festival block`() {
-        assertEquals("", describe("2008-01-01T00:03"))
-        assertEquals("", describe("1969-12-31T16:03"))
+        // With no build date, so that this lower bound is the only one in play.
+        assertEquals("", describe("2008-01-01T00:03", buildDate = null))
+        assertEquals("", describe("1969-12-31T16:03", buildDate = null))
+        assertEquals("", describe("2026-11-15T23:59", buildDate = null), "two days before the table was edited")
+        assertTrue(
+            describe("2026-11-16T00:00", buildDate = null).startsWith("Current local time: Monday 2026-11-16"),
+            "the day before the table was edited is within the slack",
+        )
+    }
+
+    @Test
+    fun `a date in the table that is as early as a date can be breaks nothing`() {
+        val block = describe("2026-11-20T21:30", SetTimesLoad.Loaded(table.copy(updated = LocalDate.MIN), "test"), buildDate = LocalDate.MIN)
+
+        assertTrue(block.startsWith("Current local time: Friday 2026-11-20, 9:30 pm"), block)
     }
 
     @Test
@@ -260,5 +281,93 @@ class FestivalContextTest {
         val block = describe("2008-01-01T00:03", SetTimesLoad.Unusable("no file"), buildDate = null)
 
         assertTrue(block.startsWith("Current local time: Tuesday 2008-01-01, 12:03 am"), block)
+    }
+
+    // ---- on instants, over the whole table (class E)
+
+    private fun tableOf(vararg sets: FestivalSet) =
+        SetTimesLoad.Loaded(SetTimesTable("Fest", "", la, updated = null, sets = sets.toList()), "test")
+
+    private fun describeAt(instant: String, setTimes: SetTimesLoad): String =
+        FestivalContext.describe(Instant.parse(instant), ZoneId.of("UTC"), setTimes, null)
+
+    @Test
+    fun `a set that is on is on, whatever day it started - the day decides the printed schedule only`() {
+        val setTimes = tableOf(
+            set("Stage", "Sunrise Set", "2026-11-21T05:30", "2026-11-21T06:30"),
+            set("Stage", "Afternoon", "2026-11-21T16:00", "2026-11-21T17:00"),
+        )
+
+        val block = describe("2026-11-21T06:05", setTimes, buildDate = null)
+
+        assertTrue(block.contains("is running right now."), block)
+        assertEquals("- Stage: Sunrise Set until 6:30 am. Next: Afternoon at 4:00 pm.", block.lineFor("Stage"))
+        assertFalse(block.contains("today's first set"), block)
+    }
+
+    @Test
+    fun `in how long is the time that really passes, also when the clocks go forward in between`() {
+        // Los Angeles, 14 March 2027: at 2:00 am the clocks go to 3:00 am. From 1:30 am
+        // (09:30 UTC) to 3:30 am (10:30 UTC) is one hour, not two.
+        val setTimes = tableOf(set("Stage", "Early Bird", "2027-03-14T03:30", "2027-03-14T04:30"))
+
+        val block = describeAt("2027-03-14T09:30:00Z", setTimes)
+
+        assertTrue(block.startsWith("Current local time: Sunday 2027-03-14, 1:30 am"), block)
+        assertTrue(block.contains("at 3:30 am, in 1 h."), block)
+    }
+
+    @Test
+    fun `a set that runs through the hour that happens twice stays on through both`() {
+        // Los Angeles, 1 November 2026: at 2:00 am the clocks go back to 1:00 am. The set starts
+        // at the first 1:30 am (08:30 UTC) and ends at 2:30 am (10:30 UTC): two hours.
+        val setTimes = tableOf(set("Stage", "Long Night", "2026-11-01T01:30", "2026-11-01T02:30"))
+
+        for (utc in listOf("08:30", "08:59", "09:00", "09:29", "09:30", "10:29")) {
+            val block = describeAt("2026-11-01T$utc:00Z", setTimes)
+            assertEquals("- Stage: Long Night until 2:30 am. Nothing after that.", block.lineFor("Stage"), "at $utc UTC")
+        }
+        assertTrue(describeAt("2026-11-01T08:29:00Z", setTimes).contains("has not started yet"))
+        assertTrue(describeAt("2026-11-01T10:30:00Z", setTimes).contains("is over"))
+    }
+
+    @Test
+    fun `a time that happens twice is its first time, and an end is the first time after the start`() {
+        val night = LocalDateTime.parse("2026-11-01T01:15")
+
+        assertEquals(Instant.parse("2026-11-01T08:15:00Z"), FestivalContext.resolve(night, la, after = null))
+        assertEquals(
+            Instant.parse("2026-11-01T08:15:00Z"),
+            FestivalContext.resolve(night, la, after = Instant.parse("2026-11-01T07:45:00Z")),
+            "an end after a start before the repeated hour: the first 1:15",
+        )
+        assertEquals(
+            Instant.parse("2026-11-01T09:15:00Z"),
+            FestivalContext.resolve(night, la, after = Instant.parse("2026-11-01T08:45:00Z")),
+            "an end after a start at the first 1:45: the second 1:15",
+        )
+    }
+
+    @Test
+    fun `a time the clocks jump over is read as that time after the jump`() {
+        // 2:30 am does not exist on 14 March 2027 in Los Angeles.
+        assertEquals(
+            Instant.parse("2027-03-14T10:30:00Z"),
+            FestivalContext.resolve(LocalDateTime.parse("2027-03-14T02:30"), la, after = null),
+        )
+        assertEquals(
+            Instant.parse("2027-03-14T09:30:00Z"),
+            FestivalContext.resolve(LocalDateTime.parse("2027-03-14T01:30"), la, after = null),
+        )
+    }
+
+    @Test
+    fun `with the table of the festival, the last hour of Friday night names Saturday's first set as next`() {
+        val bundled = SetTimes.parse(java.io.File("src/main/assets/set_times.json").readText(), "bundled")
+
+        val block = describe("2026-11-21T00:30", bundled, buildDate = null)
+
+        assertEquals("- The Dream: ARTBAT until 1:00 am. Next: Das Pharaoh on Saturday at 4:00 pm.", block.lineFor("The Dream"))
+        assertFalse(block.contains("Nothing after that") && block.lineFor("The Dream").contains("Nothing after that"), block)
     }
 }

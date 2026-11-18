@@ -8,6 +8,7 @@ import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneId
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
@@ -119,6 +120,27 @@ class SetTimesTest {
             "From The Bundle",
             assertIs<SetTimesLoad.Loaded>(SetTimes.load(deviceFile) { other("From The Bundle") }).table.sets.first().artist,
         )
+    }
+
+    @Test
+    fun `a file on the device far too big to be a schedule is not read, the bundled one is used`(@TempDir dir: File) {
+        // A valid schedule, padded to 600 kB with white space: it would parse if it were read.
+        val deviceFile = File(dir, "set_times.json").apply { writeText(other("From The Device") + " ".repeat(600_000)) }
+
+        val loaded = assertIs<SetTimesLoad.Loaded>(SetTimes.load(deviceFile) { other("From The Bundle") })
+
+        assertEquals("From The Bundle", loaded.table.sets.first().artist)
+    }
+
+    @Test
+    fun `what a broken file holds is not put into the reason`(@TempDir dir: File) {
+        val deviceFile = File(dir, "set_times.json").apply { writeText("{\"timezone\": \"made-up-key-12345\", \"sets\": []} made-up-key-12345") }
+
+        val unusable = assertIs<SetTimesLoad.Unusable>(SetTimes.load(deviceFile) { null })
+        val wrongZone = assertIs<SetTimesLoad.Unusable>(SetTimes.parse("{\"timezone\": \"made-up-key-12345\", \"sets\": []}", "test"))
+
+        assertFalse(unusable.why.contains("made-up-key"), unusable.why)
+        assertFalse(wrongZone.why.contains("made-up-key"), wrongZone.why)
     }
 
     @Test

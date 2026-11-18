@@ -29,7 +29,7 @@ class AIReplyLimitsTest {
 
         val fitted = AIReplyLimits.fitToSign(words)
 
-        assertTrue(wireBytes(fitted) < AIReplyLimits.MAX_SIGN_JSON_BYTES, "${wireBytes(fitted)} bytes")
+        assertTrue(wireBytes(fitted) < 700, "${wireBytes(fitted)} bytes")
         assertTrue(words.startsWith(fitted), "the cut text is the start of the reply")
         val lastWord = fitted.substringAfterLast(' ')
         assertTrue(Regex("word\\d+").matches(lastWord), "cut inside a word: '$lastWord'")
@@ -38,16 +38,24 @@ class AIReplyLimitsTest {
     }
 
     @Test
-    fun `a line break is a place to cut too`() {
-        // Several starts, so that the cut cannot fall on a line break by chance.
+    fun `line ends, tabs and vertical tabs become spaces - a reply is one line`() {
+        // The saved list holds one message a line and parts it at a vertical tab.
+        assertEquals("first second third fourth fifth", AIReplyLimits.fitToSign("first\nsecond\r\nthird\u000Bfourth\t\tfifth"))
+        assertEquals("a b", AIReplyLimits.fitToSign("\n a \n\n b \n"))
+    }
+
+    @Test
+    fun `a long reply broken into lines is cut after a whole word`() {
+        // Several starts, so that the cut cannot fall between two words by chance.
         for (shift in 1..8) {
             val lines = "x".repeat(shift) + "\n" + (1..400).joinToString("\n") { "word$it" }
 
             val fitted = AIReplyLimits.fitToSign(lines)
 
-            assertTrue(wireBytes(fitted) < AIReplyLimits.MAX_SIGN_JSON_BYTES, "${wireBytes(fitted)} bytes")
-            assertTrue(Regex("word\\d+").matches(fitted.substringAfterLast('\n')), "shift $shift: cut inside a word")
-            assertEquals('\n', lines[fitted.length], "shift $shift: the cut is at the line break")
+            assertTrue(wireBytes(fitted) < 700, "${wireBytes(fitted)} bytes")
+            assertFalse(fitted.contains('\n'))
+            assertTrue(Regex("word\\d+").matches(fitted.substringAfterLast(' ')), "shift $shift: cut inside a word")
+            assertEquals('\n', lines[fitted.length], "shift $shift: the cut is where a word ended")
             assertTrue(fitted.length > 300, "cut far too early: ${fitted.length} characters")
         }
     }
@@ -59,16 +67,44 @@ class AIReplyLimitsTest {
 
         val fitted = AIReplyLimits.fitToSign(quotes)
 
-        assertTrue(wireBytes(fitted) < AIReplyLimits.MAX_SIGN_JSON_BYTES, "${wireBytes(fitted)} bytes")
+        assertTrue(wireBytes(fitted) < 700, "${wireBytes(fitted)} bytes")
         assertTrue(fitted.isNotBlank())
     }
 
     @Test
-    fun `one endless word is cut hard and still fits`() {
-        val fitted = AIReplyLimits.fitToSign("A".repeat(5000))
+    fun `when not one whole word fits there is nothing - half a word is not a reply`() {
+        assertEquals("", AIReplyLimits.fitToSign("A".repeat(5_000)))
+        // 640 letters are one byte over what a reply may take; 639 fit.
+        assertEquals("", AIReplyLimits.fitToSign("A".repeat(640)))
+        assertEquals("A".repeat(639), AIReplyLimits.fitToSign("A".repeat(639)))
+    }
 
-        assertTrue(wireBytes(fitted) < AIReplyLimits.MAX_SIGN_JSON_BYTES, "${wireBytes(fitted)} bytes")
-        assertTrue(fitted.length > 300)
+    @Test
+    fun `a first word that fits is kept when the second one is endless`() {
+        assertEquals("Hi", AIReplyLimits.fitToSign("Hi " + "A".repeat(5_000)))
+    }
+
+    @Test
+    fun `what the sign is sent for a reply is under 700 bytes, measured on the wire`() {
+        // 700 is the firmware's number, written out here on purpose: this test must not move
+        // when a constant of the app does. The bytes are those SignResponder writes.
+        val written = mutableListOf<String>()
+        for (reply in listOf(
+            (1..400).joinToString(" ") { "word$it" },
+            (1..200).joinToString(" ") { "it's \"so\" <loud> & =" },
+            "A".repeat(639),
+        )) {
+            val stored = Message.Marquee.Chonky(AIReplyLimits.fitToSign(reply).uppercase())
+            cx.aphex.energysign.message.SignResponder(nextMessage = { stored }, write = { json, _ -> written.add(json); true })
+                .onRequest("~".toByteArray(), 1)
+        }
+
+        assertEquals(3, written.size)
+        for (json in written) {
+            val bytes = json.toByteArray(Charsets.UTF_8).size
+            assertTrue(bytes < 700, "$bytes bytes on the wire")
+            assertTrue(bytes > 600, "only $bytes bytes: cut far too early")
+        }
     }
 
     @Test
@@ -80,7 +116,7 @@ class AIReplyLimitsTest {
 
         assertEquals(fitted, fitted.convertHeartEmojis().toNormalized(), "nothing left for the repository to change")
         assertFalse(fitted.contains("\uD83D"))
-        assertTrue(wireBytes(fitted) < AIReplyLimits.MAX_SIGN_JSON_BYTES)
+        assertTrue(wireBytes(fitted) < 700)
     }
 
     @Test

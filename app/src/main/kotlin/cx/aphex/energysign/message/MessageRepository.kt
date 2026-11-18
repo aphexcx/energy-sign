@@ -1,12 +1,12 @@
 package cx.aphex.energysign.message
 
 import android.content.Context
+import cx.aphex.energysign.ai.AIReplyLimits
 import cx.aphex.energysign.ext.convertHeartEmojis
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logE
 import cx.aphex.energysign.ext.logW
 import cx.aphex.energysign.ext.toNormalized
-import cx.aphex.energysign.gpt.GptAnswerResponse
 import cx.aphex.energysign.gpt.PostedGptAnswer
 import cx.aphex.energysign.message.Message.Companion.VT
 import cx.aphex.energysign.message.MessageRepository.Companion.MAX_SIGN_STRINGS
@@ -51,53 +51,58 @@ class MessageRepository(
         marqueeMessages.add(0, marqueeMessage)
     }
 
-    /** Inserts a GPT reply after the query it is replying to, and converts the query to a user message. */
-    fun insertGPTReply(gptAnswerResponse: GptAnswerResponse) {
-        val replyMsg = Message.Marquee.GPTReply(
-            gptAnswerResponse.answer
-                .convertHeartEmojis()
-                .toNormalized()
-                .toUpperCasePreservingASCIIRules()
-        )
-        val queryMsgIdx = marqueeMessages.indexOf(gptAnswerResponse.inReplyTo)
-        if (queryMsgIdx >= 0 && queryMsgIdx < marqueeMessages.size) {
-            marqueeMessages.add(queryMsgIdx + 1, replyMsg)
-            // Convert the GPTQuery message to a user message
-            marqueeMessages[queryMsgIdx] = gptAnswerResponse.inReplyTo.toUserMessage()
-            logD("Inserted GPT reply after messages[${queryMsgIdx}]: ${gptAnswerResponse.inReplyTo}")
-        } else {
-            marqueeMessages.add(1, replyMsg) // "Reply" to the first message if index is out of bounds
-            logD("Inserted GPT reply after first message")
-            marqueeMessages[0] = gptAnswerResponse.inReplyTo.toUserMessage()
-        }
+    /**
+     * Puts the GPT reply [answer] after [query] and makes the query a plain message. False, and
+     * nothing is changed, when the query is not in the list any more (it was deleted while its
+     * reply was on the way).
+     */
+    fun insertGPTReply(query: Message.Marquee.GPTQuery, answer: String): Boolean {
+        val queryMsgIdx = marqueeMessages.indexOfFirst { it === query }
+        if (queryMsgIdx < 0) return false
+        marqueeMessages[queryMsgIdx] = query.toUserMessage()
+        marqueeMessages.add(queryMsgIdx + 1, replyMessage(answer))
+        logD("Inserted GPT reply after messages[${queryMsgIdx}]")
+        return true
     }
 
-    fun insertGPTReplyToUserMessage(postedGptAnswer: PostedGptAnswer) {
-        val replyMsg = Message.Marquee.GPTReply(
-            postedGptAnswer.answer
+    /**
+     * [query] will get no reply: it stays where it is, as the plain message it was, and is not a
+     * query any more. False when it is not in the list.
+     */
+    fun retireQuery(query: Message.Marquee.GPTQuery): Boolean {
+        val queryMsgIdx = marqueeMessages.indexOfFirst { it === query }
+        if (queryMsgIdx < 0) return false
+        marqueeMessages[queryMsgIdx] = query.toUserMessage()
+        return true
+    }
+
+    /**
+     * A reply that was written elsewhere and posted to the app: it goes after the message with
+     * the text it replies to, or after the newest message when there is none. It gets the same
+     * clean-up and the same size limit as a reply of the app's own. False, and nothing is
+     * changed, when there is nothing left of it after that or the list is empty.
+     */
+    fun insertGPTReplyToUserMessage(postedGptAnswer: PostedGptAnswer): Boolean {
+        val answer = AIReplyLimits.fitToSign(postedGptAnswer.answer)
+        if (answer.isBlank() || marqueeMessages.isEmpty()) return false
+        val found = marqueeMessages.indexOfFirst { it.str == postedGptAnswer.inReplyTo }
+        val queryMsgIdx = if (found >= 0) found else 0
+        // Convert the GPTQuery message to a user message
+        (marqueeMessages[queryMsgIdx] as? Message.Marquee.GPTQuery)?.let {
+            marqueeMessages[queryMsgIdx] = it.toUserMessage()
+        }
+        marqueeMessages.add(queryMsgIdx + 1, replyMessage(answer))
+        logD("Inserted GPT reply after messages[${queryMsgIdx}]")
+        return true
+    }
+
+    private fun replyMessage(answer: String): Message.Marquee.GPTReply =
+        Message.Marquee.GPTReply(
+            answer
                 .convertHeartEmojis()
                 .toNormalized()
                 .toUpperCasePreservingASCIIRules()
         )
-        val inReplyTo: Message.Marquee =
-            marqueeMessages.firstOrNull { it.str == postedGptAnswer.inReplyTo } ?: marqueeMessages.first()
-        val queryMsgIdx = marqueeMessages.indexOf(inReplyTo)
-        if (queryMsgIdx >= 0 && queryMsgIdx < marqueeMessages.size) {
-            // Convert the GPTQuery message to a user message
-            (inReplyTo as? Message.Marquee.GPTQuery)?.let {
-                marqueeMessages[queryMsgIdx] = it.toUserMessage()
-            }
-            marqueeMessages.add(queryMsgIdx + 1, replyMsg)
-            logD("Inserted GPT reply after messages[${queryMsgIdx}]: $inReplyTo")
-        } else {
-            marqueeMessages.add(1, replyMsg) // "Reply" to the first message if index is out of bounds
-            logD("Inserted GPT reply after first message")
-            // Convert the GPTQuery message to a user message
-            (marqueeMessages[0] as? Message.Marquee.GPTQuery)?.let {
-                marqueeMessages[0] = it.toUserMessage()
-            }
-        }
-    }
 
     /**
      * Write out the list of strings to the files in [dir].

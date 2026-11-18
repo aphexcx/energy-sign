@@ -1,6 +1,7 @@
 package cx.aphex.energysign.ai
 
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 import java.security.cert.CertPathValidatorException
@@ -26,15 +27,19 @@ class AnthropicReplyGeneratorTest {
     @AfterEach
     fun stopServer() = api.close()
 
+    private val serverClock = ServerClock { 0L }
+
+    /** What is logged when all is well. [log] holds failures and warnings only. */
+    private val infoLog = mutableListOf<String>()
+
     private fun generator(
         apiKey: String = FAKE_KEY,
         timeout: Duration = Duration.ofSeconds(5),
         baseUrl: String = api.baseUrl,
         effort: () -> AIEffort = { AIEffort.DEFAULT },
-        hardLimit: Duration = timeout.plusSeconds(2),
     ) = AnthropicReplyGenerator(
-        apiKey = apiKey, log = { log.add(it) }, effort = effort, requestTimeout = timeout, hardLimit = hardLimit,
-        baseUrl = baseUrl,
+        apiKey = apiKey, log = { log.add(it) }, info = { infoLog.add(it) }, effort = effort, serverClock = serverClock,
+        requestTimeout = timeout, baseUrl = baseUrl,
     )
 
     private fun ask(
@@ -136,12 +141,13 @@ class AnthropicReplyGeneratorTest {
         api.answer = FakeMessagesApi.Answer(
             200,
             FakeMessagesApi.message(
-                """[{"type":"thinking","thinking":"","signature":"c2ln"},
+                """[{"type":"thinking","thinking":"THINKING MUST NOT BE SHOWN","signature":"c2ln"},
                     {"type":"text","text":"The bass is fine, "},
                     {"type":"text","text":"your earplugs are just working."}]"""
             ),
         )
 
+        // The thinking block has text in it here: taking it for part of the answer would show.
         assertEquals(AIReplyResult.Reply("The bass is fine, your earplugs are just working."), ask())
     }
 
@@ -173,6 +179,28 @@ class AnthropicReplyGeneratorTest {
         )
 
         assertNoReply(NoReplyReason.REFUSED, ask())
+    }
+
+    @Test
+    fun `a refusal is recognised before the content is looked at - content that cannot be read does not matter`() {
+        // "content" is not a list here. Code that reads the content first fails on it and never
+        // gets to the stop reason; the answer must still be "refused".
+        api.answer = FakeMessagesApi.Answer(
+            200,
+            FakeMessagesApi.message(""""this is not a list of blocks"""", stopReason = "refusal"),
+        )
+
+        assertNoReply(NoReplyReason.REFUSED, ask())
+    }
+
+    @Test
+    fun `a cut-off answer is recognised before the content is looked at`() {
+        api.answer = FakeMessagesApi.Answer(
+            200,
+            FakeMessagesApi.message(""""this is not a list of blocks"""", stopReason = "max_tokens"),
+        )
+
+        assertNoReply(NoReplyReason.TRUNCATED, ask())
     }
 
     @Test
@@ -222,11 +250,14 @@ class AnthropicReplyGeneratorTest {
     }
 
     @Test
-    fun `a server that does not answer in time is no reply, and the wait is bounded`() {
+    fun `a server that does not answer in time is no reply, and the request ends at its time limit`() {
+        // Nothing but the request's own time limit ends this: the fake answers after 2 s, in
+        // full, and nobody outside stops the call. Without the limit the late answer would be
+        // taken for the reply.
         api.answer = FakeMessagesApi.Answer(
             200,
             FakeMessagesApi.message("""[{"type":"text","text":"too late"}]"""),
-            delayMs = 4_000,
+            delayMs = 2_000,
         )
 
         val startedAt = System.nanoTime()
@@ -234,26 +265,31 @@ class AnthropicReplyGeneratorTest {
         val waitedMs = (System.nanoTime() - startedAt) / 1_000_000
 
         assertNoReply(NoReplyReason.TIMEOUT, result)
-        assertTrue(waitedMs < 2_500, "waited $waitedMs ms for a 400 ms timeout")
+        assertTrue(waitedMs < 1_500, "waited $waitedMs ms for a 400 ms timeout")
         assertEquals(1, api.received.size, "a timeout is not retried")
     }
 
     @Test
-    fun `the wait ends at the hard limit even when the HTTP client has not given up`() {
-        // The client's own timeout cannot interrupt everything (a DNS lookup, for one). Here the
-        // client would wait 20 s for a slow server; the caller is let go after 400 ms.
+    fun `a caller that stops waiting does not leave a call running behind it - the generator returns when the call has ended`() {
+        // The caller gives up after 200 ms; the request's own limit is 1 s; the fake would
+        // answer after 3 s. The generator comes back at the request's limit: not before (the
+        // call would still be out), and not at 3 s (the limit holds).
         api.answer = FakeMessagesApi.Answer(
             200,
             FakeMessagesApi.message("""[{"type":"text","text":"too late"}]"""),
-            delayMs = 4_000,
+            delayMs = 3_000,
         )
+        val generator = generator(timeout = Duration.ofSeconds(1))
 
         val startedAt = System.nanoTime()
-        val result = ask(generator(timeout = Duration.ofSeconds(20), hardLimit = Duration.ofMillis(400)))
+        val result = runBlocking {
+            withTimeoutOrNull(200) { generator.generateReply(AIReplyRequest("s", "u")) }
+        }
         val waitedMs = (System.nanoTime() - startedAt) / 1_000_000
 
-        assertNoReply(NoReplyReason.TIMEOUT, result)
-        assertTrue(waitedMs < 2_500, "waited $waitedMs ms for a 400 ms hard limit")
+        assertEquals(null, result)
+        assertTrue(waitedMs in 800..2_500, "the generator came back after $waitedMs ms")
+        assertTrue(log.any { it.contains("no answer within the time limit") }, "the call itself ended by its limit: $log")
     }
 
     @Test
@@ -269,6 +305,171 @@ class AnthropicReplyGeneratorTest {
         assertFalse(noReply.detail.contains("made-up-key"), noReply.detail)
         assertFalse(log.any { it.contains("made-up-key") }, "$log")
         assertTrue(api.received.isEmpty(), "nothing can have been sent")
+    }
+
+    // ---- nothing of the provider's reaches the log (class B)
+
+    @Test
+    fun `what the API writes into an error is not logged and not handed on, only the status and the kind`() {
+        // The last characters of the key, as an API might echo them. No exact-match redaction
+        // can catch a piece of a key: the message must not be used at all.
+        val excerpt = FAKE_KEY.takeLast(6)
+        api.answer = FakeMessagesApi.Answer(
+            400,
+            FakeMessagesApi.error("invalid_request_error", "bad credential ending in $excerpt, do not repeat"),
+            headers = mapOf("x-diagnostic" to FAKE_KEY, "request-id" to "req_$excerpt"),
+        )
+
+        val result = ask()
+
+        val noReply = assertIs<AIReplyResult.NoReply>(result)
+        assertEquals(NoReplyReason.REQUEST_REJECTED, noReply.reason)
+        for (text in log + noReply.detail) {
+            assertFalse(text.contains(excerpt), text)
+            assertFalse(text.contains("do not repeat"), text)
+        }
+        assertTrue(log.single().contains("HTTP 400 INVALID_REQUEST_ERROR"), log.single())
+    }
+
+    @Test
+    fun `an error type the SDK does not know is not copied into the log`() {
+        api.answer = FakeMessagesApi.Answer(418, FakeMessagesApi.error("made_up_${FAKE_KEY.takeLast(6)}", "x"))
+
+        ask()
+
+        assertFalse(log.any { it.contains(FAKE_KEY.takeLast(6)) }, "$log")
+        assertTrue(log.single().contains("HTTP 418"), log.single())
+    }
+
+    @Test
+    fun `a refusal names its category only when it is one of the known ones`() {
+        api.answer = FakeMessagesApi.Answer(
+            200,
+            FakeMessagesApi.message("[]", stopReason = "refusal", stopDetails = """{"type":"refusal","category":"cyber","explanation":"secret-explanation"}"""),
+        )
+        ask()
+        api.answer = FakeMessagesApi.Answer(
+            200,
+            FakeMessagesApi.message("[]", stopReason = "refusal", stopDetails = """{"type":"refusal","category":"made-up-category","explanation":"x"}"""),
+        )
+        ask()
+
+        assertTrue(log[0].contains("category cyber"), log[0])
+        assertFalse(log.any { it.contains("secret-explanation") || it.contains("made-up-category") }, "$log")
+    }
+
+    @Test
+    fun `a model name the API made up is not copied into the log`() {
+        api.answer = FakeMessagesApi.Answer(
+            200,
+            FakeMessagesApi.message("""[{"type":"text","text":"Hydrate."}]""", model = "model-${FAKE_KEY.takeLast(6)}"),
+        )
+
+        assertEquals(AIReplyResult.Reply("Hydrate."), ask())
+        assertFalse((log + infoLog).any { it.contains(FAKE_KEY.takeLast(6)) }, "$log $infoLog")
+        assertTrue(infoLog.single().contains("another model"), infoLog.single())
+    }
+
+    // ---- the server's time (class E)
+
+    @Test
+    fun `the time the server gives with a reply is kept`() {
+        api.answer = FakeMessagesApi.Answer(
+            200,
+            FakeMessagesApi.message("""[{"type":"text","text":"ok"}]"""),
+            headers = mapOf("date" to "Sat, 21 Nov 2026 05:30:00 GMT"),
+        )
+
+        ask()
+
+        assertEquals(java.time.Instant.parse("2026-11-21T05:30:00Z"), serverClock.now())
+    }
+
+    @Test
+    fun `the time the server gives with an error is kept too`() {
+        api.answer = FakeMessagesApi.Answer(
+            529,
+            FakeMessagesApi.error("overloaded_error", "Overloaded"),
+            headers = mapOf("date" to "Sat, 21 Nov 2026 05:30:00 GMT"),
+        )
+
+        ask()
+
+        assertEquals(java.time.Instant.parse("2026-11-21T05:30:00Z"), serverClock.now())
+    }
+
+    @Test
+    fun `asking for the time makes one free request for the model, and none once the time is known`() {
+        api.answer = FakeMessagesApi.Answer(
+            200,
+            """{"id":"claude-fable-5-2","type":"model","display_name":"Claude Fable 5.2","created_at":"2026-01-01T00:00:00Z"}""",
+            headers = mapOf("date" to "Sat, 21 Nov 2026 05:30:00 GMT"),
+        )
+        val generator = generator()
+
+        generator.syncClock()
+        generator.syncClock()
+
+        val request = api.received.single()
+        assertTrue(request.path.startsWith("/v1/models/claude-fable-5-2"), request.path)
+        assertEquals("", request.body, "a GET with no body: no tokens, no charge")
+        assertEquals(java.time.Instant.parse("2026-11-21T05:30:00Z"), serverClock.now())
+    }
+
+    @Test
+    fun `asking for the time never throws, whatever comes back`() {
+        api.answer = FakeMessagesApi.Answer(503, "not json at all")
+        generator().syncClock()
+        val port = api.baseUrl
+        api.close()
+        generator(baseUrl = port).syncClock()
+
+        assertEquals(null, serverClock.now())
+    }
+
+    // ---- the warm-up (requirement a)
+
+    @Test
+    fun `the warm-up runs one whole request and answer on this machine, then asks the API for the model, and buys nothing`() {
+        api.answer = FakeMessagesApi.Answer(
+            200,
+            """{"id":"claude-fable-5-2","type":"model","display_name":"Claude Fable 5.2","created_at":"2026-01-01T00:00:00Z"}""",
+            headers = mapOf("date" to "Sat, 21 Nov 2026 05:30:00 GMT"),
+        )
+
+        generator().warmUp()
+
+        // The API itself saw one request, the free one. The message that was made and read went
+        // to the stand-in on this machine.
+        val request = api.received.single()
+        assertTrue(request.path.startsWith("/v1/models/claude-fable-5-2"), request.path)
+        assertFalse(api.received.any { it.path.contains("/v1/messages") }, "the warm-up must not ask for a reply")
+        assertEquals(java.time.Instant.parse("2026-11-21T05:30:00Z"), serverClock.now())
+        assertTrue(log.isEmpty(), "nothing went wrong: $log")
+        assertTrue(infoLog.any { it.contains("the key and the model are accepted") }, "$infoLog")
+    }
+
+    @Test
+    fun `the warm-up never throws, with the API down or with no key`() {
+        val port = api.baseUrl
+        api.close()
+
+        generator(baseUrl = port).warmUp()
+        generator(apiKey = "", baseUrl = port).warmUp()
+
+        assertTrue(log.any { it.contains("warm-up") }, "the failure of the free request is logged: $log")
+        assertFalse(log.any { it.contains("local part") }, "the local part does not need the API: $log")
+    }
+
+    @Test
+    fun `under the one attempt of the SDK the HTTP client may send a request twice, never more`() {
+        // A 503 that says "Retry-After: 0" is repeated once by the HTTP client itself, inside the
+        // same time limit. This is the most the comment on the class promises.
+        api.answer = FakeMessagesApi.Answer(503, FakeMessagesApi.error("api_error", "busy"), headers = mapOf("retry-after" to "0"))
+
+        assertNoReply(NoReplyReason.SERVER_ERROR, ask())
+
+        assertTrue(api.received.size in 1..2, "${api.received.size} requests")
     }
 
     @Test
@@ -320,8 +521,11 @@ class AnthropicReplyGeneratorTest {
     @Test
     fun `a response that is not a message is no reply`() {
         api.answer = FakeMessagesApi.Answer(200, """{"hello":"there"}""")
+        assertNoReply(NoReplyReason.NOT_A_MESSAGE, ask())
 
-        assertNoReply(NoReplyReason.UNEXPECTED_RESPONSE, ask())
+        // A page from something in between (a captive portal), with status 200.
+        api.answer = FakeMessagesApi.Answer(200, "<html><body>Sign in to the festival wifi</body></html>")
+        assertNoReply(NoReplyReason.NOT_A_MESSAGE, ask())
     }
 
     @Test

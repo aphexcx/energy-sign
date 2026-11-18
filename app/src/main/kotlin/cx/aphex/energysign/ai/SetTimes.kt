@@ -42,6 +42,9 @@ object SetTimes {
     /** The file the app looks for in its own files directory, and the name of the bundled asset. */
     const val FILE_NAME = "set_times.json"
 
+    /** The bundled table is about 10 kB. */
+    private const val MAX_FILE_BYTES = 512L * 1024
+
     /**
      * The table to use now: [deviceFile] when it is there and can be read, so the schedule can be
      * replaced on the device without a rebuild; otherwise the bundled one.
@@ -53,7 +56,7 @@ object SetTimes {
         val bundledText = try {
             bundled()
         } catch (e: IOException) {
-            return SetTimesLoad.Unusable("${fromDevice.why()}; bundled $FILE_NAME cannot be read (${e.message})")
+            return SetTimesLoad.Unusable("${fromDevice.why()}; bundled $FILE_NAME cannot be read (${e.javaClass.simpleName})")
         }
         if (bundledText == null) {
             return SetTimesLoad.Unusable("${fromDevice.why()}; there is no bundled $FILE_NAME")
@@ -69,10 +72,13 @@ object SetTimes {
     private fun readDeviceFile(file: File): SetTimesLoad {
         val source = "files/${file.name}"
         if (!file.isFile) return SetTimesLoad.Unusable("no $source")
+        // A schedule is some kilobytes. A file far bigger than that is not one, and reading it
+        // would hold up the reply that waits for this.
+        if (file.length() > MAX_FILE_BYTES) return SetTimesLoad.Unusable("$source is too big to be a schedule")
         val text = try {
             file.readText()
         } catch (e: IOException) {
-            return SetTimesLoad.Unusable("$source cannot be read (${e.message})")
+            return SetTimesLoad.Unusable("$source cannot be read (${e.javaClass.simpleName})")
         }
         return parse(text, source)
     }
@@ -82,7 +88,7 @@ object SetTimes {
         val parsed: JsonElement = try {
             JsonParser.parseString(json)
         } catch (e: JsonParseException) {
-            return SetTimesLoad.Unusable("$source is not JSON (${e.message})")
+            return SetTimesLoad.Unusable("$source is not JSON")
         }
         val root: JsonObject = parsed.takeIf { it.isJsonObject }?.asJsonObject
             ?: return SetTimesLoad.Unusable("$source is not a JSON object")
@@ -91,7 +97,7 @@ object SetTimes {
         val zone = try {
             ZoneId.of(zoneName)
         } catch (e: DateTimeException) {
-            return SetTimesLoad.Unusable("$source names an unknown timezone \"$zoneName\"")
+            return SetTimesLoad.Unusable("$source names a timezone that does not exist")
         }
 
         val setsJson = root.get("sets")?.takeIf { it.isJsonArray }?.asJsonArray

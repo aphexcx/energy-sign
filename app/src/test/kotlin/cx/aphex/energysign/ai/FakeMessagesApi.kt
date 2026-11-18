@@ -38,11 +38,14 @@ class FakeMessagesApi : AutoCloseable {
     @Volatile
     var answer: Answer = Answer(500, error("api_error", "no answer queued"))
 
+    /** Answers for the first requests, one each, in order; after them [answer] is given. */
+    val firstAnswers: java.util.Queue<Answer> = java.util.concurrent.ConcurrentLinkedQueue()
+
     private val server = MockWebServer().apply {
         dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 received.add(Received(request.path.orEmpty(), request.headers, request.body.readUtf8()))
-                val reply = answer
+                val reply = firstAnswers.poll() ?: answer
                 return MockResponse()
                     .setResponseCode(reply.status)
                     .setHeader("content-type", "application/json")

@@ -1,7 +1,5 @@
 package cx.aphex.energysign.message
 
-import android.content.Context
-import android.content.ContextWrapper
 import android.util.Log
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
@@ -30,12 +28,6 @@ class SavedMessagesFileTest {
     @AfterEach
     fun restoreLog() = mockedLog.close()
 
-    /** The only thing the repository asks of a Context is where the app's files are. */
-    private fun contextWithFilesDir(dir: File): Context =
-        object : ContextWrapper(null) {
-            override fun getFilesDir(): File = dir
-        }
-
     /** Oldest first, as the app writes it: a message, a query that was answered, its reply. */
     private val savedBeforeTheRename =
         "DEFAULT\u000BFIRST MESSAGE EVER\n" +
@@ -47,7 +39,7 @@ class SavedMessagesFileTest {
     fun `a list saved before the rename loads with every message, type and text`(@TempDir dir: File) {
         File(dir, "signstrings.bin").writeText(savedBeforeTheRename)
 
-        val loaded = MessageRepository().loadUserMessages(contextWithFilesDir(dir))
+        val loaded = MessageRepository(saver = { it.run() }).loadUserMessages(dir)
 
         // Newest first in memory.
         assertEquals(
@@ -67,14 +59,14 @@ class SavedMessagesFileTest {
 
     @Test
     fun `a query and a reply are written as the same bytes as before the rename`(@TempDir dir: File) {
-        val repository = MessageRepository()
+        val repository = MessageRepository(saver = { it.run() })
         // Pushed oldest first; each push goes to the front.
         repository.pushMarqueeMessage(Message.Marquee.User("FIRST MESSAGE EVER"))
         repository.pushMarqueeMessage(Message.Marquee.GPTQuery("hey ravegpt is the bass loud enough"))
         repository.marqueeMessages.add(0, Message.Marquee.GPTReply("THE BASS IS FINE, YOUR EARPLUGS ARE JUST WORKING."))
         repository.pushMarqueeMessage(Message.Marquee.User("newest message"))
 
-        repository.saveMarqueeMessages(contextWithFilesDir(dir))
+        repository.saveMarqueeMessages(dir)
 
         assertEquals(savedBeforeTheRename, File(dir, "signstrings.bin").readText())
     }
@@ -82,11 +74,10 @@ class SavedMessagesFileTest {
     @Test
     fun `saving and loading again keeps the list`(@TempDir dir: File) {
         File(dir, "signstrings.bin").writeText(savedBeforeTheRename)
-        val context = contextWithFilesDir(dir)
-        val repository = MessageRepository()
-        repository.marqueeMessages.addAll(repository.loadUserMessages(context))
+        val repository = MessageRepository(saver = { it.run() })
+        repository.marqueeMessages.addAll(repository.loadUserMessages(dir))
 
-        repository.saveMarqueeMessages(context)
+        repository.saveMarqueeMessages(dir)
 
         assertEquals(savedBeforeTheRename, File(dir, "signstrings.bin").readText())
     }

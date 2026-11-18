@@ -15,59 +15,68 @@ sealed class AIReplyResult {
 /**
  * Why there is no reply.
  *
- * [isFailure] separates the two things the sign already does when no reply comes. A failure of
- * the call (no network, a timeout, an API error) is shown the way an error always was. The others
- * are the provider answering with nothing usable, or not being asked at all: the thinking notice
- * goes away and nothing else happens, as with a blank answer.
+ * Two questions decide what happens to the query, and each reason answers both:
+ * - [askAgain]: can asking the same thing again later give another outcome? When it cannot (a
+ *   refusal, an empty answer, a rejected request), the query is retired: it stays on the sign as
+ *   the plain message it was and is never sent again. When it can, it is asked again when it
+ *   comes round, a limited number of times.
+ * - [backOff]: did the provider fail to give an answer at all? Then nothing is asked of it for a
+ *   while, however many queries are waiting.
  */
-enum class NoReplyReason(val isFailure: Boolean) {
+enum class NoReplyReason(val askAgain: Boolean, val backOff: Boolean) {
     /** No API key in this build. Nothing was sent. */
-    MISSING_KEY(false),
+    MISSING_KEY(askAgain = false, backOff = false),
+
+    /** There is nothing to ask: the text is blank once it is what the sign can show. Nothing was sent. */
+    NOTHING_TO_ASK(askAgain = false, backOff = false),
 
     /** The provider declined (stop reason "refusal"), and so did the fallback model. */
-    REFUSED(false),
+    REFUSED(askAgain = false, backOff = false),
 
-    /** The answer had no text in it. */
-    EMPTY(false),
+    /** The answer had no text in it that the sign can show. */
+    EMPTY(askAgain = false, backOff = false),
 
-    /** The answer was cut off by the token limit; half a line is not shown. */
-    TRUNCATED(false),
+    /** The answer was cut off, by the token limit or by a stream that ended early; half a line is not shown. */
+    TRUNCATED(askAgain = false, backOff = false),
 
-    /** A response that is not an answer: an unknown stop reason, or a body that is not a message. */
-    UNEXPECTED_RESPONSE(false),
+    /** A complete answer of a kind this app does not handle (an unknown stop reason). */
+    UNEXPECTED_RESPONSE(askAgain = false, backOff = false),
 
-    /** No complete answer within the bounded wait. */
-    TIMEOUT(true),
+    /** HTTP 200 with a body that is not a message at all (a captive portal, a proxy page). */
+    NOT_A_MESSAGE(askAgain = true, backOff = true),
+
+    /** No complete answer before the deadline of the call. */
+    TIMEOUT(askAgain = true, backOff = true),
 
     /** No route, no DNS, connection refused or dropped. */
-    NETWORK(true),
+    NETWORK(askAgain = true, backOff = true),
 
     /** The server certificate is not valid at the time the device believes it is: check the clock. */
-    CERTIFICATE_CLOCK(true),
+    CERTIFICATE_CLOCK(askAgain = true, backOff = true),
 
-    /** The server certificate does not chain to a root this device trusts. */
-    CERTIFICATE_UNTRUSTED(true),
+    /** The server certificate does not chain to a root this device trusts (or something sits in between). */
+    CERTIFICATE_UNTRUSTED(askAgain = true, backOff = true),
 
     /** Another TLS failure. */
-    TLS(true),
+    TLS(askAgain = true, backOff = true),
 
     /** HTTP 429. */
-    RATE_LIMITED(true),
+    RATE_LIMITED(askAgain = true, backOff = true),
 
     /** HTTP 5xx, overloaded included. */
-    SERVER_ERROR(true),
+    SERVER_ERROR(askAgain = true, backOff = true),
 
     /** HTTP 401 or 403: the key is wrong, revoked, or may not use this model. */
-    KEY_REJECTED(true),
+    KEY_REJECTED(askAgain = false, backOff = true),
 
     /** HTTP 400, 404 or 422: the request itself is wrong (a bug here, or a model id that is gone). */
-    REQUEST_REJECTED(true),
+    REQUEST_REJECTED(askAgain = false, backOff = true),
 
     /** Any other failure the provider's client reports. */
-    PROVIDER_ERROR(true),
+    PROVIDER_ERROR(askAgain = true, backOff = true),
 
     /** Something no generator is expected to throw. Caught at the edge so the app keeps running. */
-    UNEXPECTED_FAILURE(true),
+    UNEXPECTED_FAILURE(askAgain = true, backOff = true),
 }
 
 /**
@@ -78,7 +87,40 @@ interface AIReplyGenerator {
     /** For the log: which provider and model this is. */
     val name: String
 
+    /**
+     * One request to the provider, with its own time limit. It may be interrupted or cancelled
+     * from outside and then ends at once.
+     */
     suspend fun generateReply(request: AIReplyRequest): AIReplyResult
+
+    /**
+     * Gets the slow first use out of the way before a person waits for it: called once, soon after
+     * the app starts, on a background thread of low priority. It blocks until it is done. It
+     * must cost no money. The default is to do nothing.
+     */
+    fun warmUp() {}
+
+    /** Learns the time from the provider when it is not known yet. Free, quick, and never throws. */
+    fun syncClock() {}
+}
+
+/**
+ * Where replies come from, as the owner of the messages sees it: something that is asked and
+ * answers later, on some other thread. See [AIReplyRunner].
+ */
+interface AIReplySource {
+    /**
+     * Starts the warm-up when there is one, and returns at once. True: [onDone] will be called
+     * once, on some other thread, and nothing may be asked before that. False: there is no
+     * warm-up and [onDone] is never called.
+     */
+    fun warmUp(onDone: () -> Unit): Boolean
+
+    /**
+     * Asks for one reply to [text] and returns at once. [onResult] is called exactly once, on
+     * some other thread, whatever happens.
+     */
+    fun ask(text: String, onResult: (AIReplyResult) -> Unit)
 }
 
 /** Which provider writes the replies. One setting: `AI_PROVIDER` in local.properties. */
@@ -94,7 +136,8 @@ enum class AIProvider(val setting: String) {
             val wanted = setting.orEmpty().trim()
             if (wanted.isEmpty()) return DEFAULT
             return values().firstOrNull { it.setting.equals(wanted, ignoreCase = true) } ?: DEFAULT.also {
-                warn("AI_PROVIDER=\"$wanted\" names no provider (anthropic, openai); using ${it.setting}")
+                // The value itself is never logged: a key pasted on the wrong line would be printed.
+                warn("AI_PROVIDER is set to something that names no provider (anthropic, openai); using ${it.setting}")
             }
         }
     }
@@ -120,13 +163,14 @@ enum class AIEffort(val setting: String) {
         val DEFAULT = HIGH
 
         const val OVERRIDE_FILE_NAME = "ai_effort.txt"
+        private const val MAX_OVERRIDE_FILE_BYTES = 64L
 
         /** Absent or blank is [DEFAULT]. A value that names no level is [DEFAULT] too, with a warning. */
         fun fromSetting(setting: String?, warn: (String) -> Unit = {}): AIEffort {
             val wanted = setting.orEmpty().trim()
             if (wanted.isEmpty()) return DEFAULT
             return named(wanted) ?: DEFAULT.also {
-                warn("AI_EFFORT=\"$wanted\" names no level (low, medium, high, xhigh, max); using ${it.setting}")
+                warn("AI_EFFORT is set to something that names no level (low, medium, high, xhigh, max); using ${it.setting}")
             }
         }
 
@@ -136,15 +180,21 @@ enum class AIEffort(val setting: String) {
          */
         fun forRequest(buildSetting: AIEffort, overrideFile: File, warn: (String) -> Unit): AIEffort {
             if (!overrideFile.isFile) return buildSetting
+            // A level name is a few letters: a bigger file is not one, and is not read.
+            if (overrideFile.length() > MAX_OVERRIDE_FILE_BYTES) {
+                warn("${overrideFile.name} is too big to be a level name; effort stays ${buildSetting.setting}")
+                return buildSetting
+            }
             val wanted = try {
                 overrideFile.readText().trim()
             } catch (e: IOException) {
-                warn("${overrideFile.name} cannot be read (${e.message}); effort stays ${buildSetting.setting}")
+                warn("${overrideFile.name} cannot be read (${e.javaClass.simpleName}); effort stays ${buildSetting.setting}")
                 return buildSetting
             }
             if (wanted.isEmpty()) return buildSetting
             return named(wanted) ?: buildSetting.also {
-                warn("${overrideFile.name} says \"${wanted.take(20)}\", which names no level; effort stays ${it.setting}")
+                // What the file holds is never logged: it may be anything, a key included.
+                warn("${overrideFile.name} names no level (low, medium, high, xhigh, max); effort stays ${it.setting}")
             }
         }
 
@@ -160,8 +210,17 @@ object AIReplyGenerators {
         openAiApiKey: String,
         effort: () -> AIEffort,
         log: (String) -> Unit,
+        info: (String) -> Unit = log,
+        serverClock: ServerClock? = null,
+        /** Only tests set these, to local fakes of the two APIs. */
+        anthropicBaseUrl: String? = null,
+        openAiBaseUrl: String? = null,
     ): AIReplyGenerator = when (provider) {
-        AIProvider.ANTHROPIC -> AnthropicReplyGenerator(apiKey = anthropicApiKey, log = log, effort = effort)
-        AIProvider.OPENAI -> OpenAIReplyGenerator(apiKey = openAiApiKey, log = log)
+        AIProvider.ANTHROPIC -> AnthropicReplyGenerator(
+            apiKey = anthropicApiKey, log = log, info = info, effort = effort, serverClock = serverClock,
+            baseUrl = anthropicBaseUrl,
+        )
+
+        AIProvider.OPENAI -> OpenAIReplyGenerator(apiKey = openAiApiKey, log = log, baseUrl = openAiBaseUrl)
     }
 }

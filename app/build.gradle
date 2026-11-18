@@ -17,17 +17,34 @@ android {
         versionCode 1
         versionName "1.0"
 
+        // The keys and settings of this build. No file, or a file without them, is a build
+        // without them: the code treats an empty value as "not set".
         Properties properties = new Properties()
-        properties.load(project.rootProject.file('local.properties').newDataInputStream())
+        def localPropertiesFile = project.rootProject.file('local.properties')
+        if (localPropertiesFile.exists()) {
+            localPropertiesFile.withInputStream { properties.load(it) }
+        }
         // A local.properties value as a Java string literal. The value may be written with or
-        // without double quotes around it; a missing property becomes "" so the build never
-        // depends on a key being there (the code treats an empty key as "no key").
+        // without double quotes around it; a missing property becomes "". Every character that
+        // cannot stand in a literal as it is gets escaped (a backslash, a quote, a line end or any
+        // other control character), so no value, whatever it holds, can break BuildConfig.java.
         def localProperty = { String name ->
             String value = (properties.getProperty(name) ?: '').trim()
             if (value.length() >= 2 && value.startsWith('"') && value.endsWith('"')) {
                 value = value.substring(1, value.length() - 1)
             }
-            return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+            StringBuilder literal = new StringBuilder('"')
+            for (char c : value.toCharArray()) {
+                if (c == (char) '\\') literal.append('\\\\')
+                else if (c == (char) '"') literal.append('\\"')
+                else if (c == (char) '\n') literal.append('\\n')
+                else if (c == (char) '\r') literal.append('\\r')
+                else if (c == (char) '\t') literal.append('\\t')
+                // octal, not a unicode escape: javac turns the unicode escape of a line end into a real one, inside a literal too
+                else if (c < (char) ' ' || c == (char) 0x7f) literal.append(String.format('\\%03o', (int) c))
+                else literal.append(c)
+            }
+            return literal.append('"').toString()
         }
         buildConfigField("String", "OPENAI_API_KEY", localProperty('OPENAI_API_KEY'))
         buildConfigField("String", "DEEPGRAM_API_KEY", localProperty('DEEPGRAM_API_KEY'))
