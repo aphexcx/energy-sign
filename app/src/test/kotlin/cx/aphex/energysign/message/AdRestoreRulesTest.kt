@@ -232,6 +232,17 @@ class AdRestoreRulesTest {
         assertTrue(ads.all { it is Message.NowPlayingTrackMessage })
     }
 
+    @Test
+    fun `the place of the track may have no str, but a str of the wrong kind refuses the list`() {
+        assertEquals(1, load("""[{"type":"T"}]""").size)
+        assertEquals(1, load("""[{"type":"T","str":""}]""").size)
+
+        listOf("null", "{}", "[]", "7", "true", """{"a":"b"}""").forEach { wrong ->
+            val e = assertFailsWith<AdFileException>("str = $wrong") { load("""[{"type":"T","str":$wrong}]""") }
+            assertTrue("\"str\"" in e.message!! && "ad 1" in e.message!!, e.message)
+        }
+    }
+
     // ---- strict JSON, and all of it
 
     @Test

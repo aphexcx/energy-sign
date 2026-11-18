@@ -98,8 +98,12 @@ object AdCodec {
             }
 
             // The place of the now-playing track. An ad line gives it no text and none is ever
-            // sent from here (the track is put in its place), so a saved text is not kept.
-            "T" -> NowPlayingTrackMessage("")
+            // sent from here (the track is put in its place), so a saved text is not kept. It
+            // may be absent; when it is there it must be a text, like every other value.
+            "T" -> {
+                if (ad.has("str")) ad.text("str")
+                NowPlayingTrackMessage("")
+            }
 
             "I" -> {
                 val colour = ad.colour()

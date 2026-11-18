@@ -65,7 +65,7 @@ class MessageManager(
     private val filesDir: File = context.filesDir
 
     /** The ads and the ad period as they were last set, kept across a restart. */
-    private val adStore = AdStore(filesDir)
+    private val adStore = AdStore(filesDir, warn = { logW(it) })
 
     /*
      * THREADS. ONE thread owns everything in here, the lists of MessageRepository and the input
@@ -619,17 +619,25 @@ class MessageManager(
     }
 
     /** Returns when the owner has taken the track in. */
-    fun processNowPlayingTrack(track: BeatLinkTrack): Unit = changeAndWait {
-        if (track.isEmpty) {
+    fun processNowPlayingTrack(track: BeatLinkTrack) {
+        // Made here, on the caller's thread: fitting a long title to the sign serialises it more
+        // than once, and the owner has the sign to answer. The owner only stores the result.
+        val line = if (track.isEmpty) null else AdRules.nowPlaying(track.artist, track.title, note = { logW(it) })
+        changeAndWait { takeInTrack(track, line) }
+    }
+
+    /** [line] is the track's line for the sign, made by the caller; null for an empty track. Owner only. */
+    private fun takeInTrack(track: BeatLinkTrack, line: Message.NowPlayingTrackMessage?) {
+        if (line == null) {
             nowPlayingTrack = null
             pushAdvertisements()
         } else {
             if (track !in playedTracks) {
-                nowPlayingTrack = AdRules.nowPlaying(track.artist, track.title, note = { logW(it) })
+                nowPlayingTrack = line
                 msgRepo.oneTimeMessages.removeIf { it is NowPlayingAnnouncement || it is Message.NowPlayingTrackMessage }
 
                 msgRepo.enqueueOneTimeMessage(NowPlayingAnnouncement)
-                msgRepo.enqueueOneTimeMessage(nowPlayingTrack!!)
+                msgRepo.enqueueOneTimeMessage(line)
                 msgRepo.enqueueOneTimeMessage(Message.Starfield())
 
 

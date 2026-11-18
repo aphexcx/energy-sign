@@ -478,7 +478,7 @@ class MessageManagerOwnerTest {
         app.saverRuns()
 
         assertEquals(listOf("HELLO"), AdCodec.decode(app.adsFile.readText()).map { it.str })
-        assertTrue(app.home.list()!!.none { it.endsWith(".new") })
+        assertEquals(listOf("ads.json"), app.home.list()!!.filter { it.startsWith("ads") }, "nothing left beside it")
     }
 
     @Test
@@ -734,6 +734,65 @@ class MessageManagerOwnerTest {
         app.unsaved.removeAt(0).run()
         assertEquals("6", app.periodFile.readText())
         assertEquals(listOf("ONE", "TWO", "THREE"), File(app.home, "signstrings.txt").readLines())
+    }
+
+    @Test
+    fun `the line of a track is made, and cut to fit, by the thread that brings the track, not by the owner`() {
+        // The cut is logged from inside the fitting, so the thread that logs it is the thread that did it.
+        val app = App(newFilesDir())
+        val cutBy = java.util.concurrent.CopyOnWriteArrayList<String>()
+        // (only this test's track, "DJ - BBB...": the log also hands a new listener its last line)
+        val watching = cx.aphex.energysign.ScreenLogger.logLines.subscribe { line ->
+            if ("Ad cut from" in line && "DJ - BBBB" in line) cutBy += Thread.currentThread().name
+        }
+        try {
+            val call = FutureTask(Callable {
+                app.manager.processNowPlayingTrack(BeatLinkTrack(id = 7, title = "B".repeat(750), artist = "DJ"))
+            })
+            Thread(call, "beatlink").start()
+            // the owner (this thread) has not run anything yet, and the line is made already
+            val deadline = System.currentTimeMillis() + 5_000
+            while (cutBy.isEmpty() && System.currentTimeMillis() < deadline) Thread.sleep(1)
+            assertEquals(listOf("beatlink"), cutBy.toList())
+            assertFalse(call.isDone, "the caller still waits for the owner to take the track in")
+            assertEquals(0, app.repo.oneTimeMessages.size)
+
+            while (!call.isDone) {
+                ownerRuns()
+                Thread.sleep(1)
+            }
+            call.get()
+        } finally {
+            watching.dispose()
+        }
+
+        assertEquals(listOf("beatlink"), cutBy.toList(), "the owner made nothing a second time")
+        val track = app.repo.oneTimeMessages.filterIsInstance<Message.NowPlayingTrackMessage>().single()
+        assertEquals(500, SignResponder.GSON.toJson(track).toByteArray(Charsets.UTF_8).size)
+        // and the ad round takes that same message: nothing is fitted again for it
+        app.phone("!$A\n\uD83D\uDEE4")
+        ownerRuns()
+        assertTrue(app.repo.oneTimeMessages.filterIsInstance<Message.NowPlayingTrackMessage>().all { it === track })
+        assertEquals(listOf("beatlink"), cutBy.toList())
+    }
+
+    @Test
+    fun `an empty track from the caller's thread ends the now-playing line`() {
+        val app = App(newFilesDir())
+        app.phone("!$A\n\uD83D\uDEE4\n${O}AD")
+        ownerRuns()
+        app.repo.oneTimeMessages.clear()
+
+        val playing = FutureTask(Callable { app.manager.processNowPlayingTrack(BeatLinkTrack(id = 8, title = "Song", artist = "DJ")) })
+        Thread(playing, "beatlink").start()
+        while (!playing.isDone) { ownerRuns(); Thread.sleep(1) }
+        app.repo.oneTimeMessages.clear()
+        val stopped = FutureTask(Callable { app.manager.processNowPlayingTrack(BeatLinkTrack(id = 0, title = "", artist = "", isEmpty = true)) })
+        Thread(stopped, "beatlink").start()
+        while (!stopped.isDone) { ownerRuns(); Thread.sleep(1) }
+
+        // the ad round an empty track asks for has no track in it any more
+        assertEquals(listOf("AD"), app.repo.oneTimeMessages.map { it.str })
     }
 
     /** One request of the sign, answered by the real responder: the text that goes out on the wire. */

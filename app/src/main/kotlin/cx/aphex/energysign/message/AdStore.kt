@@ -1,21 +1,25 @@
 package cx.aphex.energysign.message
 
+import cx.aphex.energysign.replaceContent
+import cx.aphex.energysign.syncDirectory
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 
 /**
  * What the app keeps about ads across a restart, in [dir] (the app's files directory):
  * the ad list in `ads.json` ([AdCodec]) and, beside it, the ad period in `ad-period.txt`.
  *
  * Loading never writes: a file that cannot be read stays as it is until the next save.
+ * Saving is the app's one write-beside, sync, rename, sync-the-directory sequence ([replaceContent]).
  */
 class AdStore(
     private val dir: File,
-    /** Makes what was written to [FileOutputStream] reach the disk. A test puts itself in here to see when it is asked for. */
-    private val toDisk: (FileOutputStream) -> Unit = { it.fd.sync() },
+    /** Gets one line when a save is in place but its directory could not be forced to storage. */
+    private val warn: (String) -> Unit = {},
+    /** The two steps that force a save to storage. A test puts itself in here to see when each is asked for. */
+    private val syncData: (FileOutputStream) -> Unit = { it.fd.sync() },
+    private val syncDirectory: (File) -> Unit = { it.syncDirectory() },
 ) {
 
     /** What [loadAds] found. */
@@ -63,18 +67,8 @@ class AdStore(
         periodFile.replaceWith(period.toString())
     }
 
-    /**
-     * Writes [text] to a file beside this one, to the disk, then moves it into place, so that a
-     * power cut during the write leaves the old file and never half of the new one.
-     */
-    private fun File.replaceWith(text: String) {
-        val fresh = File(parentFile, "$name.new")
-        FileOutputStream(fresh).use { out ->
-            out.write(text.toByteArray())
-            toDisk(out)
-        }
-        Files.move(fresh.toPath(), toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
-    }
+    private fun File.replaceWith(text: String) =
+        replaceContent(syncData = syncData, syncDirectory = syncDirectory, warn = warn) { it.write(text.toByteArray()) }
 
     companion object {
         const val ADS_FILE_NAME = "ads.json"

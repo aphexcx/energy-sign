@@ -58,47 +58,94 @@ class AdStoreTest {
         assertEquals(emptyList(), saved.ads)
     }
 
+    /** What is where at one moment of a save: the file beside (null when there is none) and the file in place. */
+    private fun files(): String = "beside " + File(dir, "ads.json.tmp").let { if (it.exists()) it.readText() else null } +
+            ", in place " + adsFile.readText()
+
     @Test
-    fun `a new list is sent to the disk while the old one is still in place, and only then replaces it`() {
+    fun `a save is three steps in this order, the data to storage, the rename, the directory to storage`() {
         AdStore(dir).saveAds(someAds)
         val old = adsFile.readText()
-        val fresh = listOf<Message>(IconInvaders.EDC(0x04ff19))
-        val atTheSync = mutableListOf<String>()
-        val store = AdStore(dir, toDisk = { out ->
-            atTheSync += "beside: " + File(dir, "ads.json.new").readText()
-            atTheSync += "in place: " + adsFile.readText()
-            out.fd.sync()
-        })
+        val fresh = AdCodec.encode(listOf<Message>(IconInvaders.EDC(0x04ff19)))
+        val steps = mutableListOf<String>()
+        val store = AdStore(
+            dir,
+            syncData = { out -> steps += "data: " + files(); out.fd.sync() },
+            syncDirectory = { directory -> steps += "directory ${directory.name == dir.name}: " + files() },
+        )
 
-        store.saveAds(fresh)
+        store.saveAds(listOf(IconInvaders.EDC(0x04ff19)))
 
-        assertEquals(listOf("beside: " + AdCodec.encode(fresh), "in place: $old"), atTheSync)
-        assertEquals(AdCodec.encode(fresh), adsFile.readText())
+        assertEquals(
+            listOf(
+                // the new list is whole beside the old one, which is still in place
+                "data: beside $fresh, in place $old",
+                // the new list is in place and nothing is beside it: the rename has been done
+                "directory true: beside null, in place $fresh",
+            ),
+            steps
+        )
         assertEquals(listOf("ads.json"), dir.list()!!.toList())
     }
 
     @Test
-    fun `every save is sent to the disk once, the period too`() {
-        var syncs = 0
-        val store = AdStore(dir, toDisk = { out -> syncs++; out.fd.sync() })
+    fun `every save takes both steps once, the period too`() {
+        var data = 0
+        var directory = 0
+        val store = AdStore(dir, syncData = { out -> data++; out.fd.sync() }, syncDirectory = { directory++ })
 
         store.saveAds(someAds)
-        assertEquals(1, syncs)
+        assertEquals(1 to 1, data to directory)
         store.saveAds(emptyList())
-        assertEquals(2, syncs)
+        assertEquals(2 to 2, data to directory)
         store.savePeriod(4)
-        assertEquals(3, syncs)
+        assertEquals(3 to 3, data to directory)
     }
 
     @Test
-    fun `when the disk refuses the new list, the old one stays in place`() {
+    fun `when the data cannot be forced to storage the save fails and the old list stays in place`() {
         AdStore(dir).saveAds(someAds)
         val old = adsFile.readText()
-        val store = AdStore(dir, toDisk = { throw java.io.IOException("no space left") })
+        var directorySynced = false
+        val store = AdStore(
+            dir,
+            syncData = { throw java.io.IOException("no space left") },
+            syncDirectory = { directorySynced = true },
+        )
 
         assertFailsWith<java.io.IOException> { store.saveAds(emptyList()) }
 
         assertEquals(old, adsFile.readText())
+        assertFalse(directorySynced, "nothing was renamed, so there is nothing to force")
+        assertEquals(wire(someAds), wire(assertIs<AdStore.SavedAds.Ads>(AdStore(dir).loadAds()).ads))
+    }
+
+    @Test
+    fun `when the directory cannot be forced to storage the save is done all the same, and that is reported`() {
+        AdStore(dir).saveAds(someAds)
+        val warnings = mutableListOf<String>()
+        val store = AdStore(dir, warn = { warnings += it }, syncDirectory = { throw java.io.IOException("not today") })
+
+        store.saveAds(emptyList()) // does not throw
+        store.savePeriod(7)
+
+        assertEquals("[]", adsFile.readText())
+        assertEquals("7", periodFile.readText())
+        assertEquals(emptyList(), assertIs<AdStore.SavedAds.Ads>(AdStore(dir).loadAds()).ads)
+        assertEquals(setOf("ads.json", "ad-period.txt"), dir.list()!!.toSet(), "the new files are in place, nothing beside them")
+        assertEquals(2, warnings.size, warnings.toString())
+        assertContains(warnings[0], "ads.json")
+        assertContains(warnings[0], "not today")
+        assertContains(warnings[1], "ad-period.txt")
+    }
+
+    @Test
+    fun `the real steps work on a real directory`() {
+        val warnings = mutableListOf<String>()
+
+        AdStore(dir, warn = { warnings += it }).saveAds(someAds)
+
+        assertEquals(emptyList(), warnings, "the directory of this machine can be forced to storage")
         assertEquals(wire(someAds), wire(assertIs<AdStore.SavedAds.Ads>(AdStore(dir).loadAds()).ads))
     }
 
