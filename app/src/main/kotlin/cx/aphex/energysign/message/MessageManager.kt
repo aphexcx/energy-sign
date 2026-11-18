@@ -48,6 +48,7 @@ class MessageManager(
     private val currentIdx = atomic<Int>(0)
 
     // Message type state mess **
+    @Volatile
     private var isInChooserMode: Boolean = false
 
     private var isPaused: Boolean = false
@@ -75,6 +76,27 @@ class MessageManager(
 
     private val gptViewModel: GPTViewModel by inject()
     private val keyboardManager = KeyboardManager
+
+    /*
+     * THREADS. The sign link thread asks for messages (getNextMessage); Bluetooth, the BeatLink
+     * server and the main thread (keyboard, GPT answers) change them. Every entry point takes
+     * this object's lock, so each runs whole, one at a time. Lock order: this, then
+     * KeyboardManager, then the message lists. Nothing called under the lock waits for another
+     * thread, and file writes under it are short and rare (a new or deleted message).
+     */
+
+    /**
+     * Called once whenever what the chooser should show has changed (entering chooser mode,
+     * another message or count, leaving it): the sign link then pushes it to the sign. Called
+     * under this object's lock from whichever thread made the change, so it must only signal.
+     */
+    @Volatile
+    var onChooserChanged: () -> Unit = {}
+
+    private val chooserWatch = ChooserChangeWatch(view = { chooserMessageOrNull() }) { onChooserChanged() }
+
+    /** Runs [change], which may alter the messages, the index or the mode, under the lock and the watch. */
+    private fun <T> changing(change: () -> T): T = synchronized(this) { chooserWatch.watch(change) }
 
 
     init {
@@ -136,23 +158,27 @@ class MessageManager(
         }
 
         gptViewModel.GPTError.observeForever {
-            logW("GPT Reply Error: ${it.message}")
-            togglePersistentThinkingMessage(false)
-            msgRepo.pushOneTimeMessages(
-                Message.ColorMessage.ChonkySlide("NO", context.getColor(R.color.instahandle), delayMs = 650),
-                Message.ColorMessage.ChonkySlide("NO BARS", context.getColor(R.color.instahandle), delayMs = 650),
-                Message.ColorMessage.ChonkySlide("TRYING", context.getColor(R.color.instahandle), delayMs = 400),
-                Message.ColorMessage.ChonkySlide("AGAIN", context.getColor(R.color.instahandle), delayMs = 400),
-                Message.ColorMessage.ChonkySlide("LATER!", context.getColor(R.color.instahandle), delayMs = 400),
-                Message.Starfield()
-            )
+            synchronized(this) {
+                logW("GPT Reply Error: ${it.message}")
+                togglePersistentThinkingMessage(false)
+                msgRepo.pushOneTimeMessages(
+                    Message.ColorMessage.ChonkySlide("NO", context.getColor(R.color.instahandle), delayMs = 650),
+                    Message.ColorMessage.ChonkySlide("NO BARS", context.getColor(R.color.instahandle), delayMs = 650),
+                    Message.ColorMessage.ChonkySlide("TRYING", context.getColor(R.color.instahandle), delayMs = 400),
+                    Message.ColorMessage.ChonkySlide("AGAIN", context.getColor(R.color.instahandle), delayMs = 400),
+                    Message.ColorMessage.ChonkySlide("LATER!", context.getColor(R.color.instahandle), delayMs = 400),
+                    Message.Starfield()
+                )
+            }
         }
     }
 
     private var usrMsgCount: Int = 0
 
     /** Pushes a new user message onto the top of the messages list. */
-    fun processNewUserMessage(str: String, isQuery: Boolean = false) {
+    fun processNewUserMessage(str: String, isQuery: Boolean = false): Unit = changing { addNewUserMessage(str, isQuery) }
+
+    private fun addNewUserMessage(str: String, isQuery: Boolean) {
         currentIdx.update { 0 }
 
 //        String(value).split("++").filter { it.isNotBlank() }.reversed().forEach {
@@ -200,6 +226,8 @@ class MessageManager(
         }
     }
 
+    /** The message to send to the sign now. Called on the sign link thread, for every `~` and every push. */
+    @Synchronized
     fun getNextMessage(): Message {
         if (isInChooserMode) {
             return getNextChooserMessage()
@@ -331,7 +359,13 @@ class MessageManager(
      * about five times a second in chooser mode and every poll evaluates this without sending it.
      */
     private fun getNextChooserMessage(): Message.Chooser =
-        ChooserProtocol.chooserMessage(msgRepo.marqueeMessages, currentIdx.value)
+        // the list's own lock: its size and the element are read as one
+        synchronized(msgRepo.marqueeMessages) {
+            ChooserProtocol.chooserMessage(msgRepo.marqueeMessages, currentIdx.value)
+        }
+
+    /** What the chooser shows now, null outside chooser mode. No side effects. */
+    private fun chooserMessageOrNull(): Message.Chooser? = if (isInChooserMode) getNextChooserMessage() else null
 
     private fun getIdxAndAdvance(): Int {
         return currentIdx.getAndUpdate {
@@ -607,7 +641,7 @@ class MessageManager(
     }
 
 
-    fun processNewBytes(value: ByteArray) {
+    fun processNewBytes(value: ByteArray): Unit = changing {
         if (String(value).startsWith("!")) {
             processUartCommand(value)
         } else {
@@ -615,6 +649,7 @@ class MessageManager(
         }
     }
 
+    @Synchronized
     fun processNowPlayingTrack(track: BeatLinkTrack) {
         if (track.isEmpty) {
             nowPlayingTrack = null
@@ -640,7 +675,9 @@ class MessageManager(
     }
 
     /* For replies generated by externally running models e.g. Llama running on my laptop */
-    fun onNewPostedGPTReply(postedGptAnswer: PostedGptAnswer) {
+    fun onNewPostedGPTReply(postedGptAnswer: PostedGptAnswer): Unit = changing { insertPostedGPTReply(postedGptAnswer) }
+
+    private fun insertPostedGPTReply(postedGptAnswer: PostedGptAnswer) {
         logD("Processing Posted GPT Answer: $postedGptAnswer")
         togglePersistentThinkingMessage(false)
         if (postedGptAnswer.answer.isBlank()) {
@@ -651,7 +688,9 @@ class MessageManager(
         msgRepo.saveMarqueeMessages(context)
     }
 
-    private fun processGPTResponse(gptAnswerResponse: GptAnswerResponse) {
+    private fun processGPTResponse(gptAnswerResponse: GptAnswerResponse): Unit = changing { insertGPTResponse(gptAnswerResponse) }
+
+    private fun insertGPTResponse(gptAnswerResponse: GptAnswerResponse) {
         logD("Processing GPT Response: $gptAnswerResponse")
         togglePersistentThinkingMessage(false)
         if (gptAnswerResponse.answer.isBlank()) {
@@ -662,6 +701,7 @@ class MessageManager(
         msgRepo.saveMarqueeMessages(context)
     }
 
+    @Synchronized
     fun togglePersistentThinkingMessage(thinking: Boolean) {
         if (thinking) {
 //            showCaretThink = true

@@ -10,8 +10,9 @@ object ScreenLogger {
 
     private val timeFormat = SimpleDateFormat("HH:mm:ss")
 
+    /** From any thread (the sign link thread logs too); SimpleDateFormat is not thread-safe. */
     fun log(s: String) {
-        val timestamp = timeFormat.format(Date(System.currentTimeMillis()))
+        val timestamp = synchronized(timeFormat) { timeFormat.format(Date(System.currentTimeMillis())) }
 
         logLines.accept("$timestamp $s")
     }

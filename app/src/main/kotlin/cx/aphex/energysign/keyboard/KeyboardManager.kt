@@ -12,6 +12,11 @@ import kotlinx.coroutines.launch
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 
+/*
+ * THREADS. Keys arrive on the main thread; the sign link thread asks for the echo
+ * (handleKeyboardInput, from MessageManager.getNextMessage). Every function that touches the
+ * input state takes this object's lock.
+ */
 object KeyboardManager : KoinComponent {
     private val msgRepo: MessageRepository by inject()
 
@@ -24,6 +29,7 @@ object KeyboardManager : KoinComponent {
     private var showAsWarning: Boolean = false
 
     private var isInKeyboardInputMode: Boolean = false
+    @Volatile
     private var isMessageSubmitted: Boolean = false
 
     private var keyboardStringBuilder: StringBuilder = StringBuilder()
@@ -33,6 +39,7 @@ object KeyboardManager : KoinComponent {
         _newSubmittedKeyboardMessage.emit(input)
     }
 
+    @Synchronized
     fun processNewKeyboardKey(key: Char) {
         //TODO key.toInt() needed here?
         if (key.code == 0) {
@@ -49,6 +56,7 @@ object KeyboardManager : KoinComponent {
         keyboardStringBuilder.append(key)
     }
 
+    @Synchronized
     fun submitKeyboardInput() {
         val totalKeyboardInputTimeElapsed = System.currentTimeMillis() - keyboardInputStartedAtMs
 //        if (keyboardStringBuilder.length < 4) {
@@ -64,7 +72,7 @@ object KeyboardManager : KoinComponent {
         } else {
             if (totalKeyboardInputTimeElapsed > MINIMUM_INPUT_ENTRY_PERIOD) {
                 CoroutineScope(Dispatchers.Main).launch {
-                    val newSubmission = keyboardStringBuilder.toString()
+                    val newSubmission = synchronized(this@KeyboardManager) { keyboardStringBuilder.toString() }
                     notifyNewKeyboardString(newSubmission)
                     endKeyboardInput()
                 }
@@ -72,12 +80,14 @@ object KeyboardManager : KoinComponent {
         }
     }
 
+    @Synchronized
     private fun endKeyboardInput() {
         lastKeyboardInputReceivedAtMs = -1
         keyboardStringBuilder.clear()
         isInKeyboardInputMode = false
     }
 
+    @Synchronized
     fun deleteKey() {
         if (keyboardStringBuilder.isNotEmpty()) {
             lastKeyboardInputReceivedAtMs = System.currentTimeMillis()
@@ -86,6 +96,7 @@ object KeyboardManager : KoinComponent {
     }
 
 
+    @Synchronized
     fun escapeKey() {
         //TODO fix bug -- pressing esc key causes type flashy error to be displayed
 
@@ -102,6 +113,7 @@ object KeyboardManager : KoinComponent {
         }
     }
 
+    @Synchronized
     fun handleKeyboardInput(): Message.KeyboardEcho? {
         if (isInKeyboardInputMode) {
 

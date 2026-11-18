@@ -41,6 +41,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
 
         dnsSdAnnouncer = DnsSdAnnouncer(application.applicationContext)
         dnsSdAnnouncer.start()
+
+        // MessageManager is built by its first use, and that must be here on the main thread
+        // (it observes LiveData). From start() on, the sign link thread asks it for messages.
+        messageManager.onChooserChanged = energySignUartManager::requestPush
+        energySignUartManager.start()
     }
 
     override fun onCleared() {
@@ -54,11 +59,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
      * The sign asked for something: [count] request bytes were read into [buffer].
      * `~` gets the next message; a chooser poll (`?`) in chooser mode gets the checksum of the
      * current chooser message, which is nothing new for the screen.
+     * Called on the sign link thread.
      */
     fun onSignRequest(buffer: ByteArray, count: Int) {
         signResponder.onRequest(buffer, count)?.let { sentMessage ->
-            currentString.value = sentMessage.str
+            currentString.postValue(sentMessage.str)
         }
+    }
+
+    /**
+     * What the chooser should show has changed and the sign is listening (the link has pulled
+     * the line low and waited): send it the message it would get for `~` now.
+     * Called on the sign link thread.
+     */
+    fun onSignPush() {
+        currentString.postValue(signResponder.push().str)
     }
 
     fun updateAdvertiseStatus(status: String) {

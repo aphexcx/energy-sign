@@ -1,8 +1,12 @@
 package cx.aphex.energysign.uart
 
+import android.os.Debug
+import android.os.Handler
+import android.os.Looper
+import android.os.Process
+import android.util.Log
 import com.google.android.things.pio.PeripheralManager
 import com.google.android.things.pio.UartDevice
-import com.google.android.things.pio.UartDeviceCallback
 import cx.aphex.energysign.MainViewModel
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logE
@@ -11,25 +15,95 @@ import cx.aphex.energysign.message.ChooserProtocol
 import cx.aphex.energysign.message.SignRequest
 import io.reactivex.rxjava3.subjects.BehaviorSubject
 import java.io.IOException
+import java.lang.reflect.Method
 
-class EnergySignUartManager(val viewModel: MainViewModel) : UartDeviceCallback {
-    private val uartDevice: UartDevice
+/**
+ * The UART to the sign. It is opened here; from [start] on, the [SignLink] thread is the only
+ * one that reads or writes it (see [SignLink] for why this is a thread and not the UART callback).
+ *
+ * Two switches for measuring on the device, both without a rebuild:
+ *  - the timing log: `adb shell setprop log.tag.SignUart VERBOSE` (see [UartTimingLog])
+ *  - how a push gets the sign's attention: `adb shell setprop debug.energysign.attn break|zeros|off`
+ *    (read at every push; see [ATTN_PROPERTY])
+ */
+class EnergySignUartManager(val viewModel: MainViewModel) {
+    private val uartDevice: UartDevice = configureUart()
 
     val receivedBytes: BehaviorSubject<ByteArray> = BehaviorSubject.createDefault(byteArrayOf())
 //    val receivedBytes: Observable<ByteArray> =  energySignBluetoothGattServer.receivedBytes
 
-    init {
-        // UART
-        uartDevice = configureUart()
-        logD("UART device $UART_DEVICE_NAME opened and configured!")
+    private val mainHandler = Handler(Looper.getMainLooper())
 
-        logD("Uart device $UART_DEVICE_NAME callback registered")
-        uartDevice.registerUartDeviceCallback(this)
+    private val timing = UartTimingLog(
+        isEnabled = { Log.isLoggable(UartTimingLog.TAG, Log.VERBOSE) },
+        emit = { line -> Log.d(UartTimingLog.TAG, line) },
+        threadCpuNanos = { Debug.threadCpuTimeNanos() },
+    )
+
+    /** Set when sendBreak has failed once: the 0x00 run is used from then on. Link thread only. */
+    private var breakUnsupported = false
+
+    private val wire = object : SignWire {
+        override fun read(buffer: ByteArray, length: Int): Int = uartDevice.read(buffer, length)
+
+        override fun attention(millis: Int) {
+            if (attentionMode() != ATTN_ZEROS && !breakUnsupported) {
+                try {
+                    uartDevice.sendBreak(millis)
+                    return
+                } catch (e: IOException) {
+                    breakUnsupported = true
+                    logW("sendBreak($millis) failed on $UART_DEVICE_NAME, using a run of 0x00 from now on: $e")
+                }
+            }
+            // A 0x00 byte is start bit + 8 data bits LOW, then the stop bit HIGH: LOW nine tenths of the time
+            val zeros = ByteArray((millis * UART_BAUD_RATE + 9_999) / 10_000)
+            val wrote = uartDevice.write(zeros, zeros.size)
+            if (wrote != zeros.size) {
+                logW("Attention: wrote $wrote of ${zeros.size} zero bytes to $UART_DEVICE_NAME")
+            }
+        }
+    }
+
+    private val link = SignLink(
+        wire = wire,
+        onRequest = ::onRequest,
+        onPush = { viewModel.onSignPush() },
+        timing = timing,
+        onError = { what, error -> logW("Sign link: $what failed on $UART_DEVICE_NAME: $error") },
+    )
+
+    private var linkThread: Thread? = null
+
+    init {
+        logD("UART device $UART_DEVICE_NAME opened and configured!")
+    }
+
+    /** Starts the sign link thread. Everything it calls into must exist by now. */
+    fun start() {
+        linkThread = Thread({
+            try {
+                // Above the main thread, which draws the on-screen log: a request must not wait for a frame
+                Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY)
+            } catch (e: Exception) {
+                logW("Sign link: could not raise the thread priority: $e")
+            }
+            link.run()
+        }, LINK_THREAD_NAME).apply {
+            isDaemon = true
+            start()
+        }
+        logD("Uart device $UART_DEVICE_NAME: sign link thread started")
     }
 
     fun stop() {
-        logD("Uart device $UART_DEVICE_NAME callback unregistered")
-        uartDevice.unregisterUartDeviceCallback(this)
+        link.stop()
+        try {
+            linkThread?.join(STOP_JOIN_MS)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+        logD("Uart device $UART_DEVICE_NAME: sign link thread stopped")
 
         try {
             uartDevice.close()
@@ -39,32 +113,33 @@ class EnergySignUartManager(val viewModel: MainViewModel) : UartDeviceCallback {
     }
 
     /**
+     * What the chooser should show has changed: have it pushed to the sign (contract VERSION 3).
+     * From any thread; returns at once.
+     */
+    fun requestPush() {
+        if (attentionMode() != ATTN_OFF) {
+            link.requestPush()
+        }
+    }
+
+    /**
+     * One request from the sign, on the link thread.
      * When
      * new string alert -> display new string alert and write next string from list
      * else -> write next string from list
      */
-    override fun onUartDeviceDataAvailable(uart: UartDevice): Boolean {
-        // Read available data from the UART device
-        try {
-            val bytes = ByteArray(ARDUINO_RECEVIED_STRING_LEN)
-            val count = uart.read(bytes, bytes.size)
-            // A chooser poll arrives about five times a second: keep it out of the log.
-            if (ChooserProtocol.classifyRequest(bytes, count) != SignRequest.CHOOSER_POLL) {
-                logD("Read $count bytes from ${uart.name}: [${String(bytes, 0, count.coerceIn(0, bytes.size))}]")
-            }
-            viewModel.onSignRequest(bytes, count)
-        } catch (e: IOException) {
-            logW("Unable to read from UART device ${uart.name}: $e")
+    private fun onRequest(buffer: ByteArray, count: Int) {
+        val nowNs = System.nanoTime()
+        if (timing.enabled(nowNs)) {
+            // How long would this request have waited on the main thread, where it used to be handled?
+            mainHandler.post { timing.mainLag(nowNs, System.nanoTime()) }
         }
-
-        // Continue listening for more interrupts
-        return true
+        // A chooser poll arrives about five times a second: keep it out of the log.
+        if (ChooserProtocol.classifyRequest(buffer, count) != SignRequest.CHOOSER_POLL) {
+            logD("Read $count bytes from $UART_DEVICE_NAME: [${String(buffer, 0, count.coerceIn(0, buffer.size))}]")
+        }
+        viewModel.onSignRequest(buffer, count)
     }
-
-    override fun onUartDeviceError(uart: UartDevice, error: Int) {
-        logW("$uart: Error event $error")
-    }
-
 
     private fun configureUart(): UartDevice {
         try {
@@ -90,42 +165,71 @@ class EnergySignUartManager(val viewModel: MainViewModel) : UartDeviceCallback {
         }
     }
 
-    /** A short write is logged even when [log] is off. */
-    private fun UartDevice.write(buffer: ByteArray, log: Boolean) {
-        try {
-            if (buffer.size > MAX_ARDUINO_JSON_SIZE) {
-                logE("JSON string (${buffer.size}) is probably bigger than the maximum size the arduino will accept ($MAX_ARDUINO_JSON_SIZE)! ")
-            }
-
-//            val finalBuffer = buffer + '\r'.toByte()
-//            val count = write(finalBuffer, finalBuffer.size)
-            val count = write(buffer, buffer.size)
-            if (log || count != buffer.size) {
-                logD("Wrote $count of ${buffer.size} bytes to $name")
-            }
-        } catch (e: Exception) {
-            logW("Unable to write to UART device $name: $e")
-        }
-    }
-
-    /** Writes [value] to the sign. [log] is off for chooser poll reports (about five a second). */
+    /**
+     * Writes [value] to the sign. [log] is off for chooser poll reports (about five a second);
+     * a short write is logged even then. Called on the sign link thread only.
+     */
     fun write(value: String, log: Boolean = true) {
         if (log) {
-            logD("Writing >${value}< to ${uartDevice.name}...")
+            logD("Writing >${value}< to $UART_DEVICE_NAME...")
         }
 
         val bytes = value.toByteArray()
 //        logD("Bytes: >${bytes.asList()}<")
+        if (bytes.size > MAX_ARDUINO_JSON_SIZE) {
+            logE("JSON string (${bytes.size}) is probably bigger than the maximum size the arduino will accept ($MAX_ARDUINO_JSON_SIZE)! ")
+        }
 
-        uartDevice.write(bytes, log)
+        try {
+            val callNs = System.nanoTime()
+            val count = uartDevice.write(bytes, bytes.size)
+            timing.tx(callNs, System.nanoTime(), count, bytes.size, isPollReport = !log)
+            if (log || count != bytes.size) {
+                logD("Wrote $count of ${bytes.size} bytes to $UART_DEVICE_NAME")
+            }
+        } catch (e: Exception) {
+            logW("Unable to write to UART device $UART_DEVICE_NAME: $e")
+        }
     }
+
+    /** [ATTN_PROPERTY] as it is set now; [ATTN_BREAK] when it is unset, unknown or unreadable. */
+    private fun attentionMode(): String =
+        try {
+            (SYSTEM_PROPERTY_GET?.invoke(null, ATTN_PROPERTY, ATTN_BREAK) as? String)
+                ?.takeIf { it == ATTN_ZEROS || it == ATTN_OFF }
+        } catch (e: Exception) {
+            null
+        } ?: ATTN_BREAK
 
     companion object {
 
         private const val UART_DEVICE_NAME: String = "UART6"
         private const val UART_BAUD_RATE: Int = 14400
-        private const val ARDUINO_RECEVIED_STRING_LEN: Int = 32
         private const val MAX_ARDUINO_JSON_SIZE: Int = 700
 
+        private const val LINK_THREAD_NAME: String = "sign-link"
+        private const val STOP_JOIN_MS: Long = 1_000
+
+        /**
+         * System property that picks how a push gets the sign's attention:
+         *  - unset or `break`: `UartDevice.sendBreak(50)`. Its documentation says only "Send a
+         *    break to the device", duration in milliseconds: whether the call waits, and whether
+         *    the platform really takes milliseconds (the Linux call underneath, tcsendbreak,
+         *    counts in tenths of a second), is for the `push` timing line to show.
+         *  - `zeros`: 50 ms worth of 0x00 bytes instead (the fallback in the contract note).
+         *  - `off`: no pushes at all, the app behaves as contract 2.1.
+         */
+        private const val ATTN_PROPERTY: String = "debug.energysign.attn"
+        private const val ATTN_BREAK: String = "break"
+        private const val ATTN_ZEROS: String = "zeros"
+        private const val ATTN_OFF: String = "off"
+
+        /** `android.os.SystemProperties.get(key, default)`: not in the SDK, present on the device. */
+        private val SYSTEM_PROPERTY_GET: Method? =
+            try {
+                Class.forName("android.os.SystemProperties").getMethod("get", String::class.java, String::class.java)
+            } catch (e: Exception) {
+                null
+            }
     }
 }
