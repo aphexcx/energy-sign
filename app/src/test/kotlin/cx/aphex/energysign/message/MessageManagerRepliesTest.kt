@@ -5,7 +5,7 @@ import android.content.ContextWrapper
 import cx.aphex.energysign.ai.AIReplyResult
 import cx.aphex.energysign.ai.AIReplySource
 import cx.aphex.energysign.ai.NoReplyReason
-import cx.aphex.energysign.gpt.PostedGptAnswer
+import cx.aphex.energysign.ai.PostedAIAnswer
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
@@ -94,10 +94,10 @@ class MessageManagerRepliesTest {
     }
 
     /** Somebody types a message with the word in it; the owner takes it in. */
-    private fun ask(text: String = "hey ravegpt is the bass loud enough"): Message.Marquee.GPTQuery {
+    private fun ask(text: String = "hey ravegpt is the bass loud enough"): Message.Marquee.AIQuery {
         manager.processNewUserMessage(text)
         ownerRuns()
-        return assertIs<Message.Marquee.GPTQuery>(repo.marqueeMessages.first())
+        return assertIs<Message.Marquee.AIQuery>(repo.marqueeMessages.first())
     }
 
     /** What the sign is given next, as the link thread asks for it. */
@@ -109,7 +109,7 @@ class MessageManagerRepliesTest {
         error("no stored message came")
     }
 
-    private fun thinkingQueued(): Boolean = repo.oneTimeMessages.any { it is Message.ColorMessage.GPTThinking }
+    private fun thinkingQueued(): Boolean = repo.oneTimeMessages.any { it is Message.ColorMessage.AIThinking }
 
     private fun stored(): List<String> = repo.marqueeMessages.map { "${it.javaClass.simpleName}:${it.str}" }
 
@@ -122,7 +122,7 @@ class MessageManagerRepliesTest {
 
         assertEquals(query, untilStored())
         assertEquals(listOf(query.str), replies.asked.map { it.text })
-        repeat(6) { assertIs<Message.ColorMessage.GPTThinking>(next()) }
+        repeat(6) { assertIs<Message.ColorMessage.AIThinking>(next()) }
         assertEquals(1, replies.asked.size)
     }
 
@@ -136,10 +136,10 @@ class MessageManagerRepliesTest {
 
         replies.asked.single().answer(AIReplyResult.Reply("Loud enough."))
 
-        assertEquals("GPTQuery:${query.str}", stored().first(), "the other thread only posted")
+        assertEquals("AIQuery:${query.str}", stored().first(), "the other thread only posted")
         assertTrue(thinkingQueued())
         ownerRuns()
-        assertEquals(listOf("User:${query.str}", "GPTReply:LOUD ENOUGH.", "User:NEWEST", "User:MIDDLE", "User:OLDEST"), stored())
+        assertEquals(listOf("User:${query.str}", "AIReply:LOUD ENOUGH.", "User:NEWEST", "User:MIDDLE", "User:OLDEST"), stored())
         assertFalse(thinkingQueued(), "the notice comes down with the reply")
     }
 
@@ -165,13 +165,13 @@ class MessageManagerRepliesTest {
 
         // Two results from two threads before the owner gets to either: one event each.
         replies.asked.single().answer(AIReplyResult.Reply("Loud enough."))
-        manager.onNewPostedGPTReply(PostedGptAnswer("An answer from the laptop.", inReplyTo = "MIDDLE"))
+        manager.onNewPostedAIReply(PostedAIAnswer("An answer from the laptop.", inReplyTo = "MIDDLE"))
         ownerRuns()
 
         assertEquals(
             listOf(
-                "User:${query.str}", "GPTReply:LOUD ENOUGH.", "User:NEWEST",
-                "User:MIDDLE", "GPTReply:AN ANSWER FROM THE LAPTOP.", "User:OLDEST",
+                "User:${query.str}", "AIReply:LOUD ENOUGH.", "User:NEWEST",
+                "User:MIDDLE", "AIReply:AN ANSWER FROM THE LAPTOP.", "User:OLDEST",
             ),
             stored(),
         )
@@ -187,7 +187,7 @@ class MessageManagerRepliesTest {
         answer(AIReplyResult.Reply("Loud enough."))
         ownerRuns()
 
-        assertEquals(1, stored().count { it == "GPTReply:LOUD ENOUGH." })
+        assertEquals(1, stored().count { it == "AIReply:LOUD ENOUGH." })
     }
 
     // ---- the time limit is for the notice, not for the call (requirement b)
@@ -196,10 +196,10 @@ class MessageManagerRepliesTest {
     fun `after 30 seconds the sign goes on with its messages, and the reply is still put in when it comes`() {
         val query = ask()
         untilStored()
-        assertIs<Message.ColorMessage.GPTThinking>(next())
+        assertIs<Message.ColorMessage.AIThinking>(next())
 
         nowMs += 29_000
-        assertIs<Message.ColorMessage.GPTThinking>(next())
+        assertIs<Message.ColorMessage.AIThinking>(next())
         nowMs += 1_000
         assertEquals("NEWEST", (next() as Message.Marquee).str, "the notice is over: the next stored message")
         assertFalse(thinkingQueued())
@@ -212,8 +212,8 @@ class MessageManagerRepliesTest {
         nowMs += 35_000 // the reply of a slow first call, a minute after it was asked for
         replies.asked.single().answer(AIReplyResult.Reply("Sorry, I was loading."))
         ownerRuns()
-        assertTrue(stored().containsAll(listOf("User:${query.str}", "GPTReply:SORRY, I WAS LOADING.")), "${stored()}")
-        assertEquals(stored().indexOf("User:${query.str}") + 1, stored().indexOf("GPTReply:SORRY, I WAS LOADING."))
+        assertTrue(stored().containsAll(listOf("User:${query.str}", "AIReply:SORRY, I WAS LOADING.")), "${stored()}")
+        assertEquals(stored().indexOf("User:${query.str}") + 1, stored().indexOf("AIReply:SORRY, I WAS LOADING."))
     }
 
     // ---- a query that was deleted meanwhile
@@ -251,7 +251,7 @@ class MessageManagerRepliesTest {
     fun `a reply posted from outside into an empty list does not crash either`() {
         repo.marqueeMessages.clear()
 
-        manager.onNewPostedGPTReply(PostedGptAnswer("An answer.", inReplyTo = "nothing"))
+        manager.onNewPostedAIReply(PostedAIAnswer("An answer.", inReplyTo = "nothing"))
         ownerRuns()
 
         assertTrue(repo.marqueeMessages.isEmpty())
@@ -302,7 +302,7 @@ class MessageManagerRepliesTest {
         replies.asked.single().answer(AIReplyResult.NoReply(NoReplyReason.NETWORK))
         ownerRuns()
 
-        assertEquals("GPTQuery:${query.str}", stored().first())
+        assertEquals("AIQuery:${query.str}", stored().first())
         assertFalse(thinkingQueued())
         assertEquals(
             listOf("NO", "NO BARS", "TRYING", "AGAIN", "LATER!"),
@@ -361,16 +361,16 @@ class MessageManagerRepliesTest {
         ownerRuns()
         repeat(8) { next() }
 
-        assertFalse(repo.marqueeMessages.any { it is Message.Marquee.GPTQuery })
+        assertFalse(repo.marqueeMessages.any { it is Message.Marquee.AIQuery })
         assertTrue(replies.asked.isEmpty())
     }
 
     @Test
     fun `a reply posted from outside gets the same clean-up and the same size limit`() {
-        manager.onNewPostedGPTReply(PostedGptAnswer("line one\nline two\u000Bthree " + "word ".repeat(400), inReplyTo = "MIDDLE"))
+        manager.onNewPostedAIReply(PostedAIAnswer("line one\nline two\u000Bthree " + "word ".repeat(400), inReplyTo = "MIDDLE"))
         ownerRuns()
 
-        val reply = assertIs<Message.Marquee.GPTReply>(repo.marqueeMessages[repo.marqueeMessages.indexOfFirst { it.str == "MIDDLE" } + 1])
+        val reply = assertIs<Message.Marquee.AIReply>(repo.marqueeMessages[repo.marqueeMessages.indexOfFirst { it.str == "MIDDLE" } + 1])
         assertTrue(reply.str.startsWith("LINE ONE LINE TWO THREE WORD"), reply.str.take(40))
         assertFalse(reply.str.contains('\n') || reply.str.contains('\u000B'))
         assertTrue(SignResponder.GSON.toJson(reply.toChonkyMessage()).toByteArray().size < 700)
@@ -386,7 +386,7 @@ class MessageManagerRepliesTest {
         untilStored()
 
         assertTrue(replies.asked.isEmpty(), "nothing is sent during the warm-up")
-        assertIs<Message.ColorMessage.GPTThinking>(next())
+        assertIs<Message.ColorMessage.AIThinking>(next())
 
         nowMs += 10_000
         replies.endWarmUp() // from the warm-up's thread: it only posts
@@ -403,7 +403,7 @@ class MessageManagerRepliesTest {
         ask()
         untilStored()
         nowMs += 31_000
-        assertFalse(next() is Message.ColorMessage.GPTThinking)
+        assertFalse(next() is Message.ColorMessage.AIThinking)
 
         replies.endWarmUp()
         ownerRuns()
@@ -421,10 +421,10 @@ class MessageManagerRepliesTest {
         ownerRuns()
         nowMs += 120_000
 
-        repeat(5) { assertIs<Message.ColorMessage.GPTThinking>(next()) }
+        repeat(5) { assertIs<Message.ColorMessage.AIThinking>(next()) }
 
         manager.togglePersistentThinkingMessage(false)
         ownerRuns()
-        assertFalse(next() is Message.ColorMessage.GPTThinking)
+        assertFalse(next() is Message.ColorMessage.AIThinking)
     }
 }

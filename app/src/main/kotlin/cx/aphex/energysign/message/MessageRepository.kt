@@ -7,7 +7,7 @@ import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logE
 import cx.aphex.energysign.ext.logW
 import cx.aphex.energysign.ext.toNormalized
-import cx.aphex.energysign.gpt.PostedGptAnswer
+import cx.aphex.energysign.ai.PostedAIAnswer
 import cx.aphex.energysign.message.Message.Companion.VT
 import cx.aphex.energysign.message.MessageRepository.Companion.MAX_SIGN_STRINGS
 import cx.aphex.energysign.replaceWith
@@ -52,16 +52,16 @@ class MessageRepository(
     }
 
     /**
-     * Puts the GPT reply [answer] after [query] and makes the query a plain message. False, and
+     * Puts the AI reply [answer] after [query] and makes the query a plain message. False, and
      * nothing is changed, when the query is not in the list any more (it was deleted while its
      * reply was on the way).
      */
-    fun insertGPTReply(query: Message.Marquee.GPTQuery, answer: String): Boolean {
+    fun insertAIReply(query: Message.Marquee.AIQuery, answer: String): Boolean {
         val queryMsgIdx = marqueeMessages.indexOfFirst { it === query }
         if (queryMsgIdx < 0) return false
         marqueeMessages[queryMsgIdx] = query.toUserMessage()
         marqueeMessages.add(queryMsgIdx + 1, replyMessage(answer))
-        logD("Inserted GPT reply after messages[${queryMsgIdx}]")
+        logD("Inserted AI reply after messages[${queryMsgIdx}]")
         return true
     }
 
@@ -69,7 +69,7 @@ class MessageRepository(
      * [query] will get no reply: it stays where it is, as the plain message it was, and is not a
      * query any more. False when it is not in the list.
      */
-    fun retireQuery(query: Message.Marquee.GPTQuery): Boolean {
+    fun retireQuery(query: Message.Marquee.AIQuery): Boolean {
         val queryMsgIdx = marqueeMessages.indexOfFirst { it === query }
         if (queryMsgIdx < 0) return false
         marqueeMessages[queryMsgIdx] = query.toUserMessage()
@@ -82,22 +82,22 @@ class MessageRepository(
      * clean-up and the same size limit as a reply of the app's own. False, and nothing is
      * changed, when there is nothing left of it after that or the list is empty.
      */
-    fun insertGPTReplyToUserMessage(postedGptAnswer: PostedGptAnswer): Boolean {
-        val answer = AIReplyLimits.fitToSign(postedGptAnswer.answer)
+    fun insertAIReplyToUserMessage(postedAIAnswer: PostedAIAnswer): Boolean {
+        val answer = AIReplyLimits.fitToSign(postedAIAnswer.answer)
         if (answer.isBlank() || marqueeMessages.isEmpty()) return false
-        val found = marqueeMessages.indexOfFirst { it.str == postedGptAnswer.inReplyTo }
+        val found = marqueeMessages.indexOfFirst { it.str == postedAIAnswer.inReplyTo }
         val queryMsgIdx = if (found >= 0) found else 0
-        // Convert the GPTQuery message to a user message
-        (marqueeMessages[queryMsgIdx] as? Message.Marquee.GPTQuery)?.let {
+        // Convert the AIQuery message to a user message
+        (marqueeMessages[queryMsgIdx] as? Message.Marquee.AIQuery)?.let {
             marqueeMessages[queryMsgIdx] = it.toUserMessage()
         }
         marqueeMessages.add(queryMsgIdx + 1, replyMessage(answer))
-        logD("Inserted GPT reply after messages[${queryMsgIdx}]")
+        logD("Inserted AI reply after messages[${queryMsgIdx}]")
         return true
     }
 
-    private fun replyMessage(answer: String): Message.Marquee.GPTReply =
-        Message.Marquee.GPTReply(
+    private fun replyMessage(answer: String): Message.Marquee.AIReply =
+        Message.Marquee.AIReply(
             answer
                 .convertHeartEmojis()
                 .toNormalized()

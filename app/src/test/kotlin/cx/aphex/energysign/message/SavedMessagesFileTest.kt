@@ -62,8 +62,8 @@ class SavedMessagesFileTest {
         val repository = MessageRepository(saver = { it.run() })
         // Pushed oldest first; each push goes to the front.
         repository.pushMarqueeMessage(Message.Marquee.User("FIRST MESSAGE EVER"))
-        repository.pushMarqueeMessage(Message.Marquee.GPTQuery("hey ravegpt is the bass loud enough"))
-        repository.marqueeMessages.add(0, Message.Marquee.GPTReply("THE BASS IS FINE, YOUR EARPLUGS ARE JUST WORKING."))
+        repository.pushMarqueeMessage(Message.Marquee.AIQuery("hey ravegpt is the bass loud enough"))
+        repository.marqueeMessages.add(0, Message.Marquee.AIReply("THE BASS IS FINE, YOUR EARPLUGS ARE JUST WORKING."))
         repository.pushMarqueeMessage(Message.Marquee.User("newest message"))
 
         repository.saveMarqueeMessages(dir)

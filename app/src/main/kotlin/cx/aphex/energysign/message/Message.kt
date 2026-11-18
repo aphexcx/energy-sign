@@ -32,7 +32,7 @@ sealed class Message {
         ) : Marquee()
 
         @Serializable
-        class GPTQuery(
+        class AIQuery(
             override val str: String,
             override val type: MSGTYPE = MSGTYPE.DEFAULT
         ) : Marquee() {
@@ -46,7 +46,7 @@ sealed class Message {
         ) : Marquee()
 
         @Serializable
-        class GPTReply(
+        class AIReply(
             override val str: String,
             override val type: MSGTYPE = MSGTYPE.CHONKYMARQUEE
         ) : Marquee() {
@@ -62,7 +62,7 @@ sealed class Message {
                 val str = parts[1]
                 return when (T::class) {
                     User::class -> User(str, type)
-                    GPTQuery::class -> GPTQuery(str, type)
+                    AIQuery::class -> AIQuery(str, type)
                     Chonky::class -> Chonky(str, type)
                     else -> throw IllegalArgumentException("Unknown Marquee subclass")
                 } as T
@@ -114,28 +114,28 @@ sealed class Message {
             @SerializedName("scroll") val shouldScrollToLastLetter: Boolean = false
         ) : ColorMessage(colorCycle)
 
-        class GPTThinking(
+        class AIThinking(
             str: String = ".",
             @ColorInt colorCycle: Int,
             delayMs: Short = 250,
             private val showCaret: Boolean = true,
             private val thinkDots: Int = 0,
         ) : ChonkySlide(str, colorCycle, delayMs) {
-            fun thinkMore(): GPTThinking {
+            fun thinkMore(): AIThinking {
                 val newStr = ".".repeat(thinkDots)
                     .plus(if (showCaret) '|' else ' ')
                     .padEnd(6, ' ')
 
                 return if (thinkDots == 6) {
-                    GPTThinking(newStr, colorCycle, 150, !showCaret, thinkDots)
+                    AIThinking(newStr, colorCycle, 150, !showCaret, thinkDots)
                 } else {
-                    GPTThinking(newStr, colorCycle, delayMs, showCaret = true, thinkDots + 1)
+                    AIThinking(newStr, colorCycle, delayMs, showCaret = true, thinkDots + 1)
                 }
             }
             override fun equals(other: Any?): Boolean {
                 if (this === other) return true
                 if (javaClass != other?.javaClass) return false
-                other as GPTThinking
+                other as AIThinking
                 return str == other.str &&
                         colorCycle == other.colorCycle &&
                         delayMs == other.delayMs &&

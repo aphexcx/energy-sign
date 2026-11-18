@@ -14,7 +14,7 @@ import cx.aphex.energysign.ext.convertHeartEmojis
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
 import cx.aphex.energysign.ext.toNormalized
-import cx.aphex.energysign.gpt.PostedGptAnswer
+import cx.aphex.energysign.ai.PostedAIAnswer
 import cx.aphex.energysign.keyboard.KeyboardManager
 import cx.aphex.energysign.message.Message.FlashingAnnouncement.NowPlayingAnnouncement
 import kotlinx.atomicfu.atomic
@@ -83,7 +83,7 @@ class MessageManager(
      * THREADS. ONE thread owns everything in here, the lists of MessageRepository and the input
      * of KeyboardManager: the sign link thread (see OwnerQueue). It alone calls getNextMessage,
      * and it runs every change. All other entry points are called from other
-     * threads. Bluetooth, the main thread (keys) and the threads GPT answers come from post their change to the owner
+     * threads. Bluetooth, the main thread (keys) and the threads AI answers come from post their change to the owner
      * and return, so the change has NOT been made yet when they return; they have nobody to
      * tell. The BeatLink server's entry points (a posted message, a posted reply, the thinking
      * state, a track, the list) wait for the owner and return what happened, for the HTTP client. There is no lock on any of this state: "which message is next" is decided by one
@@ -108,7 +108,7 @@ class MessageManager(
      * owner, one event a reply, so no reply can be lost or overtaken; the same for the end of
      * the warm-up. (Declared after [change]: the warm-up may end at any moment from here on.)
      */
-    private val desk: AIQueryDesk<Message.Marquee.GPTQuery> = AIQueryDesk(
+    private val desk: AIQueryDesk<Message.Marquee.AIQuery> = AIQueryDesk(
         start = { query -> replies.ask(query.str) { result -> change { replyArrived(query, result) } } },
         listed = { query -> msgRepo.marqueeMessages.any { it === query } },
         log = { logD(it) },
@@ -193,8 +193,8 @@ class MessageManager(
             .toNormalized()
         // A text of which nothing is left for the sign has nothing to ask either.
         val newUserMessage = if ((isQuery || str.lowercase().contains("ravegpt")) && normalizedStr.isNotBlank()) {
-            //TODO: could turn messages with 'baaahs' into GPTQueries
-            Message.Marquee.GPTQuery(normalizedStr)
+            //TODO: could turn messages with 'baaahs' into AIQueries
+            Message.Marquee.AIQuery(normalizedStr)
         } else {
             Message.Marquee.User(normalizedStr)
         }
@@ -244,10 +244,10 @@ class MessageManager(
 
         if (msgRepo.oneTimeMessages.isEmpty()) {
             when (val curMsg = msgRepo.marqueeMessages.getOrNull(currentIdx.value)) {
-//                is Message.Marquee.GPTQuery -> {
+//                is Message.Marquee.AIQuery -> {
 ////                    if (!isGeneratingThought) {
 //                    setGeneratingThought(true)
-//                    gptViewModel.generateAnswer(curMsg)
+//                    aiViewModel.generateAnswer(curMsg)
 //                    return curMsg
 ////                    }
 //                    //isGeneratingThought
@@ -256,8 +256,8 @@ class MessageManager(
 ////                    }
 //                }
 
-                is Message.Marquee.GPTReply -> {
-                    logD("Converting GPTReply to User message!")
+                is Message.Marquee.AIReply -> {
+                    logD("Converting AIReply to User message!")
                     msgRepo.marqueeMessages[currentIdx.value] = curMsg.toChonkyMessage()
                     msgRepo.saveMarqueeMessages(filesDir)
                     msgRepo.pushOneTimeMessages(
@@ -295,11 +295,11 @@ class MessageManager(
         // Display one-time messages first
         while (true) {
             val oneTime = msgRepo.oneTimeMessages.removeFirstOrNull() ?: break
-            if (oneTime is Message.ColorMessage.GPTThinking) {
+            if (oneTime is Message.ColorMessage.AIThinking) {
                 // The time limit is for this notice, not for the call: when it is up the sign
                 // goes on with its messages, and the reply is put in when it comes.
                 if (!thinkingWanted()) continue
-                logD("GPT is still thinking, injecting another thinking notification")
+                logD("AI is still thinking, injecting another thinking notification")
                 msgRepo.pushOneTimeMessage(oneTime.thinkMore())
             }
             return oneTime
@@ -310,7 +310,7 @@ class MessageManager(
         val currentMsg: Message.Marquee = msgRepo.marqueeMessages[idx]
         logD("getNextMessage: messages[$idx] = $currentMsg")
         usrMsgCount++
-        if (currentMsg is Message.Marquee.GPTQuery) {
+        if (currentMsg is Message.Marquee.AIQuery) {
             // Asked now, or in line behind the call that is out: the notice goes up. Not asked
             // (it is being answered already, or nothing may be asked at the moment): nothing.
             if (desk.shown(currentMsg, nowMs())) setThinking(true)
@@ -319,8 +319,8 @@ class MessageManager(
                 logD("Advertise period reached; injecting advertisement")
                 pushAdvertisements()
             }
-//            if (timeSinceLastGPTMessage == 5) {
-//                gptViewModel.generateReplyToMultipleMessages(
+//            if (timeSinceLastAIMessage == 5) {
+//                aiViewModel.generateReplyToMultipleMessages(
 //                    msgRepo.marqueeMessages.filterIsInstance<Message.Marquee.User>().takeLast(5))
 //            }
         }
@@ -380,7 +380,7 @@ class MessageManager(
     fun returnUnsent(message: Message) {
         // (the thinking message put its follow-up in the queue when it was taken)
         if (message !is Message.Marquee && message !is Message.Chooser && message !is Message.KeyboardEcho &&
-            message !is Message.ColorMessage.GPTThinking
+            message !is Message.ColorMessage.AIThinking
         ) {
             msgRepo.pushOneTimeMessage(message)
         }
@@ -714,15 +714,15 @@ class MessageManager(
 
     /* For replies generated by externally running models e.g. Llama running on my laptop */
     /** Returns whether the reply was stored: not when it is blank, and not when there is no message to reply to. */
-    fun onNewPostedGPTReply(postedGptAnswer: PostedGptAnswer): Boolean =
-        changeAndWait { insertPostedGPTReply(postedGptAnswer) }
+    fun onNewPostedAIReply(postedAIAnswer: PostedAIAnswer): Boolean =
+        changeAndWait { insertPostedAIReply(postedAIAnswer) }
 
-    private fun insertPostedGPTReply(postedGptAnswer: PostedGptAnswer): Boolean {
-        logD("Processing Posted GPT Answer")
+    private fun insertPostedAIReply(postedAIAnswer: PostedAIAnswer): Boolean {
+        logD("Processing Posted AI Answer")
         thinkingFromOutside = false
         endThinkingUnlessWanted()
-        if (!msgRepo.insertGPTReplyToUserMessage(postedGptAnswer)) {
-            logW("GPT Answer is blank, or there is no message to reply to; not adding to messages.")
+        if (!msgRepo.insertAIReplyToUserMessage(postedAIAnswer)) {
+            logW("AI Answer is blank, or there is no message to reply to; not adding to messages.")
             return false
         }
         msgRepo.saveMarqueeMessages(filesDir)
@@ -733,13 +733,13 @@ class MessageManager(
      * The call for [query] has ended. On the owner thread: the caller posted this. Every reply
      * is its own event, so two replies that end at the same moment are both dealt with.
      */
-    private fun replyArrived(query: Message.Marquee.GPTQuery, result: AIReplyResult) {
+    private fun replyArrived(query: Message.Marquee.AIQuery, result: AIReplyResult) {
         try {
             // In every case: the change first, the log line after it. A log call that fails
             // must not leave a result half dealt with.
             when (val outcome = desk.finished(query, result, nowMs())) {
                 is AIQueryDesk.Outcome.Reply ->
-                    if (msgRepo.insertGPTReply(query, outcome.text)) {
+                    if (msgRepo.insertAIReply(query, outcome.text)) {
                         msgRepo.saveMarqueeMessages(filesDir)
                     } else {
                         logD("The query was deleted while its reply was on the way; the reply is dropped.")
@@ -748,13 +748,13 @@ class MessageManager(
                 is AIQueryDesk.Outcome.Retired -> {
                     // Asking again would change nothing: it stays on the sign as the message it was.
                     if (msgRepo.retireQuery(query)) msgRepo.saveMarqueeMessages(filesDir)
-                    logW("No GPT reply (${outcome.why}); the message stays as a plain message and is not asked again.")
+                    logW("No AI reply (${outcome.why}); the message stays as a plain message and is not asked again.")
                 }
 
                 is AIQueryDesk.Outcome.Failed -> {
                     // Only when somebody is still looking at the dots; not out of nowhere, later.
                     if (outcome.whileWatched) {
-                        msgRepo.oneTimeMessages.removeIf { it is Message.ColorMessage.GPTThinking }
+                        msgRepo.oneTimeMessages.removeIf { it is Message.ColorMessage.AIThinking }
                         msgRepo.pushOneTimeMessages(
                             Message.ColorMessage.ChonkySlide("NO", context.getColor(R.color.instahandle), delayMs = 650),
                             Message.ColorMessage.ChonkySlide("NO BARS", context.getColor(R.color.instahandle), delayMs = 650),
@@ -764,14 +764,14 @@ class MessageManager(
                             Message.Starfield()
                         )
                     }
-                    logW("GPT Reply Error: ${outcome.why}")
+                    logW("AI Reply Error: ${outcome.why}")
                 }
 
                 AIQueryDesk.Outcome.Gone ->
                     logD("The query was deleted while its reply was on the way; whatever came back is dropped.")
 
                 AIQueryDesk.Outcome.NotOurs ->
-                    logW("A GPT result came for a call that is not out; it is ignored.")
+                    logW("An AI result came for a call that is not out; it is ignored.")
             }
         } finally {
             endThinkingUnlessWanted()
@@ -798,12 +798,12 @@ class MessageManager(
 
     private fun setThinking(thinking: Boolean) {
         // one notice at most
-        msgRepo.oneTimeMessages.removeIf { it is Message.ColorMessage.GPTThinking }
+        msgRepo.oneTimeMessages.removeIf { it is Message.ColorMessage.AIThinking }
         if (thinking) {
 //            showCaretThink = true
 //            showCaretThinkDots = 0
-//            msgRepo.marqueeMessages.add(currentIdx.value +1, Message.Marquee.GPTThinking())
-            msgRepo.pushOneTimeMessage(Message.ColorMessage.GPTThinking(colorCycle = context.getColor(R.color.chonkyslide_defaultpink)))
+//            msgRepo.marqueeMessages.add(currentIdx.value +1, Message.Marquee.AIThinking())
+            msgRepo.pushOneTimeMessage(Message.ColorMessage.AIThinking(colorCycle = context.getColor(R.color.chonkyslide_defaultpink)))
         }
 //        isGeneratingThought = thinking
         logD("Set generating thought to $thinking")

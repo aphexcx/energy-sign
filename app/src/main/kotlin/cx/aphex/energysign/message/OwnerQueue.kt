@@ -12,7 +12,7 @@ import java.util.concurrent.TimeoutException
  * one-time queue, the chooser index and mode, and the keyboard input.
  *
  * That thread is the sign link thread, the one that answers the sign. Everything else that
- * wants to change the state (a Bluetooth command, a key, a GPT answer, a track from BeatLink)
+ * wants to change the state (a Bluetooth command, a key, an AI answer, a track from BeatLink)
  * posts the change here and returns; the owner runs the changes in the order they were posted,
  * between two looks at the wire. So "what is the next message" and every change to it are made
  * by one thread, one after the other, and need no lock: there is no lock to hold while the sign
