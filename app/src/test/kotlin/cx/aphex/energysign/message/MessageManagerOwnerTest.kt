@@ -778,44 +778,170 @@ class MessageManagerOwnerTest {
         assertEquals("DJ - AB\u000bC", sent[4]["str"].asString, "the line of the announcement")
     }
 
-    @Test
-    fun `the line of a track is made, and cut to fit, by the thread that brings the track, not by the owner`() {
-        // The cut is logged from inside the fitting, so the thread that logs it is the thread that did it.
-        val app = App(newFilesDir())
-        val cutBy = java.util.concurrent.CopyOnWriteArrayList<String>()
-        // (only this test's track, "DJ - BBB...": the log also hands a new listener its last line)
-        val watching = cx.aphex.energysign.ScreenLogger.logLines.subscribe { line ->
-            if ("Ad cut from" in line && "DJ - BBBB" in line) cutBy += Thread.currentThread().name
+    /** A call that waits for the owner, on a thread of its own, while this thread (the owner) takes its turns. */
+    private fun <T> waitingCall(name: String, call: () -> T): T {
+        val result = FutureTask(Callable(call))
+        Thread(result, name).start()
+        while (!result.isDone) {
+            ownerRuns()
+            Thread.sleep(1)
         }
-        try {
-            val call = FutureTask(Callable {
-                app.manager.processNowPlayingTrack(BeatLinkTrack(id = 7, title = "B".repeat(750), artist = "DJ"))
-            })
-            Thread(call, "beatlink").start()
-            // the owner (this thread) has not run anything yet, and the line is made already
-            val deadline = System.currentTimeMillis() + 5_000
-            while (cutBy.isEmpty() && System.currentTimeMillis() < deadline) Thread.sleep(1)
-            assertEquals(listOf("beatlink"), cutBy.toList())
-            assertFalse(call.isDone, "the caller still waits for the owner to take the track in")
-            assertEquals(0, app.repo.oneTimeMessages.size)
+        return try {
+            result.get()
+        } catch (e: ExecutionException) {
+            throw e.cause ?: e
+        }
+    }
 
-            while (!call.isDone) {
-                ownerRuns()
-                Thread.sleep(1)
-            }
-            call.get()
+    /** The lines of the log while [block] runs that hold [marker] (not the last line of before, which a new listener is handed). */
+    private fun logged(marker: String, block: () -> Unit): List<String> {
+        val lines = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val watching = cx.aphex.energysign.ScreenLogger.logLines.subscribe { line -> if (marker in line) lines += line }
+        lines.clear()
+        try {
+            block()
         } finally {
             watching.dispose()
         }
+        return lines.toList()
+    }
 
-        assertEquals(listOf("beatlink"), cutBy.toList(), "the owner made nothing a second time")
+    @Test
+    fun `the line of a track is made, and cut to fit, without the owner, the owner only takes it in`() {
+        val app = App(newFilesDir())
+
+        // the caller's part, on the caller's thread; the owner (this thread) runs nothing meanwhile
+        val prepared = FutureTask(Callable { app.manager.prepareTrack(BeatLinkTrack(id = 7, title = "B".repeat(750), artist = "DJ")) })
+        Thread(prepared, "beatlink").start()
+        val update = prepared.get(5, java.util.concurrent.TimeUnit.SECONDS) // it does not wait for the owner
+
+        assertEquals(500, SignResponder.GSON.toJson(update.line).toByteArray(Charsets.UTF_8).size, "the line is fitted already")
+        assertEquals(1, update.notes.size, "and what there is to say about the cut is with it")
+        assertEquals(0, app.repo.oneTimeMessages.size)
+
+        waitingCall("beatlink") { app.manager.takeIn(update) }
+
+        // the owner queued that very message and made none of its own
         val track = app.repo.oneTimeMessages.filterIsInstance<Message.NowPlayingTrackMessage>().single()
-        assertEquals(500, SignResponder.GSON.toJson(track).toByteArray(Charsets.UTF_8).size)
+        assertSame(update.line, track)
         // and the ad round takes that same message: nothing is fitted again for it
         app.phone("!$A\n\uD83D\uDEE4")
         ownerRuns()
-        assertTrue(app.repo.oneTimeMessages.filterIsInstance<Message.NowPlayingTrackMessage>().all { it === track })
-        assertEquals(listOf("beatlink"), cutBy.toList())
+        val lines = app.repo.oneTimeMessages.filterIsInstance<Message.NowPlayingTrackMessage>()
+        assertEquals(2, lines.size)
+        assertTrue(lines.all { it === update.line })
+    }
+
+    @Test
+    fun `a track update that a newer one overtook is left out, a stop is not undone by the track before it`() {
+        val app = App(newFilesDir())
+        app.phone("!$A\n\uD83D\uDEE4\n${O}AD")
+        ownerRuns()
+        app.repo.oneTimeMessages.clear()
+
+        // The long track comes in first and gets its number; while its line is made, the stop
+        // comes in, and the stop is at the owner first.
+        val track = app.manager.prepareTrack(BeatLinkTrack(id = 9, title = "C".repeat(750), artist = "DJ"))
+        val stop = app.manager.prepareTrack(BeatLinkTrack(id = 0, title = "", artist = "", isEmpty = true))
+        assertTrue(track.number < stop.number)
+        waitingCall("beatlink-2") { app.manager.takeIn(stop) }
+        app.repo.oneTimeMessages.clear() // the ad round a stop asks for
+        waitingCall("beatlink-1") { app.manager.takeIn(track) }
+
+        // the stopped track is not announced and is not playing
+        assertEquals(emptyList(), app.repo.oneTimeMessages.toList())
+        app.phone("!$A\n\uD83D\uDEE4\n${O}AD")
+        ownerRuns()
+        assertEquals(listOf("AD"), app.repo.oneTimeMessages.map { it.str }, "no track line in the ad round")
+    }
+
+    @Test
+    fun `track updates that come in order are all taken in, each number once`() {
+        val app = App(newFilesDir())
+        val first = app.manager.prepareTrack(BeatLinkTrack(id = 11, title = "One", artist = "DJ"))
+        val second = app.manager.prepareTrack(BeatLinkTrack(id = 12, title = "Two", artist = "DJ"))
+        assertEquals(first.number + 1, second.number)
+
+        waitingCall("beatlink") { app.manager.takeIn(first) }
+        waitingCall("beatlink") { app.manager.takeIn(second) }
+
+        // the newer track took the place of the older one in the queue
+        assertEquals(listOf("DJ - Two"), app.repo.oneTimeMessages.filterIsInstance<Message.NowPlayingTrackMessage>().map { it.str })
+        // and the entry the server calls does both parts
+        waitingCall("beatlink") { app.manager.processNowPlayingTrack(BeatLinkTrack(id = 13, title = "Three", artist = "DJ")) }
+        assertEquals(listOf("DJ - Three"), app.repo.oneTimeMessages.filterIsInstance<Message.NowPlayingTrackMessage>().map { it.str })
+    }
+
+    @Test
+    fun `the cut of a track's line is reported once, when the track is taken in, not again for the same track`() {
+        val app = App(newFilesDir())
+        val long = BeatLinkTrack(id = 21, title = "Q".repeat(750), artist = "DJ")
+
+        val cuts = logged("DJ - QQQQ") {
+            waitingCall("beatlink") { app.manager.processNowPlayingTrack(long) }
+            waitingCall("beatlink") { app.manager.processNowPlayingTrack(long) } // the same track again: it is not shown again
+        }
+
+        assertEquals(1, cuts.size, cuts.toString())
+        assertTrue("Ad cut from" in cuts.single())
+        assertEquals(1, app.repo.oneTimeMessages.count { it is Message.NowPlayingTrackMessage })
+    }
+
+    @Test
+    fun `a track update that is left out reports nothing about its line`() {
+        val app = App(newFilesDir())
+        val track = app.manager.prepareTrack(BeatLinkTrack(id = 22, title = "Z".repeat(750), artist = "DJ"))
+        val stop = app.manager.prepareTrack(BeatLinkTrack(id = 0, title = "", artist = "", isEmpty = true))
+
+        val cuts = logged("DJ - ZZZZ") {
+            waitingCall("beatlink") { app.manager.takeIn(stop) }
+            waitingCall("beatlink") { app.manager.takeIn(track) }
+        }
+
+        assertEquals(emptyList(), cuts)
+    }
+
+    @Test
+    fun `an ad list that cannot be renamed into place is reported as not saved`() {
+        // ads.json is a directory with something in it: nothing can be renamed over it
+        val filesDir = newFilesDir()
+        File(filesDir, "ads.json").mkdir()
+        File(File(filesDir, "ads.json"), "inside").writeText("kept")
+        val app = App(filesDir)
+
+        val aboutTheSave = logged("ads.json") {
+            app.phone("!$A\n${CL}HELLO")
+            ownerRuns()
+            app.saverRuns()
+        }
+
+        assertTrue(aboutTheSave.any { "Exception when saving ads.json" in it }, aboutTheSave.toString())
+        assertTrue(aboutTheSave.none { "Wrote" in it }, aboutTheSave.toString())
+        assertEquals("kept", File(File(filesDir, "ads.json"), "inside").readText())
+        // the list is in use all the same, for this run
+        assertEquals("HELLO", app.manager.getNextMessage().str)
+    }
+
+    @Test
+    fun `a directory that could not be forced to storage after an ad save is in the app's log, and the ads are saved`() {
+        val filesDir = newFilesDir()
+        val app = App(filesDir)
+        val aboutTheSave = try {
+            org.junit.jupiter.api.Assumptions.assumeTrue(
+                filesDir.setReadable(false, false) && !filesDir.canRead(), "this user can read every directory (root?)"
+            )
+            logged("ads.json") {
+                app.phone("!$A\n${CL}HELLO")
+                ownerRuns()
+                app.saverRuns()
+            }
+        } finally {
+            filesDir.setReadable(true, false)
+        }
+
+        assertEquals(1, aboutTheSave.count { "could not be forced to storage" in it }, aboutTheSave.toString())
+        assertEquals(1, aboutTheSave.count { "Wrote 1 ads" in it }, aboutTheSave.toString())
+        assertEquals(listOf("HELLO"), AdCodec.decode(app.adsFile.readText()).map { it.str })
     }
 
     @Test

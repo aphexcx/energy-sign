@@ -18,6 +18,7 @@ import kotlinx.atomicfu.update
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 import java.io.File
+import java.util.concurrent.atomic.AtomicLong
 
 
 class MessageManager(
@@ -620,20 +621,58 @@ class MessageManager(
     }
 
     /** Returns when the owner has taken the track in. */
-    fun processNowPlayingTrack(track: BeatLinkTrack) {
-        // Made here, on the caller's thread: fitting a long title to the sign serialises it more
-        // than once, and the owner has the sign to answer. The owner only stores the result.
-        val line = if (track.isEmpty) null else AdRules.nowPlaying(track.artist, track.title, note = { logW(it) })
-        changeAndWait { takeInTrack(track, line) }
+    fun processNowPlayingTrack(track: BeatLinkTrack) = takeIn(prepareTrack(track))
+
+    /**
+     * A track as it goes to the owner: [number] says which update came first, [line] is its line
+     * for the sign (null for an empty track) and [notes] what there is to say about that line.
+     */
+    internal class TrackUpdate(
+        val number: Long,
+        val track: BeatLinkTrack,
+        val line: Message.NowPlayingTrackMessage?,
+        val notes: List<String>,
+    )
+
+    /** Counts the track updates in the order they came in. From any thread. */
+    private val trackUpdates = AtomicLong()
+
+    /** The number of the newest update the owner has taken in. Owner only. */
+    private var newestTrackUpdate: Long = 0
+
+    /**
+     * The caller's part of a track update, on the caller's thread. The update gets its number
+     * FIRST. Then its line is made: fitting a long title to the sign serialises it more than
+     * once, and the owner has the sign to answer. Because that takes a while, a later update (a
+     * stop) can be at the owner before this one: the number is how the owner knows.
+     */
+    internal fun prepareTrack(track: BeatLinkTrack): TrackUpdate {
+        val number = trackUpdates.incrementAndGet()
+        val notes = mutableListOf<String>()
+        val line = if (track.isEmpty) null else AdRules.nowPlaying(track.artist, track.title, note = { notes += it })
+        return TrackUpdate(number, track, line, notes)
     }
 
-    /** [line] is the track's line for the sign, made by the caller; null for an empty track. Owner only. */
-    private fun takeInTrack(track: BeatLinkTrack, line: Message.NowPlayingTrackMessage?) {
+    /** Hands [update] to the owner and returns when the owner has dealt with it. */
+    internal fun takeIn(update: TrackUpdate): Unit = changeAndWait { takeInTrack(update) }
+
+    /** Owner only. */
+    private fun takeInTrack(update: TrackUpdate) {
+        if (update.number < newestTrackUpdate) {
+            // A newer update is in already: this one was overtaken while its line was made.
+            logD("Track update ${update.number} is left out: update $newestTrackUpdate came after it and is in already.")
+            return
+        }
+        newestTrackUpdate = update.number
+        val track = update.track
+        val line = update.line
         if (line == null) {
             nowPlayingTrack = null
             pushAdvertisements()
         } else {
             if (track !in playedTracks) {
+                // (what there is to say about the line is said for a track that is shown, once)
+                update.notes.forEach { logW(it) }
                 nowPlayingTrack = line
                 msgRepo.oneTimeMessages.removeIf { it is NowPlayingAnnouncement || it is Message.NowPlayingTrackMessage }
 

@@ -57,7 +57,8 @@ class AdCodecTest {
 
     @Test
     fun `a one by one ad comes back equal, colour included`() {
-        val ad = OneByOneMessage("@SOMEONE", 0xef0c1d, 4000)
+        // the colour as Android hands it out for a resource: opaque, alpha 0xFF
+        val ad = OneByOneMessage("@SOMEONE", 0xFFEF0C1D.toInt(), 4000)
 
         assertEquals(listOf<Message>(ad), AdCodec.decode(AdCodec.encode(listOf(ad))))
     }
@@ -73,6 +74,16 @@ class AdCodecTest {
             """{"dly":2000,"str":"HUGS <3","type":"O","b":93,"g":5,"r":255},""" +
             """{"str":"","type":"T"},""" +
             """{"str":"1","type":"I","b":59,"g":212,"r":254}]"""
+
+    @Test
+    fun `a chonky ad with a colour of the app's resources comes back with that colour, alpha included`() {
+        val ad = ChonkySlide("HELLO", 0xFF1DA1F2.toInt(), 2000)
+
+        val back = assertIs<ChonkySlide>(AdCodec.decode(AdCodec.encode(listOf(ad))).single())
+
+        assertEquals(0xFF1DA1F2.toInt(), back.colorCycle)
+        assertEquals(listOf(0x1D, 0xA1, 0xF2), listOf(back.r, back.g, back.b))
+    }
 
     @Test
     fun `a file in the shape of the one on the sign loads as it is`() {
@@ -225,7 +236,7 @@ class AdCodecTest {
     fun `a key the app does not know is ignored`() {
         val ads = AdCodec.decode("""[{"str":"A","type":"O","dly":2000,"r":1,"g":2,"b":3,"extra":true}]""")
 
-        assertEquals(listOf<Message>(OneByOneMessage("A", 0x010203, 2000)), ads)
+        assertEquals(listOf<Message>(OneByOneMessage("A", 0xFF010203.toInt(), 2000)), ads)
         assertTrue("extra" !in wire(ads.single()))
     }
 }

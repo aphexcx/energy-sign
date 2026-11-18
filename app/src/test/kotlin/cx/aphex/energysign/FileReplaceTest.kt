@@ -6,10 +6,17 @@ import org.junit.jupiter.api.io.TempDir
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.nio.ByteBuffer
+import java.nio.MappedByteBuffer
+import java.nio.channels.FileChannel
+import java.nio.channels.FileLock
+import java.nio.channels.ReadableByteChannel
+import java.nio.channels.WritableByteChannel
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 /**
  * A file whose descriptor is closed as soon as something has been written to it. Whoever then
@@ -26,6 +33,41 @@ class ClosesAfterWrite(file: File) : FileOutputStream(file) {
         super.write(b, off, len)
         close()
     }
+}
+
+/**
+ * A channel that is no file: it only notes what it is asked to force, and that it was closed.
+ * With it a test sees the force itself, which leaves no trace a test could find on a real disk.
+ */
+class WatchedChannel(private val onForce: (metaData: Boolean) -> Unit = {}) : FileChannel() {
+    val forced = mutableListOf<Boolean>()
+    var closed = false
+
+    override fun force(metaData: Boolean) {
+        forced += metaData
+        onForce(metaData)
+    }
+
+    override fun implCloseChannel() {
+        closed = true
+    }
+
+    private fun notAFile(): Nothing = throw UnsupportedOperationException("only force and close are expected")
+    override fun read(dst: ByteBuffer): Int = notAFile()
+    override fun read(dsts: Array<out ByteBuffer>, offset: Int, length: Int): Long = notAFile()
+    override fun read(dst: ByteBuffer, position: Long): Int = notAFile()
+    override fun write(src: ByteBuffer): Int = notAFile()
+    override fun write(srcs: Array<out ByteBuffer>, offset: Int, length: Int): Long = notAFile()
+    override fun write(src: ByteBuffer, position: Long): Int = notAFile()
+    override fun position(): Long = notAFile()
+    override fun position(newPosition: Long): FileChannel = notAFile()
+    override fun size(): Long = notAFile()
+    override fun truncate(size: Long): FileChannel = notAFile()
+    override fun transferTo(position: Long, count: Long, target: WritableByteChannel): Long = notAFile()
+    override fun transferFrom(src: ReadableByteChannel, position: Long, count: Long): Long = notAFile()
+    override fun map(mode: MapMode, position: Long, size: Long): MappedByteBuffer = notAFile()
+    override fun lock(position: Long, size: Long, shared: Boolean): FileLock = notAFile()
+    override fun tryLock(position: Long, size: Long, shared: Boolean): FileLock = notAFile()
 }
 
 /**
@@ -180,8 +222,8 @@ class FileReplaceTest {
         val warnings = mutableListOf<String>()
         // Without the right to read it a directory can still take a new file and a rename,
         // but it cannot be opened to be forced to storage.
-        assumeTrue(dir.setReadable(false, false) && !dir.canRead(), "this user can read every directory (root?)")
         try {
+            assumeTrue(dir.setReadable(false, false) && !dir.canRead(), "this user can read every directory (root?)")
             // every step is the default one
             file.replaceContent(warn = { warnings += it }) { it.write("new".toByteArray()) }
         } finally {
@@ -201,8 +243,8 @@ class FileReplaceTest {
         messages.writeText("old\n")
         val logged = java.util.concurrent.CopyOnWriteArrayList<String>()
         val watching = ScreenLogger.logLines.subscribe { line -> if ("messages-of-this-test.txt" in line) logged += line }
-        assumeTrue(dir.setReadable(false, false) && !dir.canRead(), "this user can read every directory (root?)")
         try {
+            assumeTrue(dir.setReadable(false, false) && !dir.canRead(), "this user can read every directory (root?)")
             messages.replaceWith(listOf("new")) // every step is the default one
         } finally {
             dir.setReadable(true, false)
@@ -212,6 +254,72 @@ class FileReplaceTest {
         assertEquals(listOf("new"), messages.readLines())
         assertEquals(1, logged.size, logged.toString())
         assertContains(logged.single(), "could not be forced to storage")
+    }
+
+    // ---- the force itself, and the rename
+
+    @Test
+    fun `forcing a directory opens it, forces it with its metadata, and closes it`() {
+        val channel = WatchedChannel()
+        val opened = mutableListOf<File>()
+
+        dir.syncDirectory(open = { opened += it; channel })
+
+        assertEquals(listOf(dir), opened)
+        assertEquals(listOf(true), channel.forced, "one force, metadata included")
+        assertTrue(channel.closed)
+    }
+
+    @Test
+    fun `a directory that opens but cannot be forced, the force was asked for, one warning, the renamed file in place`() {
+        file.writeText("old")
+        val channel = WatchedChannel(onForce = { throw IOException("the disk would not") })
+        val warnings = mutableListOf<String>()
+
+        // the production function for the directory, with nothing but the channel of the test's
+        file.replaceContent(
+            SaveSteps(syncDirectory = { directory -> directory.syncDirectory(open = { channel }) }),
+            warn = { warnings += it },
+        ) { it.write("new".toByteArray()) } // does not throw
+
+        assertEquals(listOf(true), channel.forced, "the force was asked for")
+        assertTrue(channel.closed)
+        assertEquals("new", file.readText(), "the renamed file is in place")
+        assertFalse(beside.exists())
+        assertEquals(1, warnings.size, warnings.toString())
+        assertContains(warnings.single(), "the disk would not")
+    }
+
+    @Test
+    fun `a rename that fails is a failed save, the target stays as it is and the directory is never forced`() {
+        // a directory with something in it, where the file should be: nothing can be renamed over it
+        file.mkdir()
+        File(file, "inside").writeText("kept")
+        var directoryForced = false
+        var dataForced = false
+
+        val e = assertFailsWith<IOException> {
+            file.replaceContent(SaveSteps(syncData = { dataForced = true }, syncDirectory = { directoryForced = true })) {
+                it.write("new".toByteArray())
+            }
+        }
+
+        assertContains(e.message!!, "rename")
+        assertTrue(dataForced, "the file beside was written and forced; the rename is what failed")
+        assertFalse(directoryForced)
+        assertTrue(file.isDirectory)
+        assertEquals("kept", File(file, "inside").readText())
+    }
+
+    @Test
+    fun `the same with the production steps and the lines of a message file`() {
+        file.mkdir()
+        File(file, "inside").writeText("kept")
+
+        assertFailsWith<IOException> { file.replaceContent { it.write("new".toByteArray()) } }
+        assertFailsWith<IOException> { file.replaceWith(listOf("new")) }
+
+        assertEquals("kept", File(file, "inside").readText())
     }
 
     @Test

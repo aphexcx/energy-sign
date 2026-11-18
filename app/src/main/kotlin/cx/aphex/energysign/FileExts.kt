@@ -99,8 +99,10 @@ class SaveSteps(
 /**
  * Forces this directory to storage: the names in it, so a file that was just renamed into place
  * keeps its new name through a power cut. (Forcing the file's own data does not do that.)
+ * The directory is opened for reading, forced (its metadata too) and closed. [open] is the real
+ * way to open it unless a test hands in a channel of its own, to see what is asked of it.
  */
 @Throws(IOException::class)
-fun File.syncDirectory() {
-    FileChannel.open(toPath(), StandardOpenOption.READ).use { it.force(true) }
+fun File.syncDirectory(open: (File) -> FileChannel = { FileChannel.open(it.toPath(), StandardOpenOption.READ) }) {
+    open(this).use { it.force(true) }
 }
