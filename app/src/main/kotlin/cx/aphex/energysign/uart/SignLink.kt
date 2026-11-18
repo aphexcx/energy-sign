@@ -148,6 +148,8 @@ class SignLink(
     private val answer: (buffer: ByteArray, count: Int) -> Unit,
     /** The chooser message as it is now, as JSON; null outside chooser mode. Must not change anything. */
     private val chooserFrame: () -> String?,
+    /** The frame [chooserFrame] last gave has been written to the sign in full. Not called for a push that failed, or had no frame. */
+    private val pushed: () -> Unit = {},
     /** Read when a push is about to start. */
     private val attention: () -> Attention = { Attention.AUTO },
     private val timing: UartTimingLog,
@@ -370,12 +372,13 @@ class SignLink(
         pushSettled()
         if (mode == Attention.OFF) return
         val wantedNs = nanoTime()
-        val frame = try {
-            chooserFrame()?.toByteArray()
+        val text = try {
+            chooserFrame()
         } catch (e: Exception) {
             pushFailed()
             throw e
         }
+        val frame = text?.toByteArray()
         // The break starts when it is asked for, so not while a reply is still leaving
         sleepUntil(clock.freeAtNs)
         if (stopped) return
@@ -391,11 +394,21 @@ class SignLink(
         val guardEndNs = nanoTime()
         val whole = frame == null || writeAll(frame, "message") == frame.size
         voidBeforeNs = clock.freeAtNs
-        if (!whole) return pushFailed()
+        if (!whole) {
+            complain("push", "the frame was not taken in full")
+            return pushFailed()
+        }
         holdPushUntil(voidBeforeNs + PUSH_SPACING_MS * NS_PER_MS)
         val doneNs = nanoTime()
         lastHeardNs = doneNs
         timing.push(wantedNs, callNs, returnedNs, guardEndNs, doneNs, frame?.size ?: 0)
+        // Like a reply: on the line first, then the log and the screen
+        if (text != null) {
+            log("Pushed >$text< to $name")
+            pushed()
+        } else {
+            log("Pushed attention alone to $name")
+        }
     }
 
     /** Rule 4: the push is still wanted, and waits a little before it is tried again. */
@@ -431,7 +444,10 @@ class SignLink(
             }
             clock.wrote(atNs, took)
             timing.tx(atNs, nanoTime(), took, zeros.size, "attention")
-            if (took != zeros.size) return false
+            if (took != zeros.size) {
+                complain("push", "the attention run was not taken in full ($took of ${zeros.size} bytes)")
+                return false
+            }
         }
         clock.guard(ATTN_GUARD_MS)
         return true
@@ -459,7 +475,7 @@ class SignLink(
     }
 
     /** A failure: once when it starts, then at most every [WARN_EVERY_MS]. A dead port must not flood the log. */
-    private fun complain(what: String, error: Throwable) {
+    private fun complain(what: String, error: Any) {
         val now = nanoTime()
         if (what != lastWarning || now - lastWarningNs >= WARN_EVERY_MS * NS_PER_MS) {
             lastWarning = what

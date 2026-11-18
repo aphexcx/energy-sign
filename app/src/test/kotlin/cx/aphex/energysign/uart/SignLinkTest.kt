@@ -126,6 +126,9 @@ class SignLinkTest {
     /** The app is stopped from another thread once the clock has reached this. */
     private var stopAtNs = Long.MAX_VALUE
 
+    /** What the app was told had been pushed to the sign. */
+    private val published = mutableListOf<String>()
+
     /** Changes to the app's state, by the time they are posted; the link runs them in events(). */
     private val posted = sortedMapOf<Long, MutableList<() -> Unit>>()
 
@@ -142,6 +145,10 @@ class SignLinkTest {
             run.forEach { it() }
         },
         answer = { buffer, count -> answer(buffer, count) },
+        pushed = {
+            published += chooser ?: "nothing"
+            line += "told:${chooser ?: "nothing"}"
+        },
         chooserFrame = {
             if (frameThrows > 0) {
                 frameThrows--
@@ -503,6 +510,49 @@ class SignLinkTest {
         assertEquals(listOf("low@0", "tx[H:B]@70"), wire())
     }
 
+    // ================= what the app is told of a push (the screen, Bluetooth)
+
+    @Test
+    fun `a pushed frame is told to the app once it is written, and logged, after the write`() {
+        command(0, "B")
+        runUntil(1_000)
+        assertEquals(listOf("B"), published)
+        assertEquals(listOf("low@0", "tx[H:B]@70", "log:Pushed >H:B< to UART", "told:B"), line)
+    }
+
+    @Test
+    fun `leaving chooser mode has no frame, so nothing is told, and the attention is logged`() {
+        command(0, null)
+        runUntil(1_000)
+        assertEquals(emptyList(), published)
+        assertEquals(listOf("low@0", "log:Pushed attention alone to UART"), line)
+    }
+
+    @Test
+    fun `a push that failed tells nothing, the one that then goes out is told once`() {
+        command(0, "BCDEFGH")
+        takesBeforeStuck = 2
+        stuckUntilNs = 150 * ms
+        runUntil(200)
+        assertEquals(emptyList(), published)
+        assertTrue(warnings().single().contains("the frame was not taken in full"), warnings().toString())
+        runUntil(2_000)
+        assertEquals(listOf("BCDEFGH"), published)
+    }
+
+    @Test
+    fun `a push that is switched off, or settled by a full reply, is not told as a push`() {
+        mode = Attention.OFF
+        command(0, "B")
+        runUntil(500)
+        mode = Attention.AUTO
+        command(500, "C")
+        arrives(500, "~")
+        runUntil(1_500)
+        assertEquals(emptyList(), published)
+        assertEquals(listOf("tx[H:C]@500"), wire())
+    }
+
     // ================= time on the line (class C)
 
     @Test
@@ -804,7 +854,7 @@ class SignLinkTest {
         failWrites = 1
         runUntil(2_000)
         assertEquals(listOf("low@0", "low@170", "tx[H:B]@240"), wire())
-        assertTrue(warnings().single().contains("write failed"))
+        assertTrue(warnings().first().contains("write failed"))
     }
 
     // ================= liveness (class G)

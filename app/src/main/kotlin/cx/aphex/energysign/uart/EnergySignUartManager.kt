@@ -57,6 +57,7 @@ class EnergySignUartManager(private val viewModel: MainViewModel, private val ow
         events = { owner.drain { error -> logW("A change to the messages failed: $error", error) } },
         answer = ::answer,
         chooserFrame = { viewModel.chooserFrame() },
+        pushed = { viewModel.onChooserPushed() },
         attention = ::attentionMode,
         timing = timing,
         log = { line -> logD(line) },

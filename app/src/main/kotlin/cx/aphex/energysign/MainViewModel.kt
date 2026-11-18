@@ -6,6 +6,7 @@ import cx.aphex.energysign.beatlinkdata.DnsSdAnnouncer
 import cx.aphex.energysign.bluetooth.BluetoothStatusUpdate
 import cx.aphex.energysign.bluetooth.EnergySignBluetoothManager
 import cx.aphex.energysign.ext.NonNullMutableLiveData
+import cx.aphex.energysign.message.ChooserPush
 import cx.aphex.energysign.message.Message
 import cx.aphex.energysign.message.MessageManager
 import cx.aphex.energysign.message.OwnerQueue
@@ -36,6 +37,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
         nextMessage = { messageManager.getNextMessage() },
         write = { reply, isPollReport -> energySignUartManager.send(reply, isPollReport) },
         unsent = { message -> messageManager.returnUnsent(message) },
+    )
+
+    /** The frame of a PUSH. It can reach the chooser message and nothing else. */
+    private val chooserPush = ChooserPush(
+        shown = { messageManager.chooserShown() },
+        sent = ::published,
     )
     private val dnsSdAnnouncer: DnsSdAnnouncer
 
@@ -81,23 +88,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
      * Called on the sign link thread.
      */
     fun onSignRequest(buffer: ByteArray, count: Int) {
-        signResponder.onRequest(buffer, count)?.let { sentMessage ->
-            sentString = sentMessage.str
-            currentString.postValue(sentMessage.str)
-        }
+        signResponder.onRequest(buffer, count)?.let(::published)
+    }
+
+    /** [message] is on the wire in full, as a reply or as a push: the screen and Bluetooth show it. */
+    private fun published(message: Message) {
+        sentString = message.str
+        currentString.postValue(message.str)
     }
 
     /**
      * The frame of a push (contract VERSION 3.1): the chooser message as it is now, or null
-     * outside chooser mode, when a push is the attention alone. It goes through
-     * MessageManager.chooserShown, which changes nothing, and not through the responder: a push
+     * outside chooser mode, when a push is the attention alone. It goes through ChooserPush,
+     * which can only reach MessageManager.chooserShown, and not through the responder: a push
      * cannot take a message. Called on the sign link thread.
      */
-    fun chooserFrame(): String? {
-        // The type is the guard: getNextMessage() returns a Message and does not fit here
-        val shown: Message.Chooser? = messageManager.chooserShown()
-        return shown?.let(SignResponder.GSON::toJson)
-    }
+    fun chooserFrame(): String? = chooserPush.frame()
+
+    /** The frame of the push has been written in full. Called on the sign link thread. */
+    fun onChooserPushed() = chooserPush.written()
 
     fun updateAdvertiseStatus(status: String) {
         btAdvertiseStatus.postValue(status)
