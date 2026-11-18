@@ -48,13 +48,24 @@ class SignResponderTest {
     private val delivered = mutableListOf<String>()
     private var uartWorks = true
 
+    /** The transmitter takes nothing: the write says so. */
+    private var writeFails = false
+    private val handedBack = mutableListOf<Message>()
+
+    /** What each reply was said to be to the sign. */
+    private val kinds = mutableListOf<Reply>()
+
     private val responder = SignResponder(
         nextMessage = source::next,
-        write = { reply, isPollReport ->
+        write = { reply, kind ->
+            kinds += kind
+            val isPollReport = kind == Reply.REPORT
             written.add(reply)
             if (isPollReport) markedAsPollReport.add(reply)
             if (uartWorks) delivered.add(reply)
+            !writeFails
         },
+        unsent = { handedBack += it },
     )
 
     private fun request(s: String): Message? = s.toByteArray(Charsets.US_ASCII).let { responder.onRequest(it, it.size) }
@@ -376,5 +387,57 @@ class SignResponderTest {
         assertEquals(listOf(REPORT_1_OF_12, REPORT_1_OF_12), markedAsPollReport)
         assertFalse(markedAsPollReport.any { it.contains("type") })
         assertEquals(5, written.size)
+    }
+
+    // ---- what a reply is to the sign
+
+    @Test
+    fun `a report, a chooser message and a message of another kind are each said to be what they are`() {
+        source.inChooserMode = true
+        request("?")
+        request("~")
+        source.inChooserMode = false
+        request("~")
+        request("?") // a poll outside chooser mode gets the next message
+        assertEquals(listOf(Reply.REPORT, Reply.CHOOSER, Reply.MESSAGE, Reply.MESSAGE), kinds)
+    }
+
+    // ---- a write that did not go out
+
+    @Test
+    fun `a message that could not be written is handed back and not reported as sent`() {
+        source.inChooserMode = false
+        writeFails = true
+
+        assertNull(request("~"))
+
+        assertEquals(1, source.ordinaryServed) // it was taken ...
+        assertEquals("ORDINARY 1", handedBack.single().str) // ... and goes back
+        writeFails = false
+        assertEquals("ORDINARY 2", request("~")?.str)
+        assertEquals(1, handedBack.size)
+    }
+
+    @Test
+    fun `a poll report that could not be written hands nothing back, nothing was taken`() {
+        source.inChooserMode = true
+        writeFails = true
+
+        assertNull(request("?"))
+
+        assertTrue(handedBack.isEmpty())
+        assertEquals(0, source.ordinaryServed)
+    }
+
+    // ---- the first write of every message class is prepared ahead of time
+
+    @Test
+    fun `warming up prepares every message class and changes nothing that is written`() {
+        val before = SignResponder.GSON.toJson(Message.Marquee.User("HELLO"))
+        val prepared = SignResponder.warmUp()
+        // every kind the app can send: marquee texts, colour messages, icons, announcements, utility, chooser, keyboard echo
+        assertTrue(prepared >= 20, "$prepared classes")
+        assertEquals(before, SignResponder.GSON.toJson(Message.Marquee.User("HELLO")))
+        assertEquals(prepared, SignResponder.warmUp())
     }
 }

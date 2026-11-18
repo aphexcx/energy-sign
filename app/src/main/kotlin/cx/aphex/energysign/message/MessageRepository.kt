@@ -10,12 +10,20 @@ import cx.aphex.energysign.gpt.GptAnswerResponse
 import cx.aphex.energysign.gpt.PostedGptAnswer
 import cx.aphex.energysign.message.Message.Companion.VT
 import cx.aphex.energysign.message.MessageRepository.Companion.MAX_SIGN_STRINGS
-import cx.aphex.energysign.toFile
+import cx.aphex.energysign.replaceWith
+import cx.aphex.energysign.replacement
 import io.ktor.util.toUpperCasePreservingASCIIRules
 import java.io.File
+import java.io.FileOutputStream
 import java.util.Collections.synchronizedList
+import java.util.concurrent.Executor
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicReference
 
-class MessageRepository {
+class MessageRepository(
+    /** Writes the files: one write at a time, in the order they were asked for. */
+    private val saver: Executor = Executors.newSingleThreadExecutor { Thread(it, "sign-save").apply { isDaemon = true } },
+) {
     val marqueeMessages: MutableList<Message.Marquee> =
         synchronizedList(mutableListOf<Message.Marquee>())
 
@@ -91,32 +99,53 @@ class MessageRepository {
         }
     }
 
-    /** Write out the list of strings to the file */
-    fun saveMarqueeMessages(context: Context) {
+    /**
+     * Write out the list of strings to the files in [dir].
+     *
+     * The caller (the thread that owns the messages and answers the sign) only copies the list
+     * of references: the messages do not change once made. Turning them into lines and writing
+     * the files is the saver's work, so nothing the caller does here grows with the text. Only
+     * the newest list is kept for the saver: a save that is still waiting is replaced by the
+     * next one, not queued behind it. Each file is replaced whole or not at all ([replaceWith]):
+     * the board loses power without warning.
+     */
+    fun saveMarqueeMessages(dir: File, open: (File) -> FileOutputStream = ::FileOutputStream) {
+        val waiting = newest.getAndSet(Save(dir, ArrayList(marqueeMessages), open))
+        if (waiting == null) saveLater(::writeNewest)
+    }
+
+    private class Save(val dir: File, val snapshot: List<Message.Marquee>, val open: (File) -> FileOutputStream)
+
+    private val newest = AtomicReference<Save?>()
+
+    private fun writeNewest() {
+        val save = newest.getAndSet(null) ?: return
         try {
-            marqueeMessages
-                .map { it.toString() }
-                .reversed()
-                .toFile(File(context.filesDir, SIGN_DB_FILE_NAME))
+            File(save.dir, SIGN_DB_FILE_NAME).replaceWith(save.snapshot.asReversed().map { it.toString() }, save.open)
         } catch (e: Throwable) {
             logW("Exception when saving $SIGN_DB_FILE_NAME! ${e.message}")
         }
         try {
-            marqueeMessages
-                .map { it.str }
-                .reversed()
-                .toFile(File(context.filesDir, SIGN_STRINGS_FILE_NAME))
+            File(save.dir, SIGN_STRINGS_FILE_NAME).replaceWith(save.snapshot.asReversed().map { it.str }, save.open)
         } catch (e: Throwable) {
             logW("Exception when saving $SIGN_STRINGS_FILE_NAME! ${e.message}")
         }
     }
 
+    /** Runs [write], which must have everything it writes already in hand, after the writes asked for before it. */
+    fun saveLater(write: () -> Unit) = saver.execute(write)
+
 
     /** Return the
      * //TODO last [MAX_SIGN_STRINGS]
      * strings from the sign strings file. */
-    fun loadUserMessages(context: Context): List<Message.Marquee> {
-        with(File(context.filesDir, SIGN_DB_FILE_NAME)) {
+    fun loadUserMessages(context: Context): List<Message.Marquee> = loadUserMessages(context.filesDir)
+
+    fun loadUserMessages(dir: File): List<Message.Marquee> {
+        // What a save that was cut off left beside the files: never read, and in the way of nothing
+        File(dir, SIGN_DB_FILE_NAME).replacement.delete()
+        File(dir, SIGN_STRINGS_FILE_NAME).replacement.delete()
+        with(File(dir, SIGN_DB_FILE_NAME)) {
             when (createNewFile()) {
                 true -> logD("$SIGN_DB_FILE_NAME does not exist; created new.")
                 else -> logD("$SIGN_DB_FILE_NAME exists. Reading...")

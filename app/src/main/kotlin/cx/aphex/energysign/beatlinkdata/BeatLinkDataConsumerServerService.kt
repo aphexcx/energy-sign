@@ -8,7 +8,9 @@ import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
 import cx.aphex.energysign.gpt.PostedGptAnswer
 import cx.aphex.energysign.message.MessageManager
+import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.gson.gson
+import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.call
 import io.ktor.server.application.install
 import io.ktor.server.engine.embeddedServer
@@ -19,6 +21,8 @@ import io.ktor.server.response.respond
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 
@@ -65,19 +69,30 @@ class BeatLinkDataConsumerServerService : Service(), KoinComponent {
 
                 get("/messages") {
                     logD("GET /messages")
-                    call.respond(messageManager.msgRepo.marqueeMessages)
+                    // as the owner has them now: a message posted just before this is in the list
+                    val messages = try {
+                        withContext(Dispatchers.IO) { messageManager.storedMessages() }
+                    } catch (e: Exception) {
+                        call.respond(HttpStatusCode.ServiceUnavailable, mapOf("success" to false, "error" to e.toString()))
+                        return@get
+                    }
+                    call.respond(messages)
                 }
                 post("/newUserMessage") {
                     val msg: PostedMessage = call.receive()
                     logW("Received new POSTed UserMessage: ${msg.message}")
-                    messageManager.processNewUserMessage(msg.message)
-                    call.respond(mapOf("success" to true))
+                    call.answer {
+                        messageManager.processNewUserMessage(msg.message)
+                        true
+                    }
                 }
                 post("/isGeneratingThought") {
                     val msg: SheepIsGeneratingThought = call.receive()
                     logW("Received new POSTed generating thought notification: ${msg.isGenerating}")
-                    messageManager.togglePersistentThinkingMessage(msg.isGenerating)
-                    call.respond(mapOf("success" to true))
+                    call.answer {
+                        messageManager.togglePersistentThinkingMessage(msg.isGenerating)
+                        true
+                    }
                 }
 //                post("/streamPartialSheepThought") {
 //                    val msg: PostedMessage = call.receive()7
@@ -88,20 +103,38 @@ class BeatLinkDataConsumerServerService : Service(), KoinComponent {
                 post("/newGPTReply") { // formerly /newSheepThought
                     val answer: PostedGptAnswer = call.receive()
                     logW("Received new POSTed GPT Reply: ${answer}")
-                    messageManager.onNewPostedGPTReply(answer)
-                    call.respond(mapOf("success" to true))
+                    call.answer { messageManager.onNewPostedGPTReply(answer) }
                 }
                 post("/currentTrack") {
                     val track: BeatLinkTrack = call.receive()
                     logW("Received new BeatLinkTrack: $track")
-                    messageManager.processNowPlayingTrack(track)
-                    call.respond(mapOf("success" to true))
+                    call.answer {
+                        messageManager.processNowPlayingTrack(track)
+                        true
+                    }
                 }
             }
 
         }.start(wait = false)
         logD("Embedded server started")
         super.onCreate()
+    }
+
+    /**
+     * Has the owner of the messages make [change] and answers the client with what happened:
+     * success only when the change has been made. [change] returns false when it was refused
+     * (a reply with nothing to reply to) and throws when the owner did not get to it.
+     * Waits off the server's own threads.
+     */
+    private suspend fun ApplicationCall.answer(change: () -> Boolean) {
+        val done = try {
+            withContext(Dispatchers.IO) { change() }
+        } catch (e: Exception) {
+            logW("A posted change was not made: $e")
+            respond(HttpStatusCode.ServiceUnavailable, mapOf("success" to false, "error" to e.toString()))
+            return
+        }
+        respond(if (done) HttpStatusCode.OK else HttpStatusCode.Conflict, mapOf("success" to done))
     }
 
     override fun onUnbind(intent: Intent?): Boolean {

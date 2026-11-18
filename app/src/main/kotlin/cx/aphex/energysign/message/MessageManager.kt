@@ -19,10 +19,6 @@ import cx.aphex.energysign.message.Message.FlashingAnnouncement.NowPlayingAnnoun
 import kotlinx.atomicfu.atomic
 import kotlinx.atomicfu.getAndUpdate
 import kotlinx.atomicfu.update
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.launch
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 import java.io.File
@@ -31,6 +27,7 @@ import java.io.File
 class MessageManager(
     private val context: Context,
     val msgRepo: MessageRepository,
+    private val owner: OwnerQueue,
 ) :
     KoinComponent {
     private val gson: Gson = GsonBuilder()
@@ -76,10 +73,36 @@ class MessageManager(
     private val gptViewModel: GPTViewModel by inject()
     private val keyboardManager = KeyboardManager
 
+    /** Read once, here on the main thread: the owner must not ask the context for it at every save. */
+    private val filesDir: File = context.filesDir
+
+    /*
+     * THREADS. ONE thread owns everything in here, the lists of MessageRepository and the input
+     * of KeyboardManager: the sign link thread (see OwnerQueue). It alone calls getNextMessage,
+     * and it runs every change. All other entry points are called from other
+     * threads. Bluetooth and the main thread (keys, GPT answers) post their change to the owner
+     * and return, so the change has NOT been made yet when they return; they have nobody to
+     * tell. The BeatLink server's entry points (a posted message, a posted reply, the thinking
+     * state, a track, the list) wait for the owner and return what happened, for the HTTP client. There is no lock on any of this state: "which message is next" is decided by one
+     * thread from start to end, and no other thread can hold that thread up by being put to
+     * sleep in the middle of a change. This object is built on the main thread, before the link
+     * thread starts.
+     */
+
+    /** Hands [change], which may alter the messages, the index or the mode, to the owner. */
+    private fun change(change: () -> Unit) = owner.post(change)
+
+    /**
+     * The same, for a caller that tells someone what happened (the HTTP server): waits until the
+     * owner has made the change and returns its result or throws its error. Not from the main
+     * thread (see OwnerQueue.ask).
+     */
+    private fun <T> changeAndWait(change: () -> T): T = owner.ask(change = change)
+
 
     init {
 
-        msgRepo.marqueeMessages.addAll(msgRepo.loadUserMessages(context))
+        msgRepo.marqueeMessages.addAll(msgRepo.loadUserMessages(filesDir))
         val ads: List<Message> = loadAds()
 
         advertisements.addAll(
@@ -122,11 +145,10 @@ class MessageManager(
         )
 //        pushAdvertisements()
 
-        CoroutineScope(Dispatchers.Main).launch {
-            keyboardManager.newSubmittedKeyboardMessage.collectLatest { msg ->
-                logD("Processing new submitted keyboard message: $msg")
-                processNewUserMessage(msg, isQuery = true)
-            }
+        // On the owner thread, in the same step that took the text and ended the input
+        keyboardManager.onSubmitted = { msg ->
+            logD("Processing new submitted keyboard message: $msg")
+            addNewUserMessage(msg, isQuery = true)
         }
 
         gptViewModel.GPTResponse.observeForever { reply ->
@@ -136,23 +158,31 @@ class MessageManager(
         }
 
         gptViewModel.GPTError.observeForever {
-            logW("GPT Reply Error: ${it.message}")
-            togglePersistentThinkingMessage(false)
-            msgRepo.pushOneTimeMessages(
-                Message.ColorMessage.ChonkySlide("NO", context.getColor(R.color.instahandle), delayMs = 650),
-                Message.ColorMessage.ChonkySlide("NO BARS", context.getColor(R.color.instahandle), delayMs = 650),
-                Message.ColorMessage.ChonkySlide("TRYING", context.getColor(R.color.instahandle), delayMs = 400),
-                Message.ColorMessage.ChonkySlide("AGAIN", context.getColor(R.color.instahandle), delayMs = 400),
-                Message.ColorMessage.ChonkySlide("LATER!", context.getColor(R.color.instahandle), delayMs = 400),
-                Message.Starfield()
-            )
+            change {
+                logW("GPT Reply Error: ${it.message}")
+                setThinking(false)
+                msgRepo.pushOneTimeMessages(
+                    Message.ColorMessage.ChonkySlide("NO", context.getColor(R.color.instahandle), delayMs = 650),
+                    Message.ColorMessage.ChonkySlide("NO BARS", context.getColor(R.color.instahandle), delayMs = 650),
+                    Message.ColorMessage.ChonkySlide("TRYING", context.getColor(R.color.instahandle), delayMs = 400),
+                    Message.ColorMessage.ChonkySlide("AGAIN", context.getColor(R.color.instahandle), delayMs = 400),
+                    Message.ColorMessage.ChonkySlide("LATER!", context.getColor(R.color.instahandle), delayMs = 400),
+                    Message.Starfield()
+                )
+            }
         }
     }
 
     private var usrMsgCount: Int = 0
 
-    /** Pushes a new user message onto the top of the messages list. */
-    fun processNewUserMessage(str: String, isQuery: Boolean = false) {
+    /** Pushes a new user message onto the top of the messages list. Returns when it is there. */
+    fun processNewUserMessage(str: String, isQuery: Boolean = false): Unit =
+        changeAndWait { addNewUserMessage(str, isQuery) }
+
+    /** The stored messages as the owner has them now, newest first. Returns a copy. */
+    fun storedMessages(): List<Message.Marquee> = owner.ask { msgRepo.marqueeMessages.toList() }
+
+    private fun addNewUserMessage(str: String, isQuery: Boolean) {
         currentIdx.update { 0 }
 
 //        String(value).split("++").filter { it.isNotBlank() }.reversed().forEach {
@@ -170,7 +200,7 @@ class MessageManager(
         }
         msgRepo.enqueueOneTimeMessage(Message.CountDownAnnouncement.NewMessageAnnouncement)
         msgRepo.pushMarqueeMessage(newUserMessage)
-        msgRepo.saveMarqueeMessages(context)
+        msgRepo.saveMarqueeMessages(filesDir)
     }
 
 
@@ -200,6 +230,10 @@ class MessageManager(
         }
     }
 
+    /**
+     * The message to send to the sign now, TAKEN from its queue or with the index moved on: only
+     * ever the answer to a request the sign really made. Owner thread only.
+     */
     fun getNextMessage(): Message {
         if (isInChooserMode) {
             return getNextChooserMessage()
@@ -225,7 +259,7 @@ class MessageManager(
                 is Message.Marquee.GPTReply -> {
                     logD("Converting GPTReply to User message!")
                     msgRepo.marqueeMessages[currentIdx.value] = curMsg.toChonkyMessage()
-                    msgRepo.saveMarqueeMessages(context)
+                    msgRepo.saveMarqueeMessages(filesDir)
                     msgRepo.pushOneTimeMessages(
 //                        Message.ColorMessage.ChonkySlide("BAAAHS", context.getColor(R.color.green)),
                         Message.ColorMessage.ChonkySlide("RAVEGPT", context.getColor(R.color.green), delayMs = 750),
@@ -273,7 +307,7 @@ class MessageManager(
         logD("getNextMessage: messages[$idx] = $currentMsg")
         usrMsgCount++
         if (currentMsg is Message.Marquee.GPTQuery) {
-            togglePersistentThinkingMessage(true)
+            setThinking(true)
             gptViewModel.generateAnswer(currentMsg)
         } else {
             if (usrMsgCount % advertiseEvery == 0) {
@@ -333,6 +367,20 @@ class MessageManager(
     private fun getNextChooserMessage(): Message.Chooser =
         ChooserProtocol.chooserMessage(msgRepo.marqueeMessages, currentIdx.value)
 
+    /**
+     * [message] was taken by getNextMessage and could not be written to the sign. A one-time
+     * message (a command such as the microphone switch, an announcement) goes back to the front
+     * of its queue; a stored message needs nothing, it comes round again. Owner thread only.
+     */
+    fun returnUnsent(message: Message) {
+        // (the thinking message put its follow-up in the queue when it was taken)
+        if (message !is Message.Marquee && message !is Message.Chooser && message !is Message.KeyboardEcho &&
+            message !is Message.ColorMessage.GPTThinking
+        ) {
+            msgRepo.pushOneTimeMessage(message)
+        }
+    }
+
     private fun getIdxAndAdvance(): Int {
         return currentIdx.getAndUpdate {
             if (isPaused) {
@@ -345,7 +393,6 @@ class MessageManager(
     }
 
     private fun processUartCommand(value: ByteArray) {
-        logD("Procesing Uart command ${String(value)}")
         when (val cmd = String(value)) {
             "!c",
             "!choose" -> {
@@ -382,7 +429,7 @@ class MessageManager(
                     currentIdx.update {
                         if (it >= msgRepo.marqueeMessages.lastIndex) msgRepo.marqueeMessages.lastIndex else it
                     }
-                    msgRepo.saveMarqueeMessages(context)
+                    msgRepo.saveMarqueeMessages(filesDir)
                 }
             }
 
@@ -413,6 +460,7 @@ class MessageManager(
             else -> {
                 when {
                     cmd.startsWith("!🅰") -> {
+                        // handled in processNewBytes: its emoji are parsed on the caller's thread
 //                        !🅰️
 //                        🆑🕰BAAAHS
 //                        🆑AT THE
@@ -427,7 +475,6 @@ class MessageManager(
 //                        🅾️🕰🧡@APHEXCX
 //                        🛤️
 //                        👾
-                        processAdChange(cmd.drop(2))
                     }
 
                     cmd.startsWith("!B", ignoreCase = true) -> {
@@ -467,8 +514,12 @@ class MessageManager(
         }
     }
 
-    private fun processAdChange(adString: String) {
-        val ads = adString.lines().mapNotNull { line ->
+    /**
+     * The advertisements of an ad command. On the caller's thread, not the owner's: the emoji
+     * library reads its whole table the first time it is used. Reads no message state.
+     */
+    private fun parseAds(adString: String): List<Message> {
+        return adString.lines().mapNotNull { line ->
 
             val delay = (EmojiParser.extractEmojis(line).count { it == "🕰" } + 1) * 1000
 
@@ -525,8 +576,6 @@ class MessageManager(
                 else -> null
             }
         }
-
-        replaceAdsWith(ads)
     }
 
     private fun emojiToColor(line: String): Int? = when {
@@ -570,7 +619,7 @@ class MessageManager(
 
     private fun loadAds(): List<Message> {
         try {
-            with(File(context.filesDir, ADS_FILE_NAME)) {
+            with(File(filesDir, ADS_FILE_NAME)) {
                 if (createNewFile()) {
                     logD("$ADS_FILE_NAME does not exist; created new, with default ad of <Invaders>.")
                     writeText(gson.toJson(DEFAULT_ADS))
@@ -593,29 +642,48 @@ class MessageManager(
     }
 
     private fun saveAds() {
+        val snapshot = ArrayList(advertisements)
+        msgRepo.saveLater {
         try {
-            with(File(context.filesDir, ADS_FILE_NAME)) {
+            val json = gson.toJson(snapshot)
+            with(File(filesDir, ADS_FILE_NAME)) {
                 when (createNewFile()) {
                     true -> logD("$ADS_FILE_NAME does not exist; created new.")
                     else -> logD("$ADS_FILE_NAME exists. Writing ads...")
                 }
-                writeText(gson.toJson(advertisements))
+                writeText(json)
             }
         } catch (e: Throwable) {
             logW("Exception when saving $ADS_FILE_NAME! ${e.message}")
         }
-    }
-
-
-    fun processNewBytes(value: ByteArray) {
-        if (String(value).startsWith("!")) {
-            processUartCommand(value)
-        } else {
-            processNewUserMessage(String(value))
         }
     }
 
-    fun processNowPlayingTrack(track: BeatLinkTrack) {
+
+    /** A command or a new message, as the phone writes it. Posted: it has not been carried out when this returns. */
+    fun processNewBytes(value: ByteArray) = change(bytesChange(value))
+
+    /** The same, for a caller that says "done" to someone: returns when the owner has carried it out. Not from the main thread. */
+    fun processNewBytesAndWait(value: ByteArray): Unit = changeAndWait(bytesChange(value))
+
+    /** What [value] asks for, as a change for the owner. What can be done here, on the caller's thread, is done here. */
+    private fun bytesChange(value: ByteArray): () -> Unit {
+        val cmd = String(value)
+        return if (cmd.startsWith("!🅰")) {
+            logD("Procesing Uart command $cmd")
+            val ads = parseAds(cmd.drop(2))
+            ({ replaceAdsWith(ads) })
+        } else if (cmd.startsWith("!")) {
+            // logged here, by the caller: the owner has the sign to answer
+            logD("Procesing Uart command $cmd")
+            ({ processUartCommand(value) })
+        } else {
+            ({ addNewUserMessage(cmd, isQuery = false) })
+        }
+    }
+
+    /** Returns when the owner has taken the track in. */
+    fun processNowPlayingTrack(track: BeatLinkTrack): Unit = changeAndWait {
         if (track.isEmpty) {
             nowPlayingTrack = null
             pushAdvertisements()
@@ -640,29 +708,43 @@ class MessageManager(
     }
 
     /* For replies generated by externally running models e.g. Llama running on my laptop */
-    fun onNewPostedGPTReply(postedGptAnswer: PostedGptAnswer) {
+    /** Returns whether the reply was stored: not when it is blank, and not when there is no message to reply to. */
+    fun onNewPostedGPTReply(postedGptAnswer: PostedGptAnswer): Boolean =
+        changeAndWait { insertPostedGPTReply(postedGptAnswer) }
+
+    private fun insertPostedGPTReply(postedGptAnswer: PostedGptAnswer): Boolean {
         logD("Processing Posted GPT Answer: $postedGptAnswer")
-        togglePersistentThinkingMessage(false)
+        setThinking(false)
         if (postedGptAnswer.answer.isBlank()) {
             logW("GPT Answer is blank; not adding to messages.")
-            return
+            return false
+        }
+        if (msgRepo.marqueeMessages.isEmpty()) {
+            logW("GPT Answer has no message to reply to; not adding to messages.")
+            return false
         }
         msgRepo.insertGPTReplyToUserMessage(postedGptAnswer)
-        msgRepo.saveMarqueeMessages(context)
+        msgRepo.saveMarqueeMessages(filesDir)
+        return true
     }
 
-    private fun processGPTResponse(gptAnswerResponse: GptAnswerResponse) {
+    private fun processGPTResponse(gptAnswerResponse: GptAnswerResponse): Unit = change { insertGPTResponse(gptAnswerResponse) }
+
+    private fun insertGPTResponse(gptAnswerResponse: GptAnswerResponse) {
         logD("Processing GPT Response: $gptAnswerResponse")
-        togglePersistentThinkingMessage(false)
+        setThinking(false)
         if (gptAnswerResponse.answer.isBlank()) {
             logW("GPT Response is blank; not adding to messages.")
             return
         }
         msgRepo.insertGPTReply(gptAnswerResponse)
-        msgRepo.saveMarqueeMessages(context)
+        msgRepo.saveMarqueeMessages(filesDir)
     }
 
-    fun togglePersistentThinkingMessage(thinking: Boolean) {
+    /** Returns when the owner has made the change. */
+    fun togglePersistentThinkingMessage(thinking: Boolean): Unit = changeAndWait { setThinking(thinking) }
+
+    private fun setThinking(thinking: Boolean) {
         if (thinking) {
 //            showCaretThink = true
 //            showCaretThinkDots = 0
