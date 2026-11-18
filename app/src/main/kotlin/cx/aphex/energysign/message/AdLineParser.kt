@@ -108,11 +108,12 @@ object AdLineParser {
     }
 
     /**
-     * The text the sign shows for [line]. `<3` becomes the sign's heart character. That is done
-     * after the emoji are gone, and only for a typed `<3`: a heart emoji in an ad line chooses
-     * the colour and draws nothing.
+     * The text the sign shows for [line]. A typed `<3` becomes the sign's heart character. The
+     * two characters are looked for in the line as it was sent, before the emoji are taken out:
+     * `<`, an emoji, `3` stays `<3`, as it was before there were hearts. A heart emoji in an ad
+     * line chooses the colour and draws nothing.
      */
-    fun adText(line: String): String = AdRules.text(line).replace("<3", Message.HEART.toString())
+    fun adText(line: String): String = AdRules.text(line.replace("<3", Message.HEART.toString()))
 
     private fun colorOf(line: String, palette: AdPalette): Int? = when {
         line.contains(YELLOW_HEART) -> palette.instagram

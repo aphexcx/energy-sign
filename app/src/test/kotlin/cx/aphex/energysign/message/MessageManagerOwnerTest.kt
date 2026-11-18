@@ -659,4 +659,74 @@ class MessageManagerOwnerTest {
 
         assertEquals(listOf("TWO", "TWO", "TWO"), (1..3).map { restarted.manager.getNextMessage().str })
     }
+
+    @Test
+    fun `after a restart the saved period is the one the ads are shown by`() {
+        val filesDir = newFilesDir()
+        App(filesDir).run {
+            phone("!A3")
+            ownerRuns()
+            saverRuns()
+        }
+
+        val restarted = App(filesDir)
+        restarted.repo.marqueeMessages.addAll((1..7).map { Message.Marquee.User("MESSAGE $it") })
+
+        // three stored messages, then the ad round (the two default icons, "1" and "2"), and again
+        assertEquals(
+            listOf(
+                "MESSAGE 1", "MESSAGE 2", "MESSAGE 3", "1", "2",
+                "MESSAGE 4", "MESSAGE 5", "MESSAGE 6", "1", "2",
+                "MESSAGE 7",
+            ),
+            (1..11).map { restarted.manager.getNextMessage().str }
+        )
+    }
+
+    @Test
+    fun `a new period is the one the ads are shown by at once, and a refused one changes nothing`() {
+        val app = App(newFilesDir())
+        app.repo.marqueeMessages.addAll((1..5).map { Message.Marquee.User("MESSAGE $it") })
+        app.phone("!A2")
+        app.phone("!A0")
+        ownerRuns()
+        app.repo.oneTimeMessages.clear() // the two "AD EVERY=2" flashes and their stars
+
+        assertEquals(
+            listOf("MESSAGE 1", "MESSAGE 2", "1", "2", "MESSAGE 3", "MESSAGE 4", "1", "2", "MESSAGE 5"),
+            (1..9).map { app.manager.getNextMessage().str }
+        )
+    }
+
+    /** One request of the sign, answered by the real responder: the text that goes out on the wire. */
+    private fun frameFor(app: App): String {
+        var frame: String? = null
+        SignResponder(nextMessage = { app.manager.getNextMessage() }, write = { reply, _ -> frame = reply; true })
+            .onRequest(byteArrayOf('~'.code.toByte()), 1)
+        return frame!!
+    }
+
+    @Test
+    fun `the now-playing line is held to the limit, in the ad round and when the track is announced`() {
+        // A track with a title of 750 characters, then an ad list that is the place of the track.
+        val app = App(newFilesDir())
+        app.manager.processNowPlayingTrack(BeatLinkTrack(id = 1, title = "A".repeat(750), artist = "DJ"))
+        ownerRuns()
+        app.phone("!$A\n🛤")
+        ownerRuns()
+
+        // the ad round (CURRENT, TRACK:, the track), then the announcement queued before it (NOW PLAYING, the track, stars)
+        val frames = (1..6).map { frameFor(app) }
+        val sent = frames.map { com.google.gson.JsonParser.parseString(it).asJsonObject }
+
+        assertEquals(listOf("O", "O", "T", "F", "T", "S"), sent.map { it["type"].asString })
+        frames.forEachIndexed { i, frame ->
+            val bytes = frame.toByteArray(Charsets.UTF_8).size
+            assertTrue(bytes <= 500, "answer ${i + 1} is $bytes bytes")
+        }
+        listOf(sent[2], sent[4]).forEach { track ->
+            assertTrue(track["str"].asString.startsWith("DJ - AAAA"), "the beginning of the line is kept")
+        }
+        assertEquals(500, frames[2].toByteArray(Charsets.UTF_8).size, "as much of it as fits")
+    }
 }

@@ -244,6 +244,22 @@ class AdLineParserTest {
     }
 
     @Test
+    fun `only a heart that was typed is a heart, not one that taking out an emoji would make`() {
+        // "<", a blue heart for the colour, "3": two characters in blue, as before
+        val coloured = oneByOne("$O<${BLUE_HEART}3")
+        assertEquals("<3", coloured.str)
+        assertEquals(palette.twitter, rgb(coloured))
+
+        assertEquals("<3", chonky("$CL<${CLOCK}3").str)
+        assertEquals("<3", chonky("$CL<${VS}3").str)
+        assertEquals("<3", oneByOne("$O<é" + "3").str)
+        // and a look-alike of "<" is not a typed "<" either
+        assertEquals("<3", oneByOne("$O‹" + "3").str)
+        // a typed one beside an emoji still is
+        assertEquals("$HEART!", oneByOne("$O$BLUE_HEART<3$CLOCK!").str)
+    }
+
+    @Test
     fun `the heart goes to the sign as one byte`() {
         val json = wire(oneByOne("${O}A<3B"))
 
@@ -317,17 +333,26 @@ class AdLineParserTest {
     }
 
     @Test
-    fun `an ad that just fits is not cut and one byte more is cut by one character`() {
-        val room = AdSizeLimit.MAX_AD_JSON_BYTES - AdSizeLimit.jsonBytes(OneByOneMessage("", palette.instagram, 1000))
-
-        val justFits = oneByOne(O + "A".repeat(room))
-        assertEquals(room, justFits.str.length)
-        assertEquals(AdSizeLimit.MAX_AD_JSON_BYTES, AdSizeLimit.jsonBytes(justFits))
+    fun `an ad line whose answer is exactly 500 bytes is not cut and one character more is cut by one`() {
+        // The numbers are written out and the bytes are those of the responder's answer.
+        // {"str":"","dly":1000,"type":"O","r":254,"g":212,"b":59} is 55 bytes: 445 plain characters make 500.
+        val justFits = oneByOne(O + "A".repeat(445))
+        assertEquals(445, justFits.str.length)
+        assertEquals(500, bytesOnTheWire(justFits))
         assertEquals(emptyList(), warnings)
 
-        val oneMore = oneByOne(O + "A".repeat(room + 1))
-        assertEquals(room, oneMore.str.length)
+        val oneMore = oneByOne(O + "A".repeat(446))
+        assertEquals(445, oneMore.str.length)
+        assertEquals(500, bytesOnTheWire(oneMore))
         assertEquals(1, warnings.size)
+    }
+
+    /** What the sign gets when it asks and [message] is next: the bytes of the real responder's answer. */
+    private fun bytesOnTheWire(message: Message): Int {
+        var frame: String? = null
+        SignResponder(nextMessage = { message }, write = { reply, _ -> frame = reply; true })
+            .onRequest(byteArrayOf('~'.code.toByte()), 1)
+        return frame!!.toByteArray(Charsets.UTF_8).size
     }
 
     @Test

@@ -38,6 +38,15 @@ object AdRules {
     }
 
     /**
+     * The line for the track that is playing, "artist - title". Nobody types it: it is put in
+     * the place an ad list has for it when the ad round is made, and it is announced when the
+     * track starts. Both go to the sign, so it is held to the text rule and to the size limit
+     * here, where the message is made. [note] gets one line when it was cut.
+     */
+    fun nowPlaying(artist: String, title: String, note: (String) -> Unit): Message.NowPlayingTrackMessage =
+        AdSizeLimit.fit(text("$artist - $title"), note) { Message.NowPlayingTrackMessage(it) }
+
+    /**
      * The `dly` of an ad for a wish of [ms]: whole seconds, from one to thirty.
      *
      * More than thirty seconds becomes thirty. So does a negative number: `dly` is a Short, and

@@ -289,8 +289,9 @@ class MessageManager(
             return it
         }
 
-        // Nothing at all to show: no user message, and the ad list was emptied on purpose (it now
-        // stays empty across a restart). The sign still gets an answer, not an exception.
+        // Nothing at all to show: no user message and no ad (the ad list was emptied on purpose,
+        // which now stays so across a restart, or it holds only the place of a track and none is
+        // playing). The sign still gets an answer, not an exception.
         if (msgRepo.marqueeMessages.isEmpty()) {
             return Message.Starfield()
         }
@@ -624,9 +625,7 @@ class MessageManager(
             pushAdvertisements()
         } else {
             if (track !in playedTracks) {
-                nowPlayingTrack = Message.NowPlayingTrackMessage(
-                    "${track.artist.toNormalized()} - ${track.title.toNormalized()}"
-                )
+                nowPlayingTrack = AdRules.nowPlaying(track.artist, track.title, note = { logW(it) })
                 msgRepo.oneTimeMessages.removeIf { it is NowPlayingAnnouncement || it is Message.NowPlayingTrackMessage }
 
                 msgRepo.enqueueOneTimeMessage(NowPlayingAnnouncement)

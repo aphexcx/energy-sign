@@ -69,6 +69,50 @@ class AdStoreTest {
     }
 
     @Test
+    fun `a new list is sent to the disk while the old one is still in place, and only then replaces it`() {
+        AdStore(dir).saveAds(someAds)
+        val old = adsFile.readText()
+        val fresh = listOf<Message>(IconInvaders.EDC(0x04ff19))
+        val atTheSync = mutableListOf<String>()
+        val store = AdStore(dir, toDisk = { out ->
+            atTheSync += "beside: " + File(dir, "ads.json.new").readText()
+            atTheSync += "in place: " + adsFile.readText()
+            out.fd.sync()
+        })
+
+        store.saveAds(fresh)
+
+        assertEquals(listOf("beside: " + AdCodec.encode(fresh), "in place: $old"), atTheSync)
+        assertEquals(AdCodec.encode(fresh), adsFile.readText())
+        assertEquals(listOf("ads.json"), dir.list()!!.toList())
+    }
+
+    @Test
+    fun `every save is sent to the disk once, the period too`() {
+        var syncs = 0
+        val store = AdStore(dir, toDisk = { out -> syncs++; out.fd.sync() })
+
+        store.saveAds(someAds)
+        assertEquals(1, syncs)
+        store.saveEncodedAds("[]")
+        assertEquals(2, syncs)
+        store.savePeriod(4)
+        assertEquals(3, syncs)
+    }
+
+    @Test
+    fun `when the disk refuses the new list, the old one stays in place`() {
+        AdStore(dir).saveAds(someAds)
+        val old = adsFile.readText()
+        val store = AdStore(dir, toDisk = { throw java.io.IOException("no space left") })
+
+        assertFailsWith<java.io.IOException> { store.saveAds(emptyList()) }
+
+        assertEquals(old, adsFile.readText())
+        assertEquals(wire(someAds), wire(assertIs<AdStore.SavedAds.Ads>(AdStore(dir).loadAds()).ads))
+    }
+
+    @Test
     fun `a new list replaces the old one and leaves no other file behind`() {
         AdStore(dir).saveAds(someAds)
         AdStore(dir).saveAds(listOf(IconInvaders.EDC(0x04ff19)))

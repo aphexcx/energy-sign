@@ -12,7 +12,11 @@ import java.nio.file.StandardCopyOption
  *
  * Loading never writes: a file that cannot be read stays as it is until the next save.
  */
-class AdStore(private val dir: File) {
+class AdStore(
+    private val dir: File,
+    /** Makes what was written to [FileOutputStream] reach the disk. A test puts itself in here to see when it is asked for. */
+    private val toDisk: (FileOutputStream) -> Unit = { it.fd.sync() },
+) {
 
     /** What [loadAds] found. */
     sealed class SavedAds {
@@ -74,7 +78,7 @@ class AdStore(private val dir: File) {
         val fresh = File(parentFile, "$name.new")
         FileOutputStream(fresh).use { out ->
             out.write(text.toByteArray())
-            out.fd.sync()
+            toDisk(out)
         }
         Files.move(fresh.toPath(), toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
     }
