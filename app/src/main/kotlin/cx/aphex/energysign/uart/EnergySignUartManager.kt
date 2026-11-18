@@ -11,23 +11,25 @@ import cx.aphex.energysign.MainViewModel
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logE
 import cx.aphex.energysign.ext.logW
-import cx.aphex.energysign.message.ChooserProtocol
-import cx.aphex.energysign.message.SignRequest
+import cx.aphex.energysign.message.OwnerQueue
 import io.reactivex.rxjava3.subjects.BehaviorSubject
 import java.io.IOException
 import java.lang.reflect.Method
-import java.util.concurrent.locks.LockSupport
 
 /**
  * The UART to the sign. It is opened here; from [start] on, the [SignLink] thread is the only
- * one that reads or writes it (see [SignLink] for why this is a thread and not the UART callback).
+ * one that reads, writes or closes it, and the only one that touches the message state
+ * ([owner]). Everything that decides anything is in [SignLink]; this class is the Android
+ * around it.
  *
- * Two switches for measuring on the device, both without a rebuild:
+ * Three switches for measuring on the device, without a rebuild:
  *  - the timing log: `adb shell setprop log.tag.SignUart VERBOSE` (see [UartTimingLog])
  *  - how a push gets the sign's attention: `adb shell setprop debug.energysign.attn break|zeros|off`,
  *    or empty for the default (read at every push; see [ATTN_PROPERTY])
+ *  - the priority of the link thread: `adb shell setprop debug.energysign.nice -16`
+ *    (read when the app starts; see [NICE_PROPERTY])
  */
-class EnergySignUartManager(val viewModel: MainViewModel) {
+class EnergySignUartManager(private val viewModel: MainViewModel, private val owner: OwnerQueue) {
     private val uartDevice: UartDevice = configureUart()
 
     val receivedBytes: BehaviorSubject<ByteArray> = BehaviorSubject.createDefault(byteArrayOf())
@@ -41,74 +43,24 @@ class EnergySignUartManager(val viewModel: MainViewModel) {
         threadCpuNanos = { Debug.threadCpuTimeNanos() },
     )
 
-    /**
-     * Set when sendBreak has thrown, or taken far longer than asked: the 0x00 run is used from
-     * then on unless the property says `break`. Link thread only.
-     */
-    private var breakUnusable = false
-
-    /**
-     * When the bytes written so far will have left the wire. write() returns before they are
-     * sent (it is non-blocking), at 14400 baud a message takes 30 to 70 ms. Link thread only.
-     */
-    private var wireBusyUntilNs = 0L
-
     private val wire = object : SignWire {
         override fun read(buffer: ByteArray, length: Int): Int = uartDevice.read(buffer, length)
-
-        /** Returns when the line is HIGH again, in both modes. */
-        override fun attention(millis: Int) {
-            // Not behind a reply that is still going out: the LOW must start now, and end before the guard
-            sleepUntil(wireBusyUntilNs)
-
-            val mode = attentionMode()
-            if (mode == ATTN_BREAK || (mode != ATTN_ZEROS && !breakUnusable)) {
-                try {
-                    val callNs = System.nanoTime()
-                    uartDevice.sendBreak(millis)
-                    val tookMs = (System.nanoTime() - callNs) / 1_000_000
-                    if (tookMs > millis * BREAK_TOO_LONG_FACTOR && !breakUnusable) {
-                        breakUnusable = true
-                        logW("sendBreak($millis) took $tookMs ms on $UART_DEVICE_NAME, using a run of 0x00 from now on")
-                    }
-                    return
-                } catch (e: IOException) {
-                    breakUnusable = true
-                    logW("sendBreak($millis) failed on $UART_DEVICE_NAME, using a run of 0x00 from now on: $e")
-                }
-            }
-            // A 0x00 byte is start bit + 8 data bits LOW, then the stop bit HIGH: LOW nine tenths of the time
-            val zeros = ByteArray((millis * UART_BAUD_RATE + 9_999) / 10_000)
-            val wrote = uartDevice.write(zeros, zeros.size)
-            if (wrote != zeros.size) {
-                logW("Attention: wrote $wrote of ${zeros.size} zero bytes to $UART_DEVICE_NAME")
-            }
-            wrote(wrote)
-            sleepUntil(wireBusyUntilNs)
-        }
-    }
-
-    /** [count] more bytes are queued for the wire: ten bit times each. */
-    private fun wrote(count: Int) {
-        if (count > 0) {
-            wireBusyUntilNs = maxOf(wireBusyUntilNs, System.nanoTime()) + count * 10_000_000_000L / UART_BAUD_RATE
-        }
-    }
-
-    private fun sleepUntil(deadlineNs: Long) {
-        while (true) {
-            val leftNs = deadlineNs - System.nanoTime()
-            if (leftNs <= 0 || Thread.currentThread().isInterrupted) return
-            LockSupport.parkNanos(leftNs)
-        }
+        override fun write(buffer: ByteArray, length: Int): Int = uartDevice.write(buffer, length)
+        override fun sendBreak(millis: Int) = uartDevice.sendBreak(millis)
+        override fun close() = uartDevice.close()
     }
 
     private val link = SignLink(
         wire = wire,
-        onRequest = ::onRequest,
-        onPush = { viewModel.onSignPush() },
+        baud = UART_BAUD_RATE,
+        name = UART_DEVICE_NAME,
+        events = { owner.drain { error -> logW("A change to the messages failed: $error", error) } },
+        answer = ::answer,
+        chooserFrame = { viewModel.chooserFrame() },
+        attention = ::attentionMode,
         timing = timing,
-        onError = { what, error -> logW("Sign link: $what failed on $UART_DEVICE_NAME: $error") },
+        log = { line -> logD(line) },
+        warn = { line -> logW(line) },
     )
 
     private var linkThread: Thread? = null
@@ -119,64 +71,55 @@ class EnergySignUartManager(val viewModel: MainViewModel) {
 
     /** Starts the sign link thread. Everything it calls into must exist by now. */
     fun start() {
+        val nice = linkNice()
+        owner.wake = link::wake
         linkThread = Thread({
             try {
-                // Above the main thread, which draws the on-screen log: a request must not wait for a frame
-                Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY)
+                Process.setThreadPriority(nice)
             } catch (e: Exception) {
-                logW("Sign link: could not raise the thread priority: $e")
+                logW("Sign link: could not set the thread priority to $nice: $e")
             }
             link.run()
         }, LINK_THREAD_NAME).apply {
             isDaemon = true
             start()
         }
-        logD("Uart device $UART_DEVICE_NAME: sign link thread started")
+        logD("Uart device $UART_DEVICE_NAME: sign link thread started (nice $nice)")
     }
 
+    /** Stops the link thread. It closes the port itself, when it is out of whatever it was doing. */
     fun stop() {
         link.stop()
+        owner.wake = {}
         try {
             linkThread?.join(STOP_JOIN_MS)
         } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()
         }
-        logD("Uart device $UART_DEVICE_NAME: sign link thread stopped")
-
-        try {
-            uartDevice.close()
-        } catch (e: IOException) {
-            logW("Unable to close UART device", e)
+        if (linkThread?.isAlive == true) {
+            logW("Uart device $UART_DEVICE_NAME: sign link thread is still finishing; it closes the port when it is done")
+        } else {
+            logD("Uart device $UART_DEVICE_NAME: sign link thread stopped, port closed")
         }
     }
 
     /**
-     * What the chooser should show has changed: have it pushed to the sign (contract VERSION 3).
+     * What the chooser should show has changed: have it pushed to the sign (contract VERSION 3.1).
      * From any thread; returns at once.
      */
-    fun requestPush() {
-        if (attentionMode() != ATTN_OFF) {
-            link.requestPush()
-        }
-    }
+    fun requestPush() = link.requestPush()
 
-    /**
-     * One request from the sign, on the link thread.
-     * When
-     * new string alert -> display new string alert and write next string from list
-     * else -> write next string from list
-     */
-    private fun onRequest(buffer: ByteArray, count: Int) {
+    /** Writes one reply to the sign. For the answer to a request, on the link thread. */
+    fun send(frame: String, isPollReport: Boolean): Boolean = link.send(frame, isPollReport)
+
+    /** One request from the sign, on the link thread. */
+    private fun answer(buffer: ByteArray, count: Int) {
+        viewModel.onSignRequest(buffer, count)
         val nowNs = System.nanoTime()
         if (timing.enabled(nowNs)) {
-            // How long would this request have waited on the main thread, where it used to be handled?
+            // How long would a request have waited on the main thread, where it used to be handled?
             mainHandler.post { timing.mainLag(nowNs, System.nanoTime()) }
         }
-        // A chooser poll arrives about five times a second: keep it out of the log.
-        if (ChooserProtocol.classifyRequest(buffer, count) != SignRequest.CHOOSER_POLL) {
-            logD("Read $count bytes from $UART_DEVICE_NAME: [${String(buffer, 0, count.coerceIn(0, buffer.size))}]")
-        }
-        viewModel.onSignRequest(buffer, count)
     }
 
     private fun configureUart(): UartDevice {
@@ -203,70 +146,46 @@ class EnergySignUartManager(val viewModel: MainViewModel) {
         }
     }
 
-    /**
-     * Writes [value] to the sign. [log] is off for chooser poll reports (about five a second);
-     * a short write is logged even then. Called on the sign link thread only.
-     */
-    fun write(value: String, log: Boolean = true) {
-        if (log) {
-            logD("Writing >${value}< to $UART_DEVICE_NAME...")
-        }
-
-        val bytes = value.toByteArray()
-//        logD("Bytes: >${bytes.asList()}<")
-        if (bytes.size > MAX_ARDUINO_JSON_SIZE) {
-            logE("JSON string (${bytes.size}) is probably bigger than the maximum size the arduino will accept ($MAX_ARDUINO_JSON_SIZE)! ")
-        }
-
+    private fun property(key: String): String? =
         try {
-            val callNs = System.nanoTime()
-            val count = uartDevice.write(bytes, bytes.size)
-            timing.tx(callNs, System.nanoTime(), count, bytes.size, isPollReport = !log)
-            wrote(count)
-            if (log || count != bytes.size) {
-                logD("Wrote $count of ${bytes.size} bytes to $UART_DEVICE_NAME")
-            }
-        } catch (e: Exception) {
-            logW("Unable to write to UART device $UART_DEVICE_NAME: $e")
-        }
-    }
-
-    /** [ATTN_PROPERTY] as it is set now; [ATTN_AUTO] when it is unset, unknown or unreadable. */
-    private fun attentionMode(): String =
-        try {
-            (SYSTEM_PROPERTY_GET?.invoke(null, ATTN_PROPERTY, ATTN_AUTO) as? String)
-                ?.takeIf { it == ATTN_BREAK || it == ATTN_ZEROS || it == ATTN_OFF }
+            SYSTEM_PROPERTY_GET?.invoke(null, key, "") as? String
         } catch (e: Exception) {
             null
-        } ?: ATTN_AUTO
+        }
+
+    /** [ATTN_PROPERTY] as it is set now; [Attention.AUTO] when it is unset, unknown or unreadable. */
+    private fun attentionMode(): Attention = Attention.of(property(ATTN_PROPERTY))
+
+    private fun linkNice(): Int = property(NICE_PROPERTY)?.trim()?.toIntOrNull()?.coerceIn(-19, 0) ?: DEFAULT_NICE
 
     companion object {
 
         private const val UART_DEVICE_NAME: String = "UART6"
         private const val UART_BAUD_RATE: Int = 14400
-        private const val MAX_ARDUINO_JSON_SIZE: Int = 700
 
         private const val LINK_THREAD_NAME: String = "sign-link"
         private const val STOP_JOIN_MS: Long = 1_000
 
         /**
          * System property that picks how a push gets the sign's attention:
-         *  - unset: `UartDevice.sendBreak(50)`. Its documentation says only "Send a break to the
-         *    device", duration in milliseconds: whether the call waits, and whether the platform
-         *    really takes milliseconds (the Linux call such an API usually sits on, tcsendbreak,
-         *    counts in tenths of a second), is for the `push` timing line to show. If the call
-         *    throws, or takes more than [BREAK_TOO_LONG_FACTOR] times what was asked, the 0x00
-         *    run is used from then on (until the app restarts).
+         *  - unset: `UartDevice.sendBreak(50)`. On the Pico the call returns after 1 ms; that the
+         *    line is then LOW for 50 ms is for the firmware's numbers to show. If the call
+         *    throws, the 0x00 run is used from then on (until the app restarts).
          *  - `break`: sendBreak always, whatever it did before.
          *  - `zeros`: 50 ms worth of 0x00 bytes instead (the fallback in the contract note).
          *  - `off`: no pushes at all, the app behaves as contract 2.1.
          */
         private const val ATTN_PROPERTY: String = "debug.energysign.attn"
-        private const val ATTN_AUTO: String = ""
-        private const val BREAK_TOO_LONG_FACTOR: Int = 3
-        private const val ATTN_BREAK: String = "break"
-        private const val ATTN_ZEROS: String = "zeros"
-        private const val ATTN_OFF: String = "off"
+
+        /**
+         * System property with the nice value of the link thread, -19 to 0, read at [start].
+         * The default is -8 (THREAD_PRIORITY_URGENT_DISPLAY), which the first run on the sign
+         * was measured with. The link thread sleeps nine tenths of the time, but when its sleep
+         * ends it must get the processor: on the sign a few sleeps a minute ended 40 to 80 ms
+         * late (the stat line's sleep_over_max_us shows them). -16 is the value to try.
+         */
+        private const val NICE_PROPERTY: String = "debug.energysign.nice"
+        private const val DEFAULT_NICE: Int = Process.THREAD_PRIORITY_URGENT_DISPLAY
 
         /** `android.os.SystemProperties.get(key, default)`: not in the SDK, present on the device. */
         private val SYSTEM_PROPERTY_GET: Method? =

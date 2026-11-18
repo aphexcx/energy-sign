@@ -14,8 +14,13 @@ import cx.aphex.energysign.toFile
 import io.ktor.util.toUpperCasePreservingASCIIRules
 import java.io.File
 import java.util.Collections.synchronizedList
+import java.util.concurrent.Executor
+import java.util.concurrent.Executors
 
-class MessageRepository {
+class MessageRepository(
+    /** Writes the files: one write at a time, in the order they were asked for. */
+    private val saver: Executor = Executors.newSingleThreadExecutor { Thread(it, "sign-save").apply { isDaemon = true } },
+) {
     val marqueeMessages: MutableList<Message.Marquee> =
         synchronizedList(mutableListOf<Message.Marquee>())
 
@@ -92,24 +97,32 @@ class MessageRepository {
     }
 
     /** Write out the list of strings to the file */
-    fun saveMarqueeMessages(context: Context) {
-        try {
-            marqueeMessages
-                .map { it.toString() }
-                .reversed()
-                .toFile(File(context.filesDir, SIGN_DB_FILE_NAME))
-        } catch (e: Throwable) {
-            logW("Exception when saving $SIGN_DB_FILE_NAME! ${e.message}")
-        }
-        try {
-            marqueeMessages
-                .map { it.str }
-                .reversed()
-                .toFile(File(context.filesDir, SIGN_STRINGS_FILE_NAME))
-        } catch (e: Throwable) {
-            logW("Exception when saving $SIGN_STRINGS_FILE_NAME! ${e.message}")
+    fun saveMarqueeMessages(context: Context) = saveMarqueeMessages(context.filesDir)
+
+    /**
+     * The list is copied here, by the caller (the thread that owns the messages and answers the
+     * sign); the files are written afterwards by the saver. So the caller never waits for
+     * storage, a later change cannot get into an earlier save, and saves keep their order.
+     */
+    fun saveMarqueeMessages(dir: File) {
+        val db = marqueeMessages.map { it.toString() }.reversed()
+        val strings = marqueeMessages.map { it.str }.reversed()
+        saveLater {
+            try {
+                db.toFile(File(dir, SIGN_DB_FILE_NAME))
+            } catch (e: Throwable) {
+                logW("Exception when saving $SIGN_DB_FILE_NAME! ${e.message}")
+            }
+            try {
+                strings.toFile(File(dir, SIGN_STRINGS_FILE_NAME))
+            } catch (e: Throwable) {
+                logW("Exception when saving $SIGN_STRINGS_FILE_NAME! ${e.message}")
+            }
         }
     }
+
+    /** Runs [write], which must have everything it writes already in hand, after the writes asked for before it. */
+    fun saveLater(write: () -> Unit) = saver.execute(write)
 
 
     /** Return the

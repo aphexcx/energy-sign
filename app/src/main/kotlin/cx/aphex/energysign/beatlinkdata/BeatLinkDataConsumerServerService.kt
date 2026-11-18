@@ -65,7 +65,9 @@ class BeatLinkDataConsumerServerService : Service(), KoinComponent {
 
                 get("/messages") {
                     logD("GET /messages")
-                    call.respond(messageManager.msgRepo.marqueeMessages)
+                    // a copy, taken under the list's own lock: the owner thread changes the list
+                    val messages = messageManager.msgRepo.marqueeMessages
+                    call.respond(synchronized(messages) { messages.toList() })
                 }
                 post("/newUserMessage") {
                     val msg: PostedMessage = call.receive()

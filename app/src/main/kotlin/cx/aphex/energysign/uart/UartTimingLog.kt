@@ -14,30 +14,39 @@ package cx.aphex.energysign.uart
  * Every time is the monotonic clock in microseconds (`System.nanoTime() / 1000`), so times of
  * different lines can be subtracted. The lines:
  *
- *     rx t_us=T n=N bytes=[...] chunks=C first_us=F empty_us=E
- *         One request read from the sign. T: the read that completed it returned. N and bytes:
- *         what was read (bytes outside printable ASCII as \xNN). C: how many reads it came in.
- *         F: the first of those reads returned. E: the last read before it that found nothing
- *         returned, so the first byte became readable between E and F. Two request bytes in one
- *         rx with F - E of a few ms mean the platform delivered them together: it held the
- *         first one back, and nothing in the app can fetch it sooner.
- *     tx t_us=T n=W/L kind=report|message call_us=C rx_us=R
- *         One write. T: write() returned. C: write() was called. W of L bytes were taken.
- *         report is a chooser poll report, message a full message. R: the t_us of the latest
- *         rx line, so T - R is request-to-reply inside the app.
+ *     rx t_us=T n=N bytes=[...] chunks=1 first_us=T empty_us=E
+ *         One request read from the sign: N bytes, the last of them `~` or `?` (bytes outside
+ *         printable ASCII as \xNN). T: the read that found it returned. E: the last read before
+ *         it that found nothing returned, so the byte became readable between E and T. Two
+ *         request bytes in one rx with T - E of a few ms mean the platform delivered them
+ *         together: it held the first one back, and nothing in the app can fetch it sooner.
+ *         (chunks and first_us are kept for the tool that reads this log; a request is one read.)
+ *     tx t_us=T n=W/L kind=report|message|attention call_us=C rx_us=R
+ *         One frame handed to the transmitter. T: the last write() returned. C: the first was
+ *         called. W of L bytes were taken; W below L is a failed write. report is a chooser poll
+ *         report, message a full message (a reply or a pushed frame), attention the run of 0x00
+ *         bytes that stands in for a break. R: the t_us of the latest rx line, so T - R is
+ *         request-to-reply inside the app.
  *     drop t_us=T n=N bytes=[...]
- *         Request bytes read away just before a push was written: the push is their answer.
- *     push t_us=T call_us=C break_us=B guard_us=G
- *         One push of the chooser (contract VERSION 3). C: the break was asked for. B: that call
- *         returned. G: the guard after the break ended. T: the message was written (its tx line
- *         comes just before this one).
+ *         Bytes read away unanswered: the sign sent them while a push was on the line (into the
+ *         break or the frame; it asks again), or they do not end in a request byte (the name of
+ *         a parse error the firmware prints before it stops listening).
+ *     push t_us=T call_us=C break_us=B guard_us=G wanted_us=W n=N
+ *         One push of the chooser (contract VERSION 3.1). W: the push began (it then waits for
+ *         the line to be free). C: the break was asked for. B: that call returned. G: the guard
+ *         after the break was over. T: the frame was handed over (its tx line comes just before
+ *         this one). N: the bytes of the frame, 0 for attention alone (leaving chooser mode).
+ *         A push that failed has no line; it is tried again.
  *     main t_us=T posted_us=P lag_us=L
  *         How late the main thread ran something posted to it when an rx was seen: what a
  *         request handled on the main thread, as before this link, would have waited.
- *     stat t_us=T window_ms=W polls=P rx=N read_avg_us=A read_max_us=M gap_max_us=G cpu_ms=C
+ *     stat t_us=T window_ms=W polls=P rx=N read_avg_us=A read_max_us=M gap_max_us=G sleep_over_max_us=S cpu_ms=C
  *         Every ten seconds: P reads of the UART in W ms, N requests among them, the mean and
- *         longest time inside read(), the longest time between two reads (the link thread was
- *         kept waiting when this is far above its pause), and the CPU time the link thread used.
+ *         longest time inside read(), the longest time between two reads, the most a pause of
+ *         the loop overran what it asked for, and the CPU time the link thread used. A large G
+ *         with a large S: the thread was not woken in time (something else had the processor).
+ *         With a large M instead: a read was slow (the peripheral service). With neither: the
+ *         time went into a reply or a push.
  *
  * Called from the link thread, except [mainLag] (main thread); [emit] must be thread-safe.
  */
@@ -69,6 +78,7 @@ class UartTimingLog(
     private var readTotalNs = 0L
     private var readMaxNs = 0L
     private var gapMaxNs = 0L
+    private var sleepOverMaxNs = 0L
     private var previousPollStartNs = 0L
 
     /** Whether lines are being written, as of [nowNs]. */
@@ -81,7 +91,7 @@ class UartTimingLog(
         return on
     }
 
-    /** A request was read: [count] bytes of [buffer], in [chunks] reads from [firstNs] to [lastNs]. */
+    /** A request was read at [lastNs]: [count] bytes of [buffer]. */
     fun rx(firstNs: Long, lastNs: Long, emptyNs: Long, chunks: Int, buffer: ByteArray, count: Int) {
         lastRxNs = lastNs
         if (!enabled(lastNs)) return
@@ -92,28 +102,30 @@ class UartTimingLog(
         )
     }
 
-    /** A write returned: [wrote] of [of] bytes. */
-    fun tx(callNs: Long, returnNs: Long, wrote: Int, of: Int, isPollReport: Boolean) {
+    /** A frame was handed to the transmitter: [wrote] of [of] bytes. [kind]: report, message or attention. */
+    fun tx(callNs: Long, returnNs: Long, wrote: Int, of: Int, kind: String) {
         if (!enabled(returnNs)) return
-        emit(
-            "tx t_us=${returnNs / 1000} n=$wrote/$of kind=${if (isPollReport) "report" else "message"} " +
-                    "call_us=${callNs / 1000} rx_us=${lastRxNs / 1000}"
-        )
+        emit("tx t_us=${returnNs / 1000} n=$wrote/$of kind=$kind call_us=${callNs / 1000} rx_us=${lastRxNs / 1000}")
     }
 
-    /** [count] bytes of [buffer] were read away before a push. */
+    /** [count] bytes of [buffer] were read away unanswered: the sign sent them into a push. */
     fun dropped(atNs: Long, buffer: ByteArray, count: Int) {
         if (!enabled(atNs)) return
         emit("drop t_us=${atNs / 1000} n=$count bytes=[${printable(buffer, count)}]")
     }
 
-    /** A push finished. */
-    fun push(callNs: Long, breakReturnedNs: Long, guardEndNs: Long, doneNs: Long) {
+    /** A push finished: it began at [wantedNs], asked for the break at [callNs], and its frame had [frameBytes] bytes. */
+    fun push(wantedNs: Long, callNs: Long, breakReturnedNs: Long, guardEndNs: Long, doneNs: Long, frameBytes: Int) {
         if (!enabled(doneNs)) return
         emit(
             "push t_us=${doneNs / 1000} call_us=${callNs / 1000} break_us=${breakReturnedNs / 1000} " +
-                    "guard_us=${guardEndNs / 1000}"
+                    "guard_us=${guardEndNs / 1000} wanted_us=${wantedNs / 1000} n=$frameBytes"
         )
+    }
+
+    /** A pause of the loop that asked for [askedNs] took [tookNs]. */
+    fun slept(askedNs: Long, tookNs: Long) {
+        if (on) sleepOverMaxNs = maxOf(sleepOverMaxNs, tookNs - askedNs)
     }
 
     /** Something posted to the main thread at [postedNs] ran at [ranNs]. Posted only while [enabled]. */
@@ -132,7 +144,8 @@ class UartTimingLog(
             emit(
                 "stat t_us=${startNs / 1000} window_ms=${(startNs - windowStartNs) / 1_000_000} polls=$polls " +
                         "rx=$rxCount read_avg_us=${readTotalNs / polls / 1000} read_max_us=${readMaxNs / 1000} " +
-                        "gap_max_us=${gapMaxNs / 1000} cpu_ms=${(cpuNs - windowCpuStartNs) / 1_000_000}"
+                        "gap_max_us=${gapMaxNs / 1000} sleep_over_max_us=${sleepOverMaxNs / 1000} " +
+                        "cpu_ms=${(cpuNs - windowCpuStartNs) / 1_000_000}"
             )
             windowOpen = false
         }
@@ -145,6 +158,7 @@ class UartTimingLog(
             readTotalNs = 0
             readMaxNs = 0
             gapMaxNs = 0
+            sleepOverMaxNs = 0
         } else {
             gapMaxNs = maxOf(gapMaxNs, startNs - previousPollStartNs)
         }

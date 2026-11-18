@@ -48,13 +48,19 @@ class SignResponderTest {
     private val delivered = mutableListOf<String>()
     private var uartWorks = true
 
+    /** The transmitter takes nothing: the write says so. */
+    private var writeFails = false
+    private val handedBack = mutableListOf<Message>()
+
     private val responder = SignResponder(
         nextMessage = source::next,
         write = { reply, isPollReport ->
             written.add(reply)
             if (isPollReport) markedAsPollReport.add(reply)
             if (uartWorks) delivered.add(reply)
+            !writeFails
         },
+        unsent = { handedBack += it },
     )
 
     private fun request(s: String): Message? = s.toByteArray(Charsets.US_ASCII).let { responder.onRequest(it, it.size) }
@@ -378,50 +384,42 @@ class SignResponderTest {
         assertEquals(5, written.size)
     }
 
-    // ---- the push (contract VERSION 3): unasked, the same message a `~` would get
+    // ---- a write that did not go out
 
     @Test
-    fun `a push in chooser mode writes the whole chooser message and consumes nothing`() {
-        source.inChooserMode = true
-        source.idx = 2
-
-        val pushed = responder.push()
-
-        assertTrue(pushed is Message.Chooser)
-        val json = JsonParser.parseString(written.single()).asJsonObject
-        assertEquals("H", json["type"].asString)
-        assertEquals("HELLO W", json["str"].asString)
-        assertEquals("3/12", json["flashy"].asString)
-        assertTrue(markedAsPollReport.isEmpty())
-        assertEquals(0, source.ordinaryServed)
-        // and the `~` that follows gets the very same bytes
-        request("~")
-        assertEquals(written[0], written[1])
-    }
-
-    @Test
-    fun `a push is made from the state at that moment, whatever was pushed before`() {
-        source.inChooserMode = true
-        source.idx = 0
-        responder.push()
-        source.idx = 4
-        responder.push()
-        responder.push()
-
-        assertEquals(3, written.size)
-        assertEquals("1/12", JsonParser.parseString(written[0]).asJsonObject["flashy"].asString)
-        assertEquals("5/12", JsonParser.parseString(written[1]).asJsonObject["flashy"].asString)
-        assertEquals(written[1], written[2])
-    }
-
-    @Test
-    fun `the push on leaving chooser mode sends the next ordinary message, once`() {
+    fun `a message that could not be written is handed back and not reported as sent`() {
         source.inChooserMode = false
+        writeFails = true
 
-        val pushed = responder.push()
+        assertNull(request("~"))
 
-        assertEquals("ORDINARY 1", pushed.str)
-        assertEquals(1, source.ordinaryServed)
-        assertEquals("ORDINARY 1", JsonParser.parseString(written.single()).asJsonObject["str"].asString)
+        assertEquals(1, source.ordinaryServed) // it was taken ...
+        assertEquals("ORDINARY 1", handedBack.single().str) // ... and goes back
+        writeFails = false
+        assertEquals("ORDINARY 2", request("~")?.str)
+        assertEquals(1, handedBack.size)
+    }
+
+    @Test
+    fun `a poll report that could not be written hands nothing back, nothing was taken`() {
+        source.inChooserMode = true
+        writeFails = true
+
+        assertNull(request("?"))
+
+        assertTrue(handedBack.isEmpty())
+        assertEquals(0, source.ordinaryServed)
+    }
+
+    // ---- the first write of every message class is prepared ahead of time
+
+    @Test
+    fun `warming up prepares every message class and changes nothing that is written`() {
+        val before = SignResponder.GSON.toJson(Message.Marquee.User("HELLO"))
+        val prepared = SignResponder.warmUp()
+        // every kind the app can send: marquee texts, colour messages, icons, announcements, utility, chooser, keyboard echo
+        assertTrue(prepared >= 20, "$prepared classes")
+        assertEquals(before, SignResponder.GSON.toJson(Message.Marquee.User("HELLO")))
+        assertEquals(prepared, SignResponder.warmUp())
     }
 }

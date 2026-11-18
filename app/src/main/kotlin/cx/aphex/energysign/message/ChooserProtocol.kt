@@ -1,6 +1,7 @@
 package cx.aphex.energysign.message
 
 import com.google.gson.Gson
+import java.lang.reflect.Modifier
 
 /*
  * Chooser mode, app side of the wire contract with the sign (firmware: aphexcx/arduino-led-marquee).
@@ -105,17 +106,22 @@ object ChooserProtocol {
  * has been consumed and is always sent.
  *
  * [write] gets the reply and whether it is a poll report (about five a second in chooser mode;
- * the caller keeps those out of the log).
+ * the caller keeps those out of the log), and says whether all of it went out. A message that
+ * did not go out is handed to [unsent]: it was taken for nothing.
  *
- * Called on the sign link thread, one call at a time.
+ * Called on the sign link thread, one call at a time, and only for a request the sign really
+ * made: [nextMessage] takes the message it returns. A push (contract VERSION 3.1) does not come
+ * through here; it sends the chooser message alone, which takes nothing.
  */
 class SignResponder(
     private val nextMessage: () -> Message,
-    private val write: (reply: String, isPollReport: Boolean) -> Unit,
+    private val write: (reply: String, isPollReport: Boolean) -> Boolean,
+    private val unsent: (message: Message) -> Unit = {},
 ) {
     /**
-     * Replies to the first [count] bytes of [buffer], read in one UART callback. Returns the
-     * message that was sent, or null when a chooser poll was answered with its state report.
+     * Replies to the first [count] bytes of [buffer], one request of the sign. Returns the
+     * message that was sent; null when a chooser poll was answered with its state report, and
+     * when the message could not be written.
      */
     fun onRequest(buffer: ByteArray, count: Int): Message? {
         val message = nextMessage()
@@ -125,25 +131,40 @@ class SignResponder(
             return null
         }
 
-        // `~`, garbled bytes, or a poll outside chooser mode: the next message in full.
-        write(GSON.toJson(message), false)
-        return message
-    }
-
-    /**
-     * Sends, unasked, the message the app would answer to `~` right now, and returns it
-     * (contract VERSION 3: the app pushes the chooser when it changes, after getting the sign's
-     * attention). Like a reply it is made from the state at this moment; outside chooser mode,
-     * which is the push on leaving it, the message is consumed like any other.
-     */
-    fun push(): Message {
-        val message = nextMessage()
-        write(GSON.toJson(message), false)
+        // `~`, or a poll outside chooser mode: the next message in full.
+        if (!write(GSON.toJson(message), false)) {
+            unsent(message)
+            return null
+        }
         return message
     }
 
     companion object {
         /** The serialiser for everything the app writes to the sign. */
         val GSON: Gson = Gson()
+
+        /**
+         * Gson builds the writer for a class by reflection the first time it writes one. On the
+         * Pico that was 140 ms inside the first reply after the app started and 76 ms inside
+         * the first icon. This does it for every message class ahead of time, off the thread
+         * that answers the sign. Returns how many classes it prepared.
+         */
+        fun warmUp(): Int {
+            var prepared = 0
+            fun visit(type: Class<*>) {
+                if (Message::class.java.isAssignableFrom(type) && !Modifier.isAbstract(type.modifiers)) {
+                    try {
+                        GSON.getAdapter(type)
+                        prepared++
+                    } catch (e: RuntimeException) {
+                        // then it is built at its first use, as before
+                    }
+                }
+                type.declaredClasses.forEach(::visit)
+            }
+            visit(Message::class.java)
+            GSON.toJson(ChooserProtocol.chooserMessage(emptyList(), 0))
+            return prepared
+        }
     }
 }

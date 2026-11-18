@@ -2,7 +2,7 @@ package cx.aphex.energysign.message
 
 /**
  * Notices when what the chooser should show has changed, so the app can push it to the sign
- * (chooser contract VERSION 3: the app raises its hand, the sign does not ask while it scrolls).
+ * (chooser contract VERSION 3.1: the app raises its hand, the sign need not ask while it scrolls).
  *
  * Everything that can change the stored messages, the chooser index or the chooser mode runs
  * inside [watch]. [view] is what the chooser shows at that moment, null outside chooser mode.
@@ -11,7 +11,7 @@ package cx.aphex.energysign.message
  * that changes nothing the sign shows (`!next` on the last message) calls nothing, so the sign's
  * scroll is not restarted for it.
  *
- * Not thread-safe: the caller runs every [watch] under one lock (MessageManager's).
+ * Not thread-safe: every [watch] runs on the one thread that owns the message state.
  */
 class ChooserChangeWatch(
     private val view: () -> Message.Chooser?,

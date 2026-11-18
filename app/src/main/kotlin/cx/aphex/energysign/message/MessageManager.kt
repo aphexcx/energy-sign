@@ -19,10 +19,6 @@ import cx.aphex.energysign.message.Message.FlashingAnnouncement.NowPlayingAnnoun
 import kotlinx.atomicfu.atomic
 import kotlinx.atomicfu.getAndUpdate
 import kotlinx.atomicfu.update
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.launch
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 import java.io.File
@@ -31,6 +27,7 @@ import java.io.File
 class MessageManager(
     private val context: Context,
     val msgRepo: MessageRepository,
+    private val owner: OwnerQueue,
 ) :
     KoinComponent {
     private val gson: Gson = GsonBuilder()
@@ -48,7 +45,6 @@ class MessageManager(
     private val currentIdx = atomic<Int>(0)
 
     // Message type state mess **
-    @Volatile
     private var isInChooserMode: Boolean = false
 
     private var isPaused: Boolean = false
@@ -78,25 +74,29 @@ class MessageManager(
     private val keyboardManager = KeyboardManager
 
     /*
-     * THREADS. The sign link thread asks for messages (getNextMessage); Bluetooth, the BeatLink
-     * server and the main thread (keyboard, GPT answers) change them. Every entry point takes
-     * this object's lock, so each runs whole, one at a time. Lock order: this, then
-     * KeyboardManager, then the message lists. Nothing called under the lock waits for another
-     * thread, and file writes under it are short and rare (a new or deleted message).
+     * THREADS. ONE thread owns everything in here, the lists of MessageRepository and the input
+     * of KeyboardManager: the sign link thread (see OwnerQueue). It alone calls getNextMessage
+     * and chooserShown, and it runs every change. All other entry points are called from other
+     * threads (Bluetooth, the BeatLink server, the main thread with keys and GPT answers): they
+     * post their change to the owner and return, so the change has NOT been made yet when they
+     * return. There is no lock on any of this state: "which message is next" is decided by one
+     * thread from start to end, and no other thread can hold that thread up by being put to
+     * sleep in the middle of a change. This object is built on the main thread, before the link
+     * thread starts.
      */
 
     /**
      * Called once whenever what the chooser should show has changed (entering chooser mode,
-     * another message or count, leaving it): the sign link then pushes it to the sign. Called
-     * under this object's lock from whichever thread made the change, so it must only signal.
+     * another message or count, leaving it): the sign link then pushes it to the sign.
+     * Called on the owner thread.
      */
     @Volatile
     var onChooserChanged: () -> Unit = {}
 
-    private val chooserWatch = ChooserChangeWatch(view = { chooserMessageOrNull() }) { onChooserChanged() }
+    private val chooserWatch = ChooserChangeWatch(view = { chooserShown() }) { onChooserChanged() }
 
-    /** Runs [change], which may alter the messages, the index or the mode, under the lock and the watch. */
-    private fun <T> changing(change: () -> T): T = synchronized(this) { chooserWatch.watch(change) }
+    /** Hands [change], which may alter the messages, the index or the mode, to the owner; it runs under the chooser watch. */
+    private fun change(change: () -> Unit) = owner.post { chooserWatch.watch(change) }
 
 
     init {
@@ -144,11 +144,10 @@ class MessageManager(
         )
 //        pushAdvertisements()
 
-        CoroutineScope(Dispatchers.Main).launch {
-            keyboardManager.newSubmittedKeyboardMessage.collectLatest { msg ->
-                logD("Processing new submitted keyboard message: $msg")
-                processNewUserMessage(msg, isQuery = true)
-            }
+        // On the owner thread, in the same step that took the text and ended the input
+        keyboardManager.onSubmitted = { msg ->
+            logD("Processing new submitted keyboard message: $msg")
+            chooserWatch.watch { addNewUserMessage(msg, isQuery = true) }
         }
 
         gptViewModel.GPTResponse.observeForever { reply ->
@@ -158,9 +157,9 @@ class MessageManager(
         }
 
         gptViewModel.GPTError.observeForever {
-            synchronized(this) {
+            change {
                 logW("GPT Reply Error: ${it.message}")
-                togglePersistentThinkingMessage(false)
+                setThinking(false)
                 msgRepo.pushOneTimeMessages(
                     Message.ColorMessage.ChonkySlide("NO", context.getColor(R.color.instahandle), delayMs = 650),
                     Message.ColorMessage.ChonkySlide("NO BARS", context.getColor(R.color.instahandle), delayMs = 650),
@@ -176,7 +175,7 @@ class MessageManager(
     private var usrMsgCount: Int = 0
 
     /** Pushes a new user message onto the top of the messages list. */
-    fun processNewUserMessage(str: String, isQuery: Boolean = false): Unit = changing { addNewUserMessage(str, isQuery) }
+    fun processNewUserMessage(str: String, isQuery: Boolean = false): Unit = change { addNewUserMessage(str, isQuery) }
 
     private fun addNewUserMessage(str: String, isQuery: Boolean) {
         currentIdx.update { 0 }
@@ -214,8 +213,7 @@ class MessageManager(
         } ?: emptyList()
 
         // Hack to avoid advertising back to back with another advertisement.
-        // (under the list's own lock: KeyboardManager clears this list from the main thread)
-        if (!synchronized(msgRepo.oneTimeMessages) { msgRepo.oneTimeMessages.any { it is Message.ColorMessage.IconInvaders } }) {
+        if (!msgRepo.oneTimeMessages.any { it is Message.ColorMessage.IconInvaders }) {
             val ads = advertisements.flatMap {
                 if (it is Message.NowPlayingTrackMessage) {
                     nowPlayingMsgs
@@ -227,8 +225,10 @@ class MessageManager(
         }
     }
 
-    /** The message to send to the sign now. Called on the sign link thread, for every `~` and every push. */
-    @Synchronized
+    /**
+     * The message to send to the sign now, TAKEN from its queue or with the index moved on: only
+     * ever the answer to a request the sign really made. Owner thread only.
+     */
     fun getNextMessage(): Message {
         if (isInChooserMode) {
             return getNextChooserMessage()
@@ -288,7 +288,7 @@ class MessageManager(
         }
 
         // Display one-time messages first
-        synchronized(msgRepo.oneTimeMessages) { msgRepo.oneTimeMessages.removeFirstOrNull() }?.let {
+        msgRepo.oneTimeMessages.removeFirstOrNull()?.let {
             if (it is Message.ColorMessage.GPTThinking) {
                 logD("GPT is still thinking, injecting another thinking notification")
                 msgRepo.pushOneTimeMessage(it.thinkMore())
@@ -302,7 +302,7 @@ class MessageManager(
         logD("getNextMessage: messages[$idx] = $currentMsg")
         usrMsgCount++
         if (currentMsg is Message.Marquee.GPTQuery) {
-            togglePersistentThinkingMessage(true)
+            setThinking(true)
             gptViewModel.generateAnswer(currentMsg)
         } else {
             if (usrMsgCount % advertiseEvery == 0) {
@@ -360,13 +360,28 @@ class MessageManager(
      * about five times a second in chooser mode and every poll evaluates this without sending it.
      */
     private fun getNextChooserMessage(): Message.Chooser =
-        // the list's own lock: its size and the element are read as one
-        synchronized(msgRepo.marqueeMessages) {
-            ChooserProtocol.chooserMessage(msgRepo.marqueeMessages, currentIdx.value)
-        }
+        ChooserProtocol.chooserMessage(msgRepo.marqueeMessages, currentIdx.value)
 
-    /** What the chooser shows now, null outside chooser mode. No side effects. */
-    private fun chooserMessageOrNull(): Message.Chooser? = if (isInChooserMode) getNextChooserMessage() else null
+    /**
+     * [message] was taken by getNextMessage and could not be written to the sign. A one-time
+     * message (a command such as the microphone switch, an announcement) goes back to the front
+     * of its queue; a stored message needs nothing, it comes round again. Owner thread only.
+     */
+    fun returnUnsent(message: Message) {
+        // (the thinking message put its follow-up in the queue when it was taken)
+        if (message !is Message.Marquee && message !is Message.Chooser && message !is Message.KeyboardEcho &&
+            message !is Message.ColorMessage.GPTThinking
+        ) {
+            msgRepo.pushOneTimeMessage(message)
+        }
+    }
+
+    /**
+     * What the chooser shows now, null outside chooser mode. It reads the list, the index and
+     * the mode and changes nothing: this, and not getNextMessage, is what a push sends, so a
+     * push cannot take a message. Owner thread only.
+     */
+    fun chooserShown(): Message.Chooser? = if (isInChooserMode) getNextChooserMessage() else null
 
     private fun getIdxAndAdvance(): Int {
         return currentIdx.getAndUpdate {
@@ -380,7 +395,6 @@ class MessageManager(
     }
 
     private fun processUartCommand(value: ByteArray) {
-        logD("Procesing Uart command ${String(value)}")
         when (val cmd = String(value)) {
             "!c",
             "!choose" -> {
@@ -448,6 +462,7 @@ class MessageManager(
             else -> {
                 when {
                     cmd.startsWith("!🅰") -> {
+                        // handled in processNewBytes: its emoji are parsed on the caller's thread
 //                        !🅰️
 //                        🆑🕰BAAAHS
 //                        🆑AT THE
@@ -462,7 +477,6 @@ class MessageManager(
 //                        🅾️🕰🧡@APHEXCX
 //                        🛤️
 //                        👾
-                        processAdChange(cmd.drop(2))
                     }
 
                     cmd.startsWith("!B", ignoreCase = true) -> {
@@ -502,8 +516,12 @@ class MessageManager(
         }
     }
 
-    private fun processAdChange(adString: String) {
-        val ads = adString.lines().mapNotNull { line ->
+    /**
+     * The advertisements of an ad command. On the caller's thread, not the owner's: the emoji
+     * library reads its whole table the first time it is used. Reads no message state.
+     */
+    private fun parseAds(adString: String): List<Message> {
+        return adString.lines().mapNotNull { line ->
 
             val delay = (EmojiParser.extractEmojis(line).count { it == "🕰" } + 1) * 1000
 
@@ -560,8 +578,6 @@ class MessageManager(
                 else -> null
             }
         }
-
-        replaceAdsWith(ads)
     }
 
     private fun emojiToColor(line: String): Int? = when {
@@ -628,30 +644,39 @@ class MessageManager(
     }
 
     private fun saveAds() {
+        val json = gson.toJson(advertisements)
+        msgRepo.saveLater {
         try {
             with(File(context.filesDir, ADS_FILE_NAME)) {
                 when (createNewFile()) {
                     true -> logD("$ADS_FILE_NAME does not exist; created new.")
                     else -> logD("$ADS_FILE_NAME exists. Writing ads...")
                 }
-                writeText(gson.toJson(advertisements))
+                writeText(json)
             }
         } catch (e: Throwable) {
             logW("Exception when saving $ADS_FILE_NAME! ${e.message}")
         }
+        }
     }
 
 
-    fun processNewBytes(value: ByteArray): Unit = changing {
-        if (String(value).startsWith("!")) {
-            processUartCommand(value)
+    fun processNewBytes(value: ByteArray) {
+        val cmd = String(value)
+        if (cmd.startsWith("!🅰")) {
+            logD("Procesing Uart command $cmd")
+            val ads = parseAds(cmd.drop(2))
+            change { replaceAdsWith(ads) }
+        } else if (cmd.startsWith("!")) {
+            // logged here, by the caller: the owner has the sign to answer
+            logD("Procesing Uart command $cmd")
+            change { processUartCommand(value) }
         } else {
             processNewUserMessage(String(value))
         }
     }
 
-    @Synchronized
-    fun processNowPlayingTrack(track: BeatLinkTrack) {
+    fun processNowPlayingTrack(track: BeatLinkTrack): Unit = change {
         if (track.isEmpty) {
             nowPlayingTrack = null
             pushAdvertisements()
@@ -676,11 +701,11 @@ class MessageManager(
     }
 
     /* For replies generated by externally running models e.g. Llama running on my laptop */
-    fun onNewPostedGPTReply(postedGptAnswer: PostedGptAnswer): Unit = changing { insertPostedGPTReply(postedGptAnswer) }
+    fun onNewPostedGPTReply(postedGptAnswer: PostedGptAnswer): Unit = change { insertPostedGPTReply(postedGptAnswer) }
 
     private fun insertPostedGPTReply(postedGptAnswer: PostedGptAnswer) {
         logD("Processing Posted GPT Answer: $postedGptAnswer")
-        togglePersistentThinkingMessage(false)
+        setThinking(false)
         if (postedGptAnswer.answer.isBlank()) {
             logW("GPT Answer is blank; not adding to messages.")
             return
@@ -689,11 +714,11 @@ class MessageManager(
         msgRepo.saveMarqueeMessages(context)
     }
 
-    private fun processGPTResponse(gptAnswerResponse: GptAnswerResponse): Unit = changing { insertGPTResponse(gptAnswerResponse) }
+    private fun processGPTResponse(gptAnswerResponse: GptAnswerResponse): Unit = change { insertGPTResponse(gptAnswerResponse) }
 
     private fun insertGPTResponse(gptAnswerResponse: GptAnswerResponse) {
         logD("Processing GPT Response: $gptAnswerResponse")
-        togglePersistentThinkingMessage(false)
+        setThinking(false)
         if (gptAnswerResponse.answer.isBlank()) {
             logW("GPT Response is blank; not adding to messages.")
             return
@@ -702,8 +727,9 @@ class MessageManager(
         msgRepo.saveMarqueeMessages(context)
     }
 
-    @Synchronized
-    fun togglePersistentThinkingMessage(thinking: Boolean) {
+    fun togglePersistentThinkingMessage(thinking: Boolean): Unit = change { setThinking(thinking) }
+
+    private fun setThinking(thinking: Boolean) {
         if (thinking) {
 //            showCaretThink = true
 //            showCaretThinkDots = 0

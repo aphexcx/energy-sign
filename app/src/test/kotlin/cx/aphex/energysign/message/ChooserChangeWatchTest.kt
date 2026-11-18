@@ -7,10 +7,10 @@ import kotlin.test.assertEquals
  * When the app pushes the chooser to the sign (contract VERSION 3): once for every change of
  * what the chooser should show, and never otherwise.
  *
- * MessageManager cannot be built on the JVM (it needs an Android context and its view models),
- * so this drives the watch with a model of its chooser commands: the same list, index and mode,
- * changed the way processUartCommand changes them. In the app every command goes through one
- * watched entry point (processNewBytes), so what holds for the model's commands holds for all.
+ * This is the watch by itself, driven with a model of the chooser commands (the same list,
+ * index and mode, changed the way MessageManager.processUartCommand changes them), so that its
+ * rules can be read in one place. That the real commands of the real MessageManager go through
+ * it is MessageManagerOwnerTest's job.
  */
 class ChooserChangeWatchTest {
     private val messages: MutableList<Message.Marquee> =
