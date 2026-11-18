@@ -608,4 +608,32 @@ class MessageManagerOwnerTest {
             (1..4).map { app.manager.getNextMessage().str }
         )
     }
+
+    @Test
+    fun `after a restart on a file of the old app, what goes to the sign is held to the rules of an ad line`() {
+        // As the old app saved them: an ad of 120 apostrophes (720 bytes of text as JSON) and an
+        // ad with 32 clocks, whose 33000 ms had overflowed to -32536.
+        val filesDir = newFilesDir()
+        val legacy = "[{\"dly\":1000,\"str\":\"" + "\\u0027".repeat(120) + "\",\"type\":\"O\",\"b\":3,\"g\":2,\"r\":1}," +
+                "{\"dly\":-32536,\"scroll\":false,\"str\":\"LONG\",\"type\":\"C\",\"b\":3,\"g\":2,\"r\":1}]"
+        File(filesDir, "ads.json").writeText(legacy)
+
+        val restarted = App(filesDir)
+        // nothing stored and nothing queued: the requests get the ad round, twice
+        val sent = (1..4).map { restarted.manager.getNextMessage() }
+
+        sent.forEach { message ->
+            val bytes = SignResponder.GSON.toJson(message).toByteArray().size
+            assertTrue(bytes <= AdSizeLimit.MAX_AD_JSON_BYTES, "$bytes bytes went to the sign")
+        }
+        val apostrophes = sent[0] as Message.ColorMessage.OneByOneMessage
+        assertTrue(apostrophes.str.isNotEmpty() && apostrophes.str.all { it == '\'' })
+        val long = sent[1] as Message.ColorMessage.ChonkySlide
+        assertEquals("LONG", long.str)
+        assertEquals(30_000, long.delayMs.toInt())
+        assertEquals(listOf(apostrophes.str, "LONG"), sent.drop(2).map { it.str }, "the next ad round is the same")
+        // reading changes nothing on disk; the next ad command writes the file anew
+        assertEquals(legacy, restarted.adsFile.readText())
+        assertEquals(emptyList(), restarted.unsaved)
+    }
 }

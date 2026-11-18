@@ -544,7 +544,7 @@ class MessageManager(
      * as it is until the next ad command replaces the list.
      */
     private fun loadAds(): List<Message> =
-        when (val saved = adStore.loadAds()) {
+        when (val saved = adStore.loadAds(note = { logW("${AdStore.ADS_FILE_NAME}, $it") })) {
             is AdStore.SavedAds.Ads -> {
                 logD("Loaded ${saved.ads.size} ads from ${AdStore.ADS_FILE_NAME}.")
                 saved.ads

@@ -29,10 +29,11 @@ class AdStore(private val dir: File) {
     private val adsFile = File(dir, ADS_FILE_NAME)
     private val periodFile = File(dir, PERIOD_FILE_NAME)
 
-    fun loadAds(): SavedAds {
+    /** [note] gets one line for every saved ad that had to be corrected to fit the rules ([AdCodec.decode]). */
+    fun loadAds(note: (String) -> Unit = {}): SavedAds {
         if (!adsFile.exists()) return SavedAds.NoFile
         return try {
-            SavedAds.Ads(AdCodec.decode(adsFile.readText()))
+            SavedAds.Ads(AdCodec.decode(adsFile.readText(), note))
         } catch (e: AdFileException) {
             SavedAds.Unreadable(e.message ?: "no reason given")
         } catch (e: Throwable) {

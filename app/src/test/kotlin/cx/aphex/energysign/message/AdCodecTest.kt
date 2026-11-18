@@ -174,22 +174,51 @@ class AdCodecTest {
         assertContains(e.message!!, "\"Q\"")
     }
 
+    /** A good chonky ad as the fields of its JSON object. Each fault below changes exactly one of them. */
+    private val goodAd: Map<String, String> = linkedMapOf(
+        "str" to "\"A\"", "type" to "\"C\"", "dly" to "1000", "scroll" to "false", "r" to "1", "g" to "2", "b" to "3",
+    )
+
+    /** The list with [goodAd], its [key] set to the JSON [value], or taken out when that is null. */
+    private fun adWith(key: String, value: String?): String {
+        val fields = goodAd.toMutableMap()
+        if (value == null) fields.remove(key) else fields[key] = value
+        return fields.entries.joinToString(",", "[{", "}]") { (name, json) -> "\"$name\":$json" }
+    }
+
     @Test
-    fun `values of the wrong kind are refused and never read as something else`() {
+    fun `the ad the faults are made from is a good one`() {
+        val ad = assertIs<ChonkySlide>(AdCodec.decode(adWith("str", "\"A\"")).single())
+
+        assertEquals("A", ad.str)
+        // and these two keys may be absent
+        assertIs<ChonkySlide>(AdCodec.decode(adWith("dly", null)).single())
+        assertIs<ChonkySlide>(AdCodec.decode(adWith("scroll", null)).single())
+    }
+
+    @Test
+    fun `one value of the wrong kind refuses the list, and the reason names that value`() {
+        val absent: String? = null
         listOf(
-            """[{"type":"C","dly":1000,"r":1,"g":2,"b":3}]""" to "no str",
-            """[{"str":7,"type":"O","dly":1000,"r":1,"g":2,"b":3}]""" to "str is a number",
-            """[{"str":"A","type":"O","dly":"soon","r":1,"g":2,"b":3}]""" to "dly is a text",
-            """[{"str":"A","type":"O","dly":1000.5,"r":1,"g":2,"b":3}]""" to "dly is not whole",
-            """[{"str":"A","type":"O","dly":40000,"r":1,"g":2,"b":3}]""" to "dly does not fit",
-            """[{"str":"A","type":"O","dly":1000,"g":2,"b":3}]""" to "no r",
-            """[{"str":"A","type":"C","dly":1000,"r":256,"g":2,"b":3}]""" to "r too large",
-            """[{"str":"A","type":"C","dly":1000,"r":1,"g":-1,"b":3}]""" to "g negative",
-            """[{"str":"A","type":"C","dly":1000,"scroll":"yes?","r":1,"g":2,"b":[]}]""" to "b is a list",
-            """[{"str":"1","type":"I","r":1,"g":2}]""" to "icon without b",
-        ).forEach { (wrong, what) ->
-            assertFailsWith<AdFileException>(what) { AdCodec.decode(wrong) }
+            "str" to absent, "str" to "7", "str" to "null", "str" to "[]",
+            "type" to absent, "type" to "7", "type" to "null",
+            "dly" to "\"soon\"", "dly" to "1000.5", "dly" to "null", "dly" to "true",
+            "scroll" to "\"yes\"", "scroll" to "1", "scroll" to "null",
+            "r" to absent, "r" to "256", "r" to "-1", "r" to "\"1\"", "r" to "1.5", "r" to "null",
+            "g" to absent, "g" to "256", "g" to "-1",
+            "b" to absent, "b" to "[]", "b" to "300",
+        ).forEach { (key, value) ->
+            val fault = "$key = ${value ?: "(absent)"}"
+            val e = assertFailsWith<AdFileException>(fault) { AdCodec.decode(adWith(key, value)) }
+            assertContains(e.message!!, "\"$key\"", message = fault)
         }
+    }
+
+    @Test
+    fun `an icon needs its colour too`() {
+        val e = assertFailsWith<AdFileException> { AdCodec.decode("""[{"str":"1","type":"I","r":1,"g":2}]""") }
+
+        assertContains(e.message!!, "\"b\"")
     }
 
     @Test

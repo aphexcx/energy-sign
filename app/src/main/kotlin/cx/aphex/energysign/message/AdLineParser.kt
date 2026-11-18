@@ -1,7 +1,6 @@
 package cx.aphex.energysign.message
 
 import com.vdurmont.emoji.EmojiParser
-import cx.aphex.energysign.ext.toNormalized
 import cx.aphex.energysign.message.Message.ColorMessage.ChonkySlide
 import cx.aphex.energysign.message.Message.ColorMessage.IconInvaders
 import cx.aphex.energysign.message.Message.ColorMessage.OneByOneMessage
@@ -32,14 +31,11 @@ data class AdPalette(
  *
  * Any other line is skipped. A heart-coloured emoji anywhere in the line gives the colour, and
  * every clock emoji adds a second to the time the ad stays. The text of an ad is the line with
- * everything that is not ASCII taken out; it is not trimmed, so a space at its start stays.
+ * everything the sign's fonts lack taken out ([AdRules.text]); it is not trimmed, so a space at
+ * its start stays. The text, the delay and the size of an ad follow [AdRules] and [AdSizeLimit],
+ * the same rules the saved list is held to when it is read back ([AdCodec]).
  */
 object AdLineParser {
-    /** The longest an ad stays. `dly` is a Short here and an int on the sign: 32 clocks used to overflow it. */
-    const val MAX_AD_DELAY_MS: Int = 30_000
-
-    private const val MS_PER_CLOCK: Int = 1000
-
     /** The mantelpiece clock. Counted by code point, so with or without a variation selector behind it. */
     private const val CLOCK: Int = 0x1F570
 
@@ -102,10 +98,13 @@ object AdLineParser {
             }
         }
 
-    /** How long the ad of [line] stays: one second, and one more for every clock in the line, at most [MAX_AD_DELAY_MS]. */
+    /**
+     * How long the ad of [line] stays: one second, and one more for every clock in the line, at
+     * most [AdRules.MAX_AD_DELAY_MS] (32 clocks used to overflow the Short that `dly` is).
+     */
     fun delayMs(line: String): Short {
         val clocks = line.codePoints().filter { it == CLOCK }.count()
-        return ((clocks + 1) * MS_PER_CLOCK).coerceAtMost(MAX_AD_DELAY_MS.toLong()).toShort()
+        return AdRules.delay((clocks + 1) * AdRules.MS_PER_SECOND)
     }
 
     /**
@@ -113,7 +112,7 @@ object AdLineParser {
      * after the emoji are gone, and only for a typed `<3`: a heart emoji in an ad line chooses
      * the colour and draws nothing.
      */
-    fun adText(line: String): String = line.toNormalized().replace("<3", Message.HEART.toString())
+    fun adText(line: String): String = AdRules.text(line).replace("<3", Message.HEART.toString())
 
     private fun colorOf(line: String, palette: AdPalette): Int? = when {
         line.contains(YELLOW_HEART) -> palette.instagram
