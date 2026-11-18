@@ -1,6 +1,10 @@
 package cx.aphex.energysign.ai
 
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import org.junit.jupiter.api.Test
 import java.time.Duration
 import java.time.Instant
@@ -9,9 +13,9 @@ import java.time.LocalDateTime
 import java.time.ZoneId
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /** One reply, start to end: the prompt of this moment, the generator, the length cap, and no crash. */
@@ -136,10 +140,59 @@ class AIReplyServiceTest {
     }
 
     @Test
-    fun `cancelling the caller is not swallowed`() {
-        assertFailsWith<CancellationException> {
-            runBlocking { service(RecordingGenerator { throw CancellationException("stopped") }).replyTo("hello") }
+    fun `when the caller is cancelled the cancellation goes through and nothing is returned`() {
+        val waitsForEver = object : AIReplyGenerator {
+            override val name = "fake"
+            override suspend fun generateReply(request: AIReplyRequest): AIReplyResult = awaitCancellation()
         }
+        var returned: AIReplyResult? = null
+
+        val job = runBlocking {
+            val asking = launch { returned = service(waitsForEver).replyTo("hello") }
+            yield()
+            asking.cancelAndJoin()
+            asking
+        }
+
+        assertTrue(job.isCancelled)
+        assertNull(returned)
+    }
+
+    @Test
+    fun `a cancellation that is not the caller's is a failure like any other, so the sign is always told`() {
+        // If a library throws one while nobody cancelled us, letting it through would end the
+        // coroutine without a word, and the thinking notice would stay on the sign.
+        val result = runBlocking {
+            service(RecordingGenerator { throw CancellationException("from inside a library") }).replyTo("hello")
+        }
+
+        assertEquals(NoReplyReason.UNEXPECTED_FAILURE, assertIs<AIReplyResult.NoReply>(result).reason)
+    }
+
+    @Test
+    fun `a key never reaches the log or the result, whatever a library puts in its message`() {
+        val secrets = Secrets(listOf("made-up-key-12345"))
+        fun serviceWith(generator: AIReplyGenerator) = AIReplyService(
+            generator = generator, log = secrets.sink { log.add(it) }, redact = secrets::redact,
+            now = { now }, deviceZone = { la }, setTimes = { setTimes }, buildDate = null,
+        )
+
+        val thrown = runBlocking {
+            serviceWith(RecordingGenerator {
+                throw IllegalArgumentException("Unexpected char 0x201c at 0 in X-Api-Key value: made-up-key-12345")
+            }).replyTo("hello")
+        }
+        val returned = runBlocking {
+            serviceWith(RecordingGenerator {
+                AIReplyResult.NoReply(NoReplyReason.KEY_REJECTED, "the server said: bad key made-up-key-12345")
+            }).replyTo("hello")
+        }
+
+        for (result in listOf(thrown, returned)) {
+            assertFalse(assertIs<AIReplyResult.NoReply>(result).detail.contains("made-up-key"), "$result")
+        }
+        assertTrue(log.isNotEmpty())
+        assertFalse(log.any { it.contains("made-up-key") }, "$log")
     }
 
     @Test

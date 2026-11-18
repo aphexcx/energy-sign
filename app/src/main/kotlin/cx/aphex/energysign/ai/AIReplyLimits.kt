@@ -38,7 +38,7 @@ object AIReplyLimits {
         }
         if (fits == 0) return ""
         val cutInsideAWord = !text[fits].isWhitespace() && !text[fits - 1].isWhitespace()
-        val lastSpace = text.lastIndexOf(' ', fits - 1)
+        val lastSpace = text.substring(0, fits).indexOfLast { it.isWhitespace() }
         val end = if (cutInsideAWord && lastSpace > 0) lastSpace else fits
         return text.substring(0, end).trimEnd()
     }

@@ -31,8 +31,10 @@ class AnthropicReplyGeneratorTest {
         timeout: Duration = Duration.ofSeconds(5),
         baseUrl: String = api.baseUrl,
         effort: () -> AIEffort = { AIEffort.DEFAULT },
+        hardLimit: Duration = timeout.plusSeconds(2),
     ) = AnthropicReplyGenerator(
-        apiKey = apiKey, log = { log.add(it) }, effort = effort, requestTimeout = timeout, baseUrl = baseUrl,
+        apiKey = apiKey, log = { log.add(it) }, effort = effort, requestTimeout = timeout, hardLimit = hardLimit,
+        baseUrl = baseUrl,
     )
 
     private fun ask(
@@ -234,6 +236,39 @@ class AnthropicReplyGeneratorTest {
         assertNoReply(NoReplyReason.TIMEOUT, result)
         assertTrue(waitedMs < 2_500, "waited $waitedMs ms for a 400 ms timeout")
         assertEquals(1, api.received.size, "a timeout is not retried")
+    }
+
+    @Test
+    fun `the wait ends at the hard limit even when the HTTP client has not given up`() {
+        // The client's own timeout cannot interrupt everything (a DNS lookup, for one). Here the
+        // client would wait 20 s for a slow server; the caller is let go after 400 ms.
+        api.answer = FakeMessagesApi.Answer(
+            200,
+            FakeMessagesApi.message("""[{"type":"text","text":"too late"}]"""),
+            delayMs = 4_000,
+        )
+
+        val startedAt = System.nanoTime()
+        val result = ask(generator(timeout = Duration.ofSeconds(20), hardLimit = Duration.ofMillis(400)))
+        val waitedMs = (System.nanoTime() - startedAt) / 1_000_000
+
+        assertNoReply(NoReplyReason.TIMEOUT, result)
+        assertTrue(waitedMs < 2_500, "waited $waitedMs ms for a 400 ms hard limit")
+    }
+
+    @Test
+    fun `a key that cannot be sent in a header is no reply, and the key stays out of the log`() {
+        val key = "\u201Cmade-up-key-12345\u201D"
+        val secrets = Secrets(listOf(key))
+        val generator = AnthropicReplyGenerator(apiKey = key, log = secrets.sink { log.add(it) }, baseUrl = api.baseUrl)
+        val service = AIReplyService(generator = generator, log = secrets.sink { log.add(it) }, redact = secrets::redact)
+
+        val result = runBlocking { service.replyTo("hello") }
+
+        val noReply = assertIs<AIReplyResult.NoReply>(result)
+        assertFalse(noReply.detail.contains("made-up-key"), noReply.detail)
+        assertFalse(log.any { it.contains("made-up-key") }, "$log")
+        assertTrue(api.received.isEmpty(), "nothing can have been sent")
     }
 
     @Test

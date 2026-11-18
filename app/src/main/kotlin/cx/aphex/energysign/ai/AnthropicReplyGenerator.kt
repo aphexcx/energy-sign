@@ -20,8 +20,11 @@ import com.anthropic.models.beta.messages.BetaMessage
 import com.anthropic.models.beta.messages.BetaOutputConfig
 import com.anthropic.models.beta.messages.BetaStopReason
 import com.anthropic.models.beta.messages.MessageCreateParams
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.InterruptedIOException
 import java.net.SocketTimeoutException
 import java.security.cert.CertPathValidatorException
@@ -39,6 +42,10 @@ import javax.net.ssl.SSLPeerUnverifiedException
  * one bounded wait of [requestTimeout]: the SDK's own retries are switched off ([MAX_RETRIES]),
  * because between attempts it waits as long as a `Retry-After` header says, without a limit. A
  * query that got no reply is asked again by the sign when its message comes round.
+ *
+ * [hardLimit] is the stop behind that timeout. The HTTP client cannot interrupt everything it
+ * waits for (a DNS lookup that hangs, for one), so the caller is let go at the hard limit and the
+ * stuck call is left to end by itself.
  */
 class AnthropicReplyGenerator(
     apiKey: String,
@@ -46,6 +53,7 @@ class AnthropicReplyGenerator(
     /** Asked for every request, so the level can be changed while the app runs. */
     private val effort: () -> AIEffort = { AIEffort.DEFAULT },
     private val requestTimeout: Duration = REQUEST_TIMEOUT,
+    private val hardLimit: Duration = requestTimeout.plus(HARD_LIMIT_MARGIN),
     /** Only tests set this, to a local fake of the API. */
     private val baseUrl: String? = null,
 ) : AIReplyGenerator {
@@ -53,6 +61,9 @@ class AnthropicReplyGenerator(
     private val apiKey: String = apiKey.trim()
 
     override val name: String = "anthropic/$MODEL"
+
+    /** Where the blocking calls run. A failure of one call stays in its own result. */
+    private val calls = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val client: AnthropicClient by lazy {
         AnthropicOkHttpClient.builder()
@@ -73,7 +84,10 @@ class AnthropicReplyGenerator(
         if (apiKey.isEmpty()) {
             return noReply(NoReplyReason.MISSING_KEY, "no ANTHROPIC_API_KEY in this build (local.properties)")
         }
-        return withContext(Dispatchers.IO) { ask(request) }
+        // Not a child of the caller, so that the caller can be let go while the call is stuck.
+        val call = calls.async { ask(request) }
+        return withTimeoutOrNull(hardLimit.toMillis()) { call.await() }
+            ?: noReply(NoReplyReason.TIMEOUT, "still no answer after ${hardLimit.toMillis()} ms; the call was left behind")
     }
 
     private fun ask(request: AIReplyRequest): AIReplyResult =
@@ -172,6 +186,9 @@ class AnthropicReplyGenerator(
         /** The whole call ends within this, whatever happens. */
         val REQUEST_TIMEOUT: Duration = Duration.ofSeconds(30)
         val CONNECT_TIMEOUT: Duration = Duration.ofSeconds(10)
+
+        /** How long after [REQUEST_TIMEOUT] the caller is let go whatever the HTTP client is doing. */
+        val HARD_LIMIT_MARGIN: Duration = Duration.ofSeconds(2)
 
         /** One attempt. See the class comment. */
         const val MAX_RETRIES = 0

@@ -38,6 +38,21 @@ class AIReplyLimitsTest {
     }
 
     @Test
+    fun `a line break is a place to cut too`() {
+        // Several starts, so that the cut cannot fall on a line break by chance.
+        for (shift in 1..8) {
+            val lines = "x".repeat(shift) + "\n" + (1..400).joinToString("\n") { "word$it" }
+
+            val fitted = AIReplyLimits.fitToSign(lines)
+
+            assertTrue(wireBytes(fitted) < AIReplyLimits.MAX_SIGN_JSON_BYTES, "${wireBytes(fitted)} bytes")
+            assertTrue(Regex("word\\d+").matches(fitted.substringAfterLast('\n')), "shift $shift: cut inside a word")
+            assertEquals('\n', lines[fitted.length], "shift $shift: the cut is at the line break")
+            assertTrue(fitted.length > 300, "cut far too early: ${fitted.length} characters")
+        }
+    }
+
+    @Test
     fun `characters that grow in JSON are counted as they go on the wire`() {
         // Gson writes an apostrophe as six bytes and a quote as two.
         val quotes = (1..200).joinToString(" ") { "it's \"so\" <loud>" }

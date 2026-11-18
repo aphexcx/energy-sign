@@ -13,6 +13,7 @@ import cx.aphex.energysign.ai.AIReplyGenerators
 import cx.aphex.energysign.ai.AIReplyService
 import cx.aphex.energysign.ai.InFlightQueries
 import cx.aphex.energysign.ai.NoReplyReason
+import cx.aphex.energysign.ai.Secrets
 import cx.aphex.energysign.ai.SetTimes
 import cx.aphex.energysign.ai.toDelivery
 import cx.aphex.energysign.ext.logD
@@ -23,6 +24,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.get
@@ -46,20 +48,24 @@ class GPTViewModel(
     /** Built on first use, off the main thread: which provider answers is one build setting. */
     private val replyService: AIReplyService by lazy {
         val context: Context = get()
-        val provider = AIProvider.fromSetting(BuildConfig.AI_PROVIDER) { logW(it) }
-        val builtWithEffort = AIEffort.fromSetting(BuildConfig.AI_EFFORT) { logW(it) }
+        // No key of this build may reach a log line, whatever a library writes into a message.
+        val secrets = Secrets(listOf(BuildConfig.ANTHROPIC_API_KEY, BuildConfig.OPENAI_API_KEY))
+        val log = secrets.sink { logW(it) }
+        val provider = AIProvider.fromSetting(BuildConfig.AI_PROVIDER, log)
+        val builtWithEffort = AIEffort.fromSetting(BuildConfig.AI_EFFORT, log)
         val effortOverride = File(context.filesDir, AIEffort.OVERRIDE_FILE_NAME)
         val generator = AIReplyGenerators.forProvider(
             provider = provider,
             anthropicApiKey = BuildConfig.ANTHROPIC_API_KEY,
             openAiApiKey = BuildConfig.OPENAI_API_KEY,
-            effort = { AIEffort.forRequest(builtWithEffort, effortOverride) { logW(it) } },
-            log = { logW(it) },
+            effort = { AIEffort.forRequest(builtWithEffort, effortOverride, log) },
+            log = log,
         )
         logI("Replies are written by ${generator.name}, effort ${builtWithEffort.setting} unless ${effortOverride.name} says otherwise")
         AIReplyService(
             generator = generator,
-            log = { logW(it) },
+            log = log,
+            redact = secrets::redact,
             setTimes = {
                 SetTimes.load(File(context.filesDir, SetTimes.FILE_NAME)) {
                     context.assets.open(SetTimes.FILE_NAME).use { it.readBytes().toString(Charsets.UTF_8) }
@@ -104,13 +110,16 @@ class GPTViewModel(
                     is AIReplyDelivery.Failure -> GPTError.postValue(delivery.error)
                 }
             } catch (e: CancellationException) {
-                throw e
+                // The view model is going away: nobody is left to tell. Anything else by that
+                // name is a failure, and the sign must hear of it or it shows "thinking" for ever.
+                if (!isActive) throw e
+                GPTError.postValue(AIReplyFailedException(NoReplyReason.UNEXPECTED_FAILURE, "cancelled from inside a library"))
             } catch (e: Throwable) {
                 // The edge of the coroutine: anything that escapes here would take the app down.
                 // The service already turns every failure of a call into "no reply"; this is for
                 // what can go wrong before a call is made, such as building the service itself.
-                logW("Could not ask for a reply: $e")
-                GPTError.postValue(AIReplyFailedException(NoReplyReason.UNEXPECTED_FAILURE, e.toString()))
+                logW("Could not ask for a reply: ${e.javaClass.name}")
+                GPTError.postValue(AIReplyFailedException(NoReplyReason.UNEXPECTED_FAILURE, e.javaClass.name))
             } finally {
                 inFlight.finish(replyingToMessage)
             }
