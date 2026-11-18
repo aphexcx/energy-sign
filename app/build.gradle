@@ -19,8 +19,26 @@ android {
 
         Properties properties = new Properties()
         properties.load(project.rootProject.file('local.properties').newDataInputStream())
-        buildConfigField("String", "OPENAI_API_KEY", properties.getProperty('OPENAI_API_KEY'))
-        buildConfigField("String", "DEEPGRAM_API_KEY", properties.getProperty('DEEPGRAM_API_KEY'))
+        // A local.properties value as a Java string literal. The value may be written with or
+        // without double quotes around it; a missing property becomes "" so the build never
+        // depends on a key being there (the code treats an empty key as "no key").
+        def localProperty = { String name ->
+            String value = (properties.getProperty(name) ?: '').trim()
+            if (value.length() >= 2 && value.startsWith('"') && value.endsWith('"')) {
+                value = value.substring(1, value.length() - 1)
+            }
+            return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+        }
+        buildConfigField("String", "OPENAI_API_KEY", localProperty('OPENAI_API_KEY'))
+        buildConfigField("String", "DEEPGRAM_API_KEY", localProperty('DEEPGRAM_API_KEY'))
+        buildConfigField("String", "ANTHROPIC_API_KEY", localProperty('ANTHROPIC_API_KEY'))
+        // Which provider writes the replies: anthropic (the default when absent) or openai.
+        buildConfigField("String", "AI_PROVIDER", localProperty('AI_PROVIDER'))
+        // How hard the model thinks: low, medium, high (the default when absent), xhigh or max.
+        buildConfigField("String", "AI_EFFORT", localProperty('AI_EFFORT'))
+        // The UTC date of this build. A device clock that reads earlier is wrong (the device has no
+        // battery-backed clock), and then no date or time goes into a prompt.
+        buildConfigField("String", "BUILD_DATE", '"' + java.time.LocalDate.now(java.time.ZoneOffset.UTC) + '"')
     }
     buildTypes {
         release {
@@ -130,6 +148,9 @@ dependencies {
     implementation platform('com.aallam.openai:openai-client-bom:3.8.2')
     implementation 'com.aallam.openai:openai-client'
 
+    // The official Anthropic SDK (Kotlin uses the Java SDK).
+    implementation 'com.anthropic:anthropic-java:3.3.0'
+
     // JUnit 5
     testImplementation 'org.junit.jupiter:junit-jupiter-api:5.11.3'
     testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.11.3'
@@ -140,4 +161,7 @@ dependencies {
     // Mockito
     testImplementation 'org.mockito:mockito-core:3.12.4'
     testImplementation 'org.mockito:mockito-inline:3.12.4'
+
+    // A local stand-in for the Messages API: the SDK client is tested over real HTTP, never against the live service.
+    testImplementation 'com.squareup.okhttp3:mockwebserver:4.12.0'
 }
