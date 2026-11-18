@@ -33,6 +33,8 @@ class FakeMessagesApi : AutoCloseable {
         val headers: Map<String, String> = emptyMap(),
         /** After [body] has been sent the response does not end: the connection stays open and silent. */
         val thenStalls: Boolean = false,
+        /** Header fields added as they are, one line each: the same name may come more than once. */
+        val moreHeaders: List<Pair<String, String>> = emptyList(),
     )
 
     val received: MutableList<Received> = CopyOnWriteArrayList()
@@ -52,6 +54,7 @@ class FakeMessagesApi : AutoCloseable {
                     .setResponseCode(reply.status)
                     .setHeader("content-type", "application/json")
                     .apply { reply.headers.forEach { (name, value) -> setHeader(name, value) } }
+                    .apply { reply.moreHeaders.forEach { (name, value) -> addHeader(name, value) } }
                     .apply {
                         if (reply.thenStalls) {
                             // The body, then more that is held back for longer than the tests

@@ -18,6 +18,11 @@ import java.time.format.DateTimeParseException
  * file. The provider's client and everything behind it are built on first use, by the warm-up
  * or by the first call, and both run on background threads.
  *
+ * It is made on the main thread, on the way to the start of the sign link: making it touches no
+ * storage (the effort reader's thread asks for the files directory itself), and it is made
+ * through [aiRepliesOrNone] (AppModule), so that whatever fails in here costs the replies of
+ * this run and never the sign.
+ *
  * Switch: `adb shell setprop debug.energysign.ai.warmup off` before the app starts leaves the
  * warm-up out, so the first query pays for the slow first use (for a comparison on the sign).
  */
@@ -38,16 +43,8 @@ class AIReplies(private val context: Context) : AIReplySource {
      * on the device says. The file is read once, now, by a thread of its own; no reply reads it
      * or waits for it.
      */
-    private val effort: ReadOnceAtStart<AIEffort> = run {
-        val overrideFile = File(context.filesDir, AIEffort.OVERRIDE_FILE_NAME)
-        ReadOnceAtStart(
-            untilRead = AIEffort.fromSetting(BuildConfig.AI_EFFORT),
-            read = {
-                AIEffort.fromOverrideFile(AIEffort.fromSetting(BuildConfig.AI_EFFORT, warn), overrideFile, warn)
-                    .also { info("AI effort for this run: ${it.setting}") }
-            },
-        )
-    }
+    private val effort: ReadOnceAtStart<AIEffort> =
+        AIEffort.readOnceAtStart(BuildConfig.AI_EFFORT, filesDir = { context.filesDir }, warn = warn, info = info)
 
     private class Parts(val generator: AIReplyGenerator, val service: AIReplyService)
 
@@ -106,11 +103,15 @@ class AIReplies(private val context: Context) : AIReplySource {
     override fun ask(text: String, stillWanted: () -> Boolean, onResult: (AIReplyResult) -> Unit) =
         runner.ask(text, stillWanted, onResult)
 
-    private fun warmUpWanted(): Boolean {
-        val off = systemProperty(WARM_UP_PROPERTY)?.trim()?.lowercase() in setOf("off", "0", "false", "no")
-        if (off) info("The warm-up is switched off ($WARM_UP_PROPERTY)")
-        return !off
-    }
+    /** Asked on the main thread while this object is made: whatever fails in it, the warm-up is wanted. */
+    private fun warmUpWanted(): Boolean =
+        try {
+            val off = systemProperty(WARM_UP_PROPERTY)?.trim()?.lowercase() in setOf("off", "0", "false", "no")
+            if (off) info("The warm-up is switched off ($WARM_UP_PROPERTY)")
+            !off
+        } catch (e: Throwable) {
+            true
+        }
 
     private companion object {
         /** System property, read once when the app starts: `off` leaves the warm-up out. */
@@ -122,7 +123,8 @@ class AIReplies(private val context: Context) : AIReplySource {
                 Class.forName("android.os.SystemProperties")
                     .getMethod("get", String::class.java, String::class.java)
                     .invoke(null, key, "") as? String
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
+                // An Error too (a class that does not link on this build of Android): no switch.
                 null
             }
     }

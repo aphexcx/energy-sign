@@ -11,13 +11,13 @@ import com.anthropic.errors.AnthropicException
 import com.anthropic.errors.AnthropicInvalidDataException
 import com.anthropic.errors.AnthropicIoException
 import com.anthropic.errors.AnthropicServiceException
-import com.anthropic.models.ErrorType
 import com.anthropic.models.beta.AnthropicBeta
 import com.anthropic.models.beta.messages.BetaFallbacksParam
 import com.anthropic.models.beta.messages.BetaMessage
 import com.anthropic.models.beta.messages.BetaOutputConfig
 import com.anthropic.models.beta.messages.BetaStopReason
 import com.anthropic.models.beta.messages.MessageCreateParams
+import com.anthropic.models.models.ModelInfo
 import com.fasterxml.jackson.databind.json.JsonMapper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -58,6 +58,11 @@ import javax.net.ssl.SSLPeerUnverifiedException
  *
  * THE KEY GOES TO THE API AND NOWHERE ELSE. The warm-up's request to the stand-in on this device
  * is made by a second client that was never given the key (see [warmUp]).
+ *
+ * THE TIME IS TAKEN FROM A WHOLE ANSWER ONLY ([ServerClock]): a message, or the description of
+ * the model, that has every part such an answer has ([isWholeMessage], [describesTheModel]),
+ * with the moment its headers arrived. That is asked apart from what the answer is worth as a
+ * reply. No error response tells the time, whatever its body says.
  *
  * NOTHING OF THE PROVIDER'S IN THE LOG: a log line holds the HTTP status and words from the fixed
  * lists in this file, never text from a response, a header or an exception message. And what a
@@ -121,17 +126,17 @@ class AnthropicReplyGenerator(
             } else {
                 val leftMs = request.deadline.remainingMs()
                 if (leftMs < minTimeToSend.toMillis()) {
-                    noReply(NoReplyReason.TIMEOUT, "not sent: ${leftMs / 1000} s of the query's time were left")
+                    noReply(NoReplyReason.TOO_LATE_TO_SEND, "not sent: ${leftMs / 1000} s of the query's time were left")
                 } else {
                     val limit = minOf(requestTimeout, Duration.ofMillis(leftMs))
                     client.beta().messages().withRawResponse().create(params, options(limit)).use { response ->
                         // The response has arrived; its body is read below, and that can take a while.
                         val arrivedAt = serverClock?.arrival()
-                        read(response.parse(), effortNow).also { result ->
-                            // The time is taken from this response only now that it has been read as a message of the API.
-                            if ((result as? AIReplyResult.NoReply)?.reason != NoReplyReason.NOT_A_MESSAGE) {
-                                tellClock(response.headers(), arrivedAt)
-                            }
+                        val message = response.parse()
+                        read(message, effortNow).also {
+                            // The answer is decided. The time is another question, asked of the
+                            // envelope alone; whatever fails in it changes nothing above.
+                            if (isWholeMessage(message)) tellClock(response.headers(), arrivedAt)
                         }
                     }
                 }
@@ -270,7 +275,7 @@ class AnthropicReplyGenerator(
         try {
             client.models().withRawResponse().retrieve(MODEL, options(limit)).use { response ->
                 val arrivedAt = serverClock?.arrival()
-                if (response.parse().id() == MODEL) {
+                if (describesTheModel(response.parse())) {
                     tellClock(response.headers(), arrivedAt)
                     info("$name: $what: the API answers, and the key and the model are accepted")
                 } else {
@@ -278,7 +283,6 @@ class AnthropicReplyGenerator(
                 }
             }
         } catch (e: AnthropicServiceException) {
-            tellClockFromError(e)
             log("$name: $what: ${summary(e)}")
         } catch (e: AnthropicIoException) {
             log("$name: $what: ${describe(reasonForIoFailure(e))} [${kinds(e)}]")
@@ -289,31 +293,20 @@ class AnthropicReplyGenerator(
         }
     }
 
-    /** An error status. What it means is decided from the number; the rest is for the log. */
-    private fun failed(e: AnthropicServiceException): AIReplyResult.NoReply {
-        tellClockFromError(e)
-        return noReply(NoReplyReason.forHttpStatus(e.statusCode()), summary(e))
-    }
-
-    /** [arrivedAt]: the moment the response came, by [ServerClock.arrival]; null for "now". */
-    private fun tellClock(headers: Headers, arrivedAt: Long?) {
-        forLog {
-            serverClock?.syncFromHeaders(
-                date = headers.values("date").firstOrNull(), age = headers.values("age").firstOrNull(), arrivedAtMs = arrivedAt,
-            )
-        }
-    }
+    /**
+     * An error status. What it means is decided from the number; the rest is for the log. An
+     * error does not tell the time: see the class comment.
+     */
+    private fun failed(e: AnthropicServiceException): AIReplyResult.NoReply =
+        noReply(NoReplyReason.forHttpStatus(e.statusCode()), summary(e))
 
     /**
-     * An error tells the time only when its body is an error of the API: it names one of the
-     * error types the API has. (Any string at that place makes an "error type" for the SDK; a
-     * page of something in between can have one too.) The SDK has read the small body of the
-     * error by the time it is thrown, so the moment taken is the moment it is caught.
+     * The headers of a whole answer, with the moment they arrived (by [ServerClock.arrival]).
+     * The clock gets every `Date` and every `Age` field there is: two of a kind say nothing.
      */
-    private fun tellClockFromError(e: AnthropicServiceException) {
+    private fun tellClock(headers: Headers, arrivedAt: Long?) {
         forLog {
-            val known = e.errorType().map { it.value() != ErrorType.Value._UNKNOWN }.orElse(false)
-            if (known) tellClock(e.headers(), arrivedAt = null)
+            serverClock?.syncFromHeaderFields(dates = headers.values("date"), ages = headers.values("age"), arrivedAtMs = arrivedAt)
         }
     }
 
@@ -376,15 +369,43 @@ class AnthropicReplyGenerator(
             Timeout.builder().connect(minOf(CONNECT_TIMEOUT, limit)).request(limit).build()
 
         /**
-         * Runs [read], which is there for a log line or the clock only. Whatever it throws is
-         * dropped: it must never decide what an answer is.
+         * Runs [read], which is there for a log line or the clock only. Whatever it throws, an
+         * Error included, is dropped: it must never decide what an answer is, and it runs when
+         * the answer has been delivered, which is no moment to lose it.
          */
         private inline fun <T> forLog(read: () -> T): T? =
             try {
                 read()
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 null
             }
+
+        /**
+         * Whether [message] has every part a message of the API has: its kind and role, an id,
+         * the model that wrote it, a list of content, a stop reason the API has, and the token
+         * counts. Only such a message tells the time. Something on the way that answers for the
+         * API (a gateway's page, a notice with a stop reason in it) has no reason to have them
+         * all. This is not what decides whether [message] is a reply: see [read].
+         */
+        internal fun isWholeMessage(message: BetaMessage): Boolean =
+            forLog {
+                message._type().asString().orElse(null) == "message" &&
+                    message._role().asString().orElse(null) == "assistant" &&
+                    message.id().isNotBlank() &&
+                    message.model().asString().isNotBlank() &&
+                    message.content().size >= 0 &&
+                    message.stopReason().map { it.value() != BetaStopReason.Value._UNKNOWN }.orElse(false) &&
+                    message.usage().inputTokens() >= 0 && message.usage().outputTokens() >= 0
+            } ?: false
+
+        /** Whether [info] is the description of [MODEL], with every part such a description has. */
+        internal fun describesTheModel(info: ModelInfo): Boolean =
+            forLog {
+                info._type().asString().orElse(null) == "model" &&
+                    info.id() == MODEL &&
+                    info.displayName().isNotBlank() &&
+                    info.createdAt().year > 0
+            } ?: false
 
         /** "HTTP 429 RATE_LIMIT_ERROR": the status and the SDK's own name for the error type, nothing from the body. */
         private fun summary(e: AnthropicServiceException): String =
@@ -422,10 +443,13 @@ class AnthropicReplyGenerator(
             NoReplyReason.MISSING_KEY -> "there is no API key"
             NoReplyReason.NOTHING_TO_ASK -> "there is nothing to ask"
             NoReplyReason.WITHDRAWN -> "the query was withdrawn before anything was sent"
+            NoReplyReason.TOO_LATE_TO_SEND -> "too little of the query's time was left to send it"
             NoReplyReason.REFUSED -> "the request was declined (refusal), fallback included"
             NoReplyReason.EMPTY -> "the answer was empty"
             NoReplyReason.TRUNCATED -> "the answer was cut off"
             NoReplyReason.UNEXPECTED_RESPONSE -> "the answer is of a kind this app does not handle"
+            NoReplyReason.NOT_SET_UP -> "the replies were not set up"
+            NoReplyReason.FAILED_AFTER_ANSWER -> "the answer came, and this app failed to make a message of it"
             NoReplyReason.NOT_A_MESSAGE -> "what came back is not a message from the API"
             NoReplyReason.TIMEOUT -> "no answer within the time limit"
             NoReplyReason.NETWORK -> "the network failed"

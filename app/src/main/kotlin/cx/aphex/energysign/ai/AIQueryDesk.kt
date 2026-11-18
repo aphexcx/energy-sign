@@ -24,11 +24,15 @@ import java.util.IdentityHashMap
  * - A failure that may pass leaves the query a query, [Limits.maxAttempts] calls at most.
  * - After a failure of the provider ([NoReplyReason.backOff]) nothing is asked for a while,
  *   longer after each failure in a row ([Limits.coolDownsMs]). An answer ends the row.
- * - A BUDGET: [Limits.callsPerHour] calls in any hour, counted when a call goes out, and nothing
- *   gives one back: not an answer, not a failure, not a query that was deleted. That is the
- *   ceiling on what an hour can cost, whatever is wrong and however many queries there are; the
- *   pauses after failures happen inside it. While the budget is spent a query is shown as the
- *   plain message it is, with no notice, and is asked when it comes round and there is room.
+ * - A BUDGET: [Limits.callsPerHour] calls in any hour, counted when a call is handed over to be
+ *   made ([start]), and nothing gives one back: not an answer, not a failure, not a query that
+ *   was deleted. The pauses after failures happen inside it. While the budget is spent a query
+ *   is shown as the plain message it is, with no notice, and is asked when it comes round and
+ *   there is room. WHAT IT DOES NOT COUNT: the moment the request really leaves (the call is
+ *   prepared first, which takes seconds, so the 46th request can leave less than an hour after
+ *   the first), and a request the HTTP client sends a second time by itself (see
+ *   AnthropicReplyGenerator). It is a ceiling on calls handed over, close to and not the same
+ *   as a ceiling on requests on the wire.
  *
  * What this costs the owner: [shown] and [thinkingWanted] look at the line only
  * ([Limits.maxWaiting] entries at most); [finished] and [warmedUp] make ONE pass over the list

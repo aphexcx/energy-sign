@@ -191,4 +191,16 @@ class AIReplyLimitsTest {
         // A text that is not cut keeps its last word.
         assertEquals("ok then hello", AIReplyLimits.fitToSign("\u2603".repeat(100) + " ok then hello"))
     }
+
+    // ---- round 3 of the gates
+
+    @Test
+    fun `the sign's own heart is kept - it is a character of the sign, not a control character to drop`() {
+        val heart = cx.aphex.energysign.message.Message.HEART
+
+        assertEquals("$heart", AIReplyLimits.fitToSign("$heart"))
+        assertEquals("I $heart THIS SET", AIReplyLimits.fitToSign(" I $heart THIS SET\n"))
+        assertEquals("a b", AIReplyLimits.fitToSign("a\u0007b"), "every other control character still parts words")
+        assertEquals("a b", AIReplyLimits.fitToSign("a\u0080b"))
+    }
 }

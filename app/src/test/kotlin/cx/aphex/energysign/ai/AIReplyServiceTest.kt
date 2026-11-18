@@ -183,6 +183,56 @@ class AIReplyServiceTest {
         assertFalse(log.any { it.contains("boom") || it.contains("some/sdk/Class") }, "$log")
     }
 
+    // ---- an answer that was delivered is never bought again (round 3, deep 3)
+
+    @Test
+    fun `a failure while an answer that came is fitted to the sign ends the query - it does not ask for the answer again`() {
+        for (failure in listOf<Throwable>(IllegalStateException("boom"), NoClassDefFoundError("some/Class"), StackOverflowError())) {
+            val generator = RecordingGenerator { AIReplyResult.Reply("Loud enough.") }
+            val service = AIReplyService(generator, log = { log.add(it) }, now = { now }, fit = { throw failure })
+
+            val result = assertIs<AIReplyResult.NoReply>(runBlocking { service.replyTo("hello") })
+
+            assertEquals(NoReplyReason.FAILED_AFTER_ANSWER, result.reason, "$failure")
+            assertFalse(result.reason.askAgain, "the provider was paid for this answer: no second call")
+            assertFalse(result.reason.backOff, "and the provider did not fail")
+        }
+    }
+
+    @Test
+    fun `a log that fails after the answer came costs the log line, not the answer`() {
+        val long = "word ".repeat(400)
+        val service = AIReplyService(RecordingGenerator { AIReplyResult.Reply(long) }, log = { throw IllegalStateException("the log failed") }, now = { now })
+
+        val result = runBlocking { service.replyTo("hello") }
+
+        assertTrue(assertIs<AIReplyResult.Reply>(result).text.startsWith("word word"), "the answer that was paid for is used")
+    }
+
+    @Test
+    fun `a log that fails when there is no reply does not turn the result into another one`() {
+        val service = AIReplyService(
+            RecordingGenerator { AIReplyResult.Reply(" \uD83D\uDE00 ") }, log = { throw IllegalStateException("the log failed") }, now = { now },
+        )
+
+        val result = runBlocking { service.replyTo("hello") }
+
+        assertEquals(NoReplyReason.EMPTY, assertIs<AIReplyResult.NoReply>(result).reason, "an empty answer ends the query, whatever the log does")
+    }
+
+    @Test
+    fun `a redaction that fails costs the detail of a result, not the result - and nothing is thrown`() {
+        val service = AIReplyService(
+            RecordingGenerator { AIReplyResult.Reply(" \uD83D\uDE00 ") }, log = { log.add(it) }, now = { now },
+            redact = { throw IllegalStateException("the redaction failed") },
+        )
+
+        val result = assertIs<AIReplyResult.NoReply>(runBlocking { service.replyTo("hello") })
+
+        assertEquals(NoReplyReason.EMPTY, result.reason)
+        assertEquals("", result.detail, "what could not be cleaned of keys is not handed on")
+    }
+
     @Test
     fun `when the caller is cancelled the cancellation goes through and nothing is returned`() {
         val waitsForEver = object : AIReplyGenerator {

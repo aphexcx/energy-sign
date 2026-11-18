@@ -115,7 +115,7 @@ class OpenAIReplyGenerator(
             }
             val leftMs = request.deadline.remainingMs()
             if (leftMs < minTimeToSend.toMillis()) {
-                return noReply(NoReplyReason.TIMEOUT, "not sent: ${leftMs / 1000} s of the query's time were left")
+                return noReply(NoReplyReason.TOO_LATE_TO_SEND, "not sent: ${leftMs / 1000} s of the query's time were left")
             }
             val limitMs = minOf(requestTimeout.toMillis(), leftMs)
             val stream = Stream()

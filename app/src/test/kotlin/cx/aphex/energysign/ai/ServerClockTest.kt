@@ -84,6 +84,59 @@ class ServerClockTest {
         assertEquals(Instant.parse("2026-11-21T01:30:00Z"), clock.now())
     }
 
+    // ---- round 3 of the gates: a strict date, and no header that says two things
+
+    @Test
+    fun `a date that is not exactly an HTTP date in GMT is no date - nothing is made to fit`() {
+        val notDates = listOf(
+            "Mon, 31 Nov 2026 05:30:00 GMT", // there is no 31 November: not "the 30th, then"
+            "Sun, 29 Feb 2026 05:30:00 GMT", // nor a 29 February in 2026
+            "Sun, 21 Nov 2026 05:30:00 GMT", // the 21st is a Saturday
+            "Sat, 21 Nov 2026 05:30:00 +0100", // an HTTP date is in GMT
+            "Sat, 21 Nov 2026 05:30:00 PST",
+            "Sat, 21 Nov 2026 05:30:00",
+            "Sat, 21 Nov 2026 24:00:00 GMT",
+            "Sat, 21 Nov 2026 05:30:60 GMT",
+            "Sat, 21 Nov 26 05:30:00 GMT",
+            "21 Nov 2026 05:30:00 GMT",
+            "Sat, 21 Nov 2026 05:30:00 GMT, Sat, 21 Nov 2026 06:30:00 GMT",
+        )
+        for (bad in notDates) {
+            assertNull(ServerClock.parseHttpDate(bad), "\"$bad\" was read as a date")
+            clock.syncFromHeaders(date = bad, age = null)
+            assertNull(clock.now(), "after \"$bad\"")
+        }
+        assertEquals(Instant.parse("2026-11-05T05:30:00Z"), ServerClock.parseHttpDate("Thu, 05 Nov 2026 05:30:00 GMT"))
+        assertEquals(Instant.parse("2028-02-29T23:59:59Z"), ServerClock.parseHttpDate(" Tue, 29 Feb 2028 23:59:59 GMT "))
+    }
+
+    @Test
+    fun `only an Age that is exactly 0 is fresh - a sign, or anything else around the zero, is not`() {
+        for (notZero in listOf("-0", "+0", "0.0", "0 0", "0,0", "0x0", "\u0660")) {
+            clock.syncFromHeaders(date = "Sat, 21 Nov 2026 05:30:00 GMT", age = notZero)
+            assertNull(clock.now(), "after Age \"$notZero\"")
+        }
+    }
+
+    @Test
+    fun `more than one Age field is old, and more than one Date field is no date, whatever they say`() {
+        val date = "Sat, 21 Nov 2026 05:30:00 GMT"
+
+        clock.syncFromHeaderFields(dates = listOf(date), ages = listOf("0", "3600"))
+        assertNull(clock.now(), "the first Age said 0, the second an hour")
+        clock.syncFromHeaderFields(dates = listOf(date), ages = listOf("0", "0"))
+        assertNull(clock.now(), "two Age fields: something in between added one")
+        clock.syncFromHeaderFields(dates = listOf(date, "Sat, 21 Nov 2026 06:30:00 GMT"), ages = emptyList())
+        assertNull(clock.now(), "two Date fields")
+        clock.syncFromHeaderFields(dates = listOf(date, date), ages = emptyList())
+        assertNull(clock.now(), "two Date fields, the same twice")
+        clock.syncFromHeaderFields(dates = emptyList(), ages = emptyList())
+        assertNull(clock.now())
+
+        clock.syncFromHeaderFields(dates = listOf(date), ages = listOf("0"))
+        assertEquals(Instant.parse("2026-11-21T05:30:00Z"), clock.now())
+    }
+
     // ---- found by the review of round 3
 
     @Test

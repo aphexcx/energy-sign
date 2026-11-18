@@ -36,8 +36,49 @@ class MessageRepository(
         messages.reversed().forEach { pushOneTimeMessage(it) }
     }
 
+    /** To the front of the queue; behind what is being shown in one piece ([pushInOnePiece]). */
     fun pushOneTimeMessage(message: Message) {
+        oneTimeMessages.add(waitingOfOnePiece(), message)
+    }
+
+    /**
+     * [messages] to the front of the queue, to be shown one after the other with nothing in
+     * between: the heading of a reply and the reply. Until the last of them has been taken,
+     * whatever else is pushed to the front goes behind them. One piece at a time.
+     */
+    fun pushInOnePiece(messages: List<Message>) {
+        oneTimeMessages.addAll(0, messages)
+        onePiece = messages
+    }
+
+    /** [message] was taken from the front and could not be shown: it is the first again, also in front of its own piece. */
+    fun putBackOneTimeMessage(message: Message) {
         oneTimeMessages.add(0, message)
+    }
+
+    /** Whether [message] is one of the messages last pushed in one piece (itself, not one like it). */
+    fun isOfOnePiece(message: Message): Boolean = onePiece.any { it === message }
+
+    /** When [message] is one of a piece, what is still waiting of that piece is taken out of the queue. */
+    fun dropOnePieceOf(message: Message) {
+        if (!isOfOnePiece(message)) return
+        oneTimeMessages.removeIf(::isOfOnePiece)
+        onePiece = emptyList()
+    }
+
+    /** The last of the piece has been shown: its messages are messages like any other again. */
+    fun onePieceShown() {
+        onePiece = emptyList()
+    }
+
+    private var onePiece: List<Message> = emptyList()
+
+    /** How many messages of the piece are still waiting; they are the first ones in the queue. */
+    private fun waitingOfOnePiece(): Int {
+        if (onePiece.isEmpty()) return 0
+        var waiting = 0
+        while (waiting < oneTimeMessages.size && isOfOnePiece(oneTimeMessages[waiting])) waiting++
+        return waiting
     }
 
     fun enqueueOneTimeMessage(message: Message) {
@@ -54,19 +95,20 @@ class MessageRepository(
     }
 
     /**
-     * Puts [reply] after [query] and makes the query a plain message. False, and nothing is
-     * changed, when the query is not in the list any more (it was deleted while its reply was
-     * on the way).
+     * Puts [reply] after [query] and makes the query a plain message. Returns the place the reply
+     * was put at: every message from there on has moved one place back, and whoever keeps a
+     * place in the list has to follow its message. [NOT_PUT_IN], and nothing is changed, when
+     * the query is not in the list any more (it was deleted while its reply was on the way).
      *
      * [reply] comes ready ([replyMessage]): this runs on the thread that answers the sign, and
      * nothing here looks at the text. One pass over the list to find the query.
      */
-    fun insertAIReply(query: Message.Marquee.AIQuery, reply: Message.Marquee.AIReply, seenAt: Int? = null): Boolean {
+    fun insertAIReply(query: Message.Marquee.AIQuery, reply: Message.Marquee.AIReply, seenAt: Int? = null): Int {
         val queryMsgIdx = indexOf(query, seenAt)
-        if (queryMsgIdx < 0) return false
+        if (queryMsgIdx < 0) return NOT_PUT_IN
         marqueeMessages[queryMsgIdx] = query.toUserMessage()
         marqueeMessages.add(queryMsgIdx + 1, reply)
-        return true
+        return queryMsgIdx + 1
     }
 
     /**
@@ -90,13 +132,14 @@ class MessageRepository(
 
     /**
      * A reply that was written elsewhere and posted to the app: it goes after the message with
-     * the text [inReplyTo], or after the newest message when there is none. False, and nothing
-     * is changed, when the list is empty.
+     * the text [inReplyTo], or after the newest message when there is none. Returns the place it
+     * was put at, as [insertAIReply] does; [NOT_PUT_IN], and nothing is changed, when the list
+     * is empty.
      *
      * [reply] comes ready ([postedReplyMessage]), as for [insertAIReply]. One pass over the list.
      */
-    fun insertPostedAIReply(reply: Message.Marquee.AIReply, inReplyTo: String): Boolean {
-        if (marqueeMessages.isEmpty()) return false
+    fun insertPostedAIReply(reply: Message.Marquee.AIReply, inReplyTo: String): Int {
+        if (marqueeMessages.isEmpty()) return NOT_PUT_IN
         val found = marqueeMessages.indexOfFirst { it.str == inReplyTo }
         val queryMsgIdx = if (found >= 0) found else 0
         // Convert the AIQuery message to a user message
@@ -104,7 +147,7 @@ class MessageRepository(
             marqueeMessages[queryMsgIdx] = it.toUserMessage()
         }
         marqueeMessages.add(queryMsgIdx + 1, reply)
-        return true
+        return queryMsgIdx + 1
     }
 
     /**
@@ -221,6 +264,10 @@ class MessageRepository(
          * [result] with the message for it when it is a reply, for the call's thread to hand to
          * the owner. It never throws, an Error of [make] included: whatever happens here, the
          * owner must be told that the call has ended, or its query would be "out" for ever.
+         *
+         * When [make] fails, the provider has answered already: the result says so
+         * ([NoReplyReason.FAILED_AFTER_ANSWER]), and that ends the query. Any reason that lets
+         * a query be asked again would buy the same answer a second time.
          */
         fun readyReply(
             result: AIReplyResult,
@@ -229,8 +276,11 @@ class MessageRepository(
             try {
                 result to (result as? AIReplyResult.Reply)?.let { make(it.text) }
             } catch (e: Throwable) {
-                AIReplyResult.NoReply(NoReplyReason.UNEXPECTED_FAILURE, e.javaClass.name) to null
+                AIReplyResult.NoReply(NoReplyReason.FAILED_AFTER_ANSWER, e.javaClass.name) to null
             }
+
+        /** What the two inserts return when nothing was put in. */
+        const val NOT_PUT_IN: Int = -1
 
         private const val SIGN_STRINGS_FILE_NAME = "signstrings.txt"
         private const val SIGN_DB_FILE_NAME = "signstrings.bin"

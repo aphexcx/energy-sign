@@ -17,6 +17,11 @@ import java.util.concurrent.atomic.AtomicReference
  * ended, and what was read from then on. A read that hangs or throws leaves [untilRead] in place.
  *
  * Changing the file takes effect at the next start of the app.
+ *
+ * Making one never throws and touches no storage: it is made on the main thread, on the way to
+ * the start of the sign link, and a setting is not worth the sign. When no thread can be started
+ * (Android refuses a new one), the setting is [untilRead] for this run. Whatever of storage the
+ * read needs, the directory included, it asks for in [read], on the reader's thread.
  */
 class ReadOnceAtStart<T>(
     private val untilRead: T,
@@ -26,15 +31,19 @@ class ReadOnceAtStart<T>(
     private val value = AtomicReference(untilRead)
 
     init {
-        startThread(
-            Runnable {
-                try {
-                    value.set(read())
-                } catch (e: Throwable) {
-                    // The setting of the build stays.
+        try {
+            startThread(
+                Runnable {
+                    try {
+                        value.set(read())
+                    } catch (e: Throwable) {
+                        // The setting of the build stays.
+                    }
                 }
-            }
-        )
+            )
+        } catch (e: Throwable) {
+            // No thread, an Error included: nothing is read, and the setting of the build stays.
+        }
     }
 
     fun get(): T = value.get()

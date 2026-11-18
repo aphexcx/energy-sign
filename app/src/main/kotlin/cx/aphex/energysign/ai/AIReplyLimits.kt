@@ -35,7 +35,9 @@ object AIReplyLimits {
      *    line and parts it at a vertical tab: either one inside a reply would cost the rest of
      *    the reply at the next start), every other control character, and every space or
      *    separator of Unicode (a no-break space, a line separator): the next step drops what is
-     *    not ASCII, and two words must not become one by it.
+     *    not ASCII, and two words must not become one by it. One character that Unicode calls
+     *    a control character is none on the sign: [Message.HEART] (U+007F) is its heart, and
+     *    it stays.
      * 2. The clean-up every message gets (hearts, then ASCII only), so what is measured is what
      *    the sign gets.
      * 3. Too long: cut after the last whole word that fits. When not even the first word fits,
@@ -46,7 +48,7 @@ object AIReplyLimits {
      */
     fun fitToSign(reply: String): String {
         val text = reply.take(MAX_INPUT_CHARS)
-            .map { if (it.isWhitespace() || it.isISOControl()) ' ' else it }.joinToString("")
+            .map { if (it != Message.HEART && (it.isWhitespace() || it.isISOControl())) ' ' else it }.joinToString("")
             // A text that was longer than what is looked at may have been cut inside a word:
             // the word at the cut goes. Half a word is not a reply.
             .let { if (reply.length > MAX_INPUT_CHARS) it.substringBeforeLast(' ', "") else it }

@@ -18,14 +18,14 @@ class MessageRepositoryRepliesTest {
 
     /** A posted reply as MessageManager handles it: made into its message first, then put into the list. */
     private fun posted(answer: String, inReplyTo: String): Boolean =
-        MessageRepository.postedReplyMessage(answer)?.let { repo.insertPostedAIReply(it, inReplyTo) } ?: false
+        MessageRepository.postedReplyMessage(answer)?.let { repo.insertPostedAIReply(it, inReplyTo) != MessageRepository.NOT_PUT_IN } ?: false
 
     @Test
     fun `a reply goes after its query, and the query becomes a plain message`() {
         val query = Message.Marquee.AIQuery("is it loud")
         repo.marqueeMessages.addAll(listOf(Message.Marquee.User("NEWEST"), query, Message.Marquee.User("OLDEST")))
 
-        assertTrue(repo.insertAIReply(query, MessageRepository.replyMessage("Loud enough.")))
+        assertEquals(2, repo.insertAIReply(query, MessageRepository.replyMessage("Loud enough.")), "the place the reply was put at")
 
         assertEquals(listOf("User:NEWEST", "User:is it loud", "AIReply:LOUD ENOUGH.", "User:OLDEST"), stored())
     }
@@ -34,14 +34,14 @@ class MessageRepositoryRepliesTest {
     fun `a reply for a query that is not in the list changes nothing`() {
         repo.marqueeMessages.addAll(listOf(Message.Marquee.User("NEWEST"), Message.Marquee.User("OLDEST")))
 
-        assertFalse(repo.insertAIReply(Message.Marquee.AIQuery("deleted meanwhile"), MessageRepository.replyMessage("Too late.")))
+        assertEquals(MessageRepository.NOT_PUT_IN, repo.insertAIReply(Message.Marquee.AIQuery("deleted meanwhile"), MessageRepository.replyMessage("Too late.")))
 
         assertEquals(listOf("User:NEWEST", "User:OLDEST"), stored())
     }
 
     @Test
     fun `a reply for a query that is not in an empty list changes nothing and does not throw`() {
-        assertFalse(repo.insertAIReply(Message.Marquee.AIQuery("deleted meanwhile"), MessageRepository.replyMessage("Too late.")))
+        assertEquals(MessageRepository.NOT_PUT_IN, repo.insertAIReply(Message.Marquee.AIQuery("deleted meanwhile"), MessageRepository.replyMessage("Too late.")))
 
         assertTrue(repo.marqueeMessages.isEmpty())
     }
@@ -52,7 +52,7 @@ class MessageRepositoryRepliesTest {
         val other = Message.Marquee.AIQuery("same words")
         repo.marqueeMessages.addAll(listOf(other, Message.Marquee.User("OLDEST")))
 
-        assertFalse(repo.insertAIReply(asked, MessageRepository.replyMessage("For the one that was deleted.")))
+        assertEquals(MessageRepository.NOT_PUT_IN, repo.insertAIReply(asked, MessageRepository.replyMessage("For the one that was deleted.")))
 
         assertEquals(listOf("AIQuery:same words", "User:OLDEST"), stored())
     }
@@ -140,9 +140,13 @@ class MessageRepositoryRepliesTest {
         assertEquals(reply, result)
         assertEquals("LOUD ENOUGH.", message!!.str)
 
-        for (failure in listOf<Throwable>(IllegalStateException("boom"), OutOfMemoryError("no room"), NoClassDefFoundError("x"))) {
+        for (failure in listOf<Throwable>(IllegalStateException("boom"), NoClassDefFoundError("x"), OutOfMemoryError("no room"))) {
             val (failed, none) = MessageRepository.readyReply(reply) { throw failure }
-            assertEquals(cx.aphex.energysign.ai.NoReplyReason.UNEXPECTED_FAILURE, (failed as cx.aphex.energysign.ai.AIReplyResult.NoReply).reason)
+            // The provider answered: a failure of this app after that ends the query. A reason
+            // that lets it be asked again would buy the same answer a second time.
+            val reason = (failed as cx.aphex.energysign.ai.AIReplyResult.NoReply).reason
+            assertEquals(cx.aphex.energysign.ai.NoReplyReason.FAILED_AFTER_ANSWER, reason)
+            assertEquals(false, reason.askAgain)
             assertEquals(null, none)
         }
 
@@ -157,15 +161,34 @@ class MessageRepositoryRepliesTest {
         repo.marqueeMessages.addAll(listOf(Message.Marquee.User("NEWEST"), twin, query, Message.Marquee.User("OLDEST")))
 
         // The place is stale: it points at the twin. The query is found where it is.
-        assertTrue(repo.insertAIReply(query, MessageRepository.replyMessage("For the second."), seenAt = 1))
+        assertEquals(3, repo.insertAIReply(query, MessageRepository.replyMessage("For the second."), seenAt = 1))
         assertEquals(listOf("User:NEWEST", "AIQuery:same words", "User:same words", "AIReply:FOR THE SECOND.", "User:OLDEST"), stored())
 
         // The right place, a place beyond the list, and no place.
         assertTrue(repo.retireQuery(twin, seenAt = 1))
         val late = Message.Marquee.AIQuery("late")
         repo.marqueeMessages.add(late)
-        assertTrue(repo.insertAIReply(late, MessageRepository.replyMessage("Late."), seenAt = 99))
-        assertFalse(repo.insertAIReply(Message.Marquee.AIQuery("gone"), MessageRepository.replyMessage("x"), seenAt = 0))
+        assertEquals(repo.marqueeMessages.lastIndex + 1, repo.insertAIReply(late, MessageRepository.replyMessage("Late."), seenAt = 99))
+        assertEquals(MessageRepository.NOT_PUT_IN, repo.insertAIReply(Message.Marquee.AIQuery("gone"), MessageRepository.replyMessage("x"), seenAt = 0))
         assertEquals("AIReply:LATE.", stored().last())
+    }
+
+    @Test
+    fun `a posted reply that is one heart of the sign is a message`() {
+        val heart = Message.HEART
+
+        repo.marqueeMessages.add(Message.Marquee.User("NEWEST"))
+
+        assertEquals("$heart", MessageRepository.postedReplyMessage("$heart")?.str)
+        assertEquals(true, posted("$heart", inReplyTo = "NEWEST"))
+        assertEquals(listOf("User:NEWEST", "AIReply:$heart"), stored())
+    }
+
+    @Test
+    fun `a posted reply says the place it was put at`() {
+        repo.marqueeMessages.addAll(listOf(Message.Marquee.User("NEWEST"), Message.Marquee.User("OLDEST")))
+
+        assertEquals(2, repo.insertPostedAIReply(MessageRepository.replyMessage("a"), inReplyTo = "OLDEST"))
+        assertEquals(1, repo.insertPostedAIReply(MessageRepository.replyMessage("b"), inReplyTo = "nobody said this"))
     }
 }

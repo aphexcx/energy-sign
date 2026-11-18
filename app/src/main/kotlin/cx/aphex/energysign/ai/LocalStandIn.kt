@@ -21,13 +21,17 @@ import java.net.Socket
  * The client that talks to it carries a made-up key (see AnthropicReplyGenerator.warmUp), so
  * nothing that is worth anything reaches this socket, whoever connects to it.
  */
-class LocalStandIn(
+class LocalStandIn internal constructor(
     private val answer: String,
-    bindTo: InetAddress = IPV4_LOOPBACK,
+    /** The listening socket, bound. It is this object's from here on. */
+    private val server: ServerSocket,
     /** Everything one request sent, head and body, as it came. For tests. */
-    private val seen: (String) -> Unit = {},
+    private val seen: (String) -> Unit,
+    /** Starts the serving thread. Only tests set this. */
+    startThread: (Thread) -> Unit,
 ) : AutoCloseable {
-    private val server = ServerSocket(0, 2, bindTo)
+    constructor(answer: String, bindTo: InetAddress = IPV4_LOOPBACK, seen: (String) -> Unit = {}) :
+        this(answer, ServerSocket(0, 2, bindTo), seen, Thread::start)
 
     /** The address the socket is bound to. */
     val address: InetAddress = server.inetAddress
@@ -58,9 +62,21 @@ class LocalStandIn(
                 active = null
             }
         }
-    }, "ai-warm-up-stand-in").apply {
-        isDaemon = true
-        start()
+    }, "ai-warm-up-stand-in").apply { isDaemon = true }
+
+    init {
+        try {
+            startThread(thread)
+        } catch (e: Throwable) {
+            // No thread, so nobody will ever serve or close this socket, and the caller gets no
+            // object to close: it is closed here. The caller hears why there is no stand-in.
+            try {
+                server.close()
+            } catch (closing: IOException) {
+                // nothing
+            }
+            throw e
+        }
     }
 
     private fun serve(socket: Socket) {

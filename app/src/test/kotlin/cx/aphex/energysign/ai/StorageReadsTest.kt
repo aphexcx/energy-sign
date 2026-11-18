@@ -76,6 +76,54 @@ class StorageReadsTest {
         assertTrue(escaped.isEmpty(), "the read's failure left its thread: $escaped")
     }
 
+    // ---- nothing optional can keep the sign link from starting (round 3, deep 8)
+
+    @Test
+    fun `a setting whose reader thread cannot be started is the setting of the build - making it does not throw`() {
+        for (refusal in listOf<Throwable>(InternalError("Thread starting during runtime shutdown"), IllegalStateException("no"), OutOfMemoryError("unable to create native thread"))) {
+            // Made on the main thread, on the way to the start of the sign link: an exception
+            // here would be an app without a sign link.
+            val setting = ReadOnceAtStart(untilRead = "build", read = { "file" }, startThread = { throw refusal })
+
+            assertEquals("build", setting.get(), "$refusal")
+        }
+    }
+
+    @Test
+    fun `the effort setting asks for the files directory on its reader's thread, never on the thread that makes it`() {
+        val dir = java.nio.file.Files.createTempDirectory("es6zj-effort").toFile()
+        java.io.File(dir, AIEffort.OVERRIDE_FILE_NAME).writeText("low")
+        val askedOn = CopyOnWriteArrayList<Thread>()
+        val told = CountDownLatch(1)
+
+        val effort = AIEffort.readOnceAtStart(
+            buildSetting = "max",
+            filesDir = { askedOn += Thread.currentThread(); dir },
+            warn = {},
+            info = { told.countDown() },
+        )
+
+        assertTrue(told.await(5, TimeUnit.SECONDS))
+        Thread.sleep(50)
+        assertEquals(AIEffort.LOW, effort.get(), "the file on the device wins")
+        assertTrue(askedOn.isNotEmpty() && askedOn.none { it === Thread.currentThread() }, "storage was touched by the thread that makes the setting")
+        dir.deleteRecursively()
+    }
+
+    @Test
+    fun `a files directory that cannot be had, or a reader thread that cannot be started, leaves the effort of the build`() {
+        val asked = CountDownLatch(1)
+        val noDir = AIEffort.readOnceAtStart("xhigh", filesDir = { asked.countDown(); throw SecurityException("no storage") }, warn = {}, info = {})
+        val noThread = AIEffort.readOnceAtStart(
+            "low", filesDir = { error("never asked") }, warn = {}, info = {}, startThread = { throw InternalError("no thread") },
+        )
+
+        assertTrue(asked.await(5, TimeUnit.SECONDS))
+        Thread.sleep(50)
+        assertEquals(AIEffort.XHIGH, noDir.get())
+        assertEquals(AIEffort.LOW, noThread.get())
+    }
+
     // ---- a file read again for every query, by one thread at most
 
     /** Starts the read threads and counts them. */

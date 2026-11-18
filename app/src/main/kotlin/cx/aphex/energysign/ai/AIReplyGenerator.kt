@@ -60,10 +60,23 @@ enum class NoReplyReason(val askAgain: Boolean, val backOff: Boolean) {
     NOTHING_TO_ASK(askAgain = false, backOff = false),
 
     /**
+     * The replies of this app could not be set up when it started ([NoAIReplies]). Nothing was
+     * sent and nothing will be in this run: a query stays on the sign as the plain message it is.
+     */
+    NOT_SET_UP(askAgain = false, backOff = false),
+
+    /**
      * The query was not confirmed as still wanted right before the request: it was deleted, or
      * the owner of the messages did not answer. Nothing was sent.
      */
     WITHDRAWN(askAgain = true, backOff = false),
+
+    /**
+     * Too little of the query's time was left when its request was ready to go, so it was not
+     * sent: it would be paid for and, most likely, not waited for. Nothing was sent, and that
+     * says nothing about the provider.
+     */
+    TOO_LATE_TO_SEND(askAgain = true, backOff = false),
 
     /** The provider declined (stop reason "refusal"), and so did the fallback model. */
     REFUSED(askAgain = false, backOff = false),
@@ -76,6 +89,13 @@ enum class NoReplyReason(val askAgain: Boolean, val backOff: Boolean) {
 
     /** A complete answer of a kind this app does not handle (an unknown stop reason). */
     UNEXPECTED_RESPONSE(askAgain = false, backOff = false),
+
+    /**
+     * The provider answered, whole, and this app failed to make a message of the answer (fitting
+     * it to the sign, building the message). The answer was delivered and paid for: asking again
+     * would buy it a second time, so the query ends here.
+     */
+    FAILED_AFTER_ANSWER(askAgain = false, backOff = false),
 
     /** HTTP 200 with a body that is not a message at all (a captive portal, a proxy page). */
     NOT_A_MESSAGE(askAgain = true, backOff = true),
@@ -117,7 +137,8 @@ enum class NoReplyReason(val askAgain: Boolean, val backOff: Boolean) {
      * Whether a request went out at all. When none did, the provider has neither answered nor
      * failed: such a result says nothing about how the provider is doing.
      */
-    val nothingWasSent: Boolean get() = this == MISSING_KEY || this == NOTHING_TO_ASK || this == WITHDRAWN
+    val nothingWasSent: Boolean get() = this == MISSING_KEY || this == NOTHING_TO_ASK || this == NOT_SET_UP || this == WITHDRAWN ||
+            this == TOO_LATE_TO_SEND
 
     companion object {
         /**
@@ -183,6 +204,44 @@ interface AIReplySource {
      */
     fun ask(text: String, stillWanted: () -> Boolean = { true }, onResult: (AIReplyResult) -> Unit)
 }
+
+/**
+ * No replies, for this run of the app: what it works with when its replies could not be set up.
+ * There is no warm-up, and every query is answered at once with [NoReplyReason.NOT_SET_UP], which
+ * leaves it on the sign as a plain message. Nothing in here can fail.
+ */
+class NoAIReplies(private val why: String) : AIReplySource {
+    override fun warmUp(onDone: () -> Unit): Boolean = false
+
+    override fun ask(text: String, stillWanted: () -> Boolean, onResult: (AIReplyResult) -> Unit) {
+        try {
+            onResult(AIReplyResult.NoReply(NoReplyReason.NOT_SET_UP, why))
+        } catch (e: Throwable) {
+            // The caller's own failure; there is nowhere to report it.
+        }
+    }
+}
+
+/**
+ * The replies [build] makes, or [NoAIReplies] when it throws anything at all, an Error included.
+ *
+ * NOTHING OPTIONAL CAN KEEP THE SIGN LINK FROM STARTING. The replies are built on the main
+ * thread, inside the construction of the message manager, before the sign link starts: whatever
+ * goes wrong in building them costs the replies of this run, never the sign.
+ */
+fun aiRepliesOrNone(warn: (String) -> Unit, build: () -> AIReplySource): AIReplySource =
+    try {
+        build()
+    } catch (e: Throwable) {
+        // Only the kind of failure: what a library writes into its message is not ours to print.
+        val why = "the replies could not be set up (${e.javaClass.name})"
+        try {
+            warn("No AI replies in this run: $why")
+        } catch (logFailure: Throwable) {
+            // nothing
+        }
+        NoAIReplies(why)
+    }
 
 /** Which provider writes the replies. One setting: `AI_PROVIDER` in local.properties. */
 enum class AIProvider(val setting: String) {
@@ -260,6 +319,27 @@ enum class AIEffort(val setting: String) {
                 warn("${overrideFile.name} names no level (low, medium, high, xhigh, max); effort stays ${it.setting}")
             }
         }
+
+        /**
+         * The effort for this run as a setting that is read once, by a thread of its own
+         * ([ReadOnceAtStart]). [filesDir] is asked for by that thread too: on the board the
+         * directory is storage like the file in it, and whoever makes this (the main thread,
+         * before the sign link starts) touches none of it and cannot be held up or failed by it.
+         */
+        fun readOnceAtStart(
+            buildSetting: String?,
+            filesDir: () -> File,
+            warn: (String) -> Unit,
+            info: (String) -> Unit,
+            startThread: (Runnable) -> Unit = { Thread(it, "ai-settings").apply { isDaemon = true }.start() },
+        ): ReadOnceAtStart<AIEffort> = ReadOnceAtStart(
+            untilRead = fromSetting(buildSetting),
+            read = {
+                fromOverrideFile(fromSetting(buildSetting, warn), File(filesDir(), OVERRIDE_FILE_NAME), warn)
+                    .also { info("AI effort for this run: ${it.setting}") }
+            },
+            startThread = startThread,
+        )
 
         private fun named(name: String): AIEffort? = values().firstOrNull { it.setting.equals(name, ignoreCase = true) }
     }

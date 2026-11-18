@@ -399,16 +399,19 @@ class AnthropicReplyGeneratorTest {
     }
 
     @Test
-    fun `the time the server gives with an error is kept too`() {
+    fun `an error never tells the time, the API's own error included`() {
+        // The body of an error has been read when the error is known, so nobody can say when its
+        // headers arrived; and "a real error" cannot be told from a page that copies one.
         api.answer = FakeMessagesApi.Answer(
             529,
             FakeMessagesApi.error("overloaded_error", "Overloaded"),
             headers = mapOf("date" to "Sat, 21 Nov 2026 05:30:00 GMT"),
         )
 
-        ask()
+        assertNoReply(NoReplyReason.SERVER_ERROR, ask())
+        generator().syncClock(Duration.ofSeconds(5)) // the free request gets the same error
 
-        assertEquals(java.time.Instant.parse("2026-11-21T05:30:00Z"), serverClock.now())
+        assertEquals(null, serverClock.now())
     }
 
     @Test
@@ -680,7 +683,10 @@ class AnthropicReplyGeneratorTest {
         val result = ask(deadline = Deadline.after(Duration.ofSeconds(5)))
 
         val noReply = assertIs<AIReplyResult.NoReply>(result)
-        assertEquals(NoReplyReason.TIMEOUT, noReply.reason)
+        // Not TIMEOUT: nothing was asked of the provider, so this is no failure of the provider
+        // and no reason for the pause that follows one.
+        assertEquals(NoReplyReason.TOO_LATE_TO_SEND, noReply.reason)
+        assertTrue(noReply.reason.nothingWasSent && !noReply.reason.backOff)
         assertTrue(noReply.detail.contains("not sent"), noReply.detail)
         assertTrue(api.received.isEmpty(), "a request went out with 5 s left: it would be paid for and not waited for")
         assertEquals(Duration.ofSeconds(15), AnthropicReplyGenerator.MIN_TIME_TO_SEND)
@@ -791,6 +797,12 @@ class AnthropicReplyGeneratorTest {
             "<html>Sign in to this network</html>",
             "{}",
             """{"id":"some-other-model","type":"model","display_name":"Other","created_at":"2026-01-01T00:00:00Z"}""",
+            // The right id, and not the description of a model: any JSON can carry an id.
+            """{"id":"claude-fable-5-2"}""",
+            """{"id":"claude-fable-5-2","type":"model"}""",
+            """{"id":"claude-fable-5-2","type":"message","display_name":"Claude Fable 5.2","created_at":"2026-01-01T00:00:00Z"}""",
+            """{"id":"claude-fable-5-2","type":"model","display_name":"","created_at":"2026-01-01T00:00:00Z"}""",
+            """{"id":"claude-fable-5-2","type":"model","display_name":"Claude Fable 5.2","created_at":"last winter"}""",
         )
         for (page in pages) {
             api.answer = FakeMessagesApi.Answer(200, page, headers = date)
@@ -828,28 +840,77 @@ class AnthropicReplyGeneratorTest {
     }
 
     @Test
-    fun `an error tells the time only when its body is an error of the API, and a fresh one`() {
-        api.answer = FakeMessagesApi.Answer(503, "<html>Bad gateway</html>", headers = date)
-        assertNoReply(NoReplyReason.SERVER_ERROR, ask())
-        assertEquals(null, serverClock.now(), "a page of something in between set the clock")
+    fun `no error tells the time, whatever its status and its body`() {
+        val errors = listOf(
+            503 to "<html>Bad gateway</html>",
+            503 to FakeMessagesApi.error("proxy_error", "from something in between"),
+            529 to FakeMessagesApi.error("overloaded_error", "Overloaded"),
+            500 to FakeMessagesApi.error("api_error", "Internal"),
+            429 to FakeMessagesApi.error("rate_limit_error", "Slow down"),
+            401 to FakeMessagesApi.error("authentication_error", "No"),
+            400 to FakeMessagesApi.error("invalid_request_error", "No"),
+        )
+        for ((status, body) in errors) {
+            api.answer = FakeMessagesApi.Answer(status, body, headers = date)
+            assertNoReply(NoReplyReason.forHttpStatus(status), ask())
+            generator().syncClock(Duration.ofSeconds(5))
+            assertEquals(null, serverClock.now(), "HTTP $status with $body set the clock")
+        }
+    }
 
-        // JSON with a string where the API names its error, but not one of the API's names.
-        for (type in listOf("proxy_error", "server_error", "")) {
-            api.answer = FakeMessagesApi.Answer(503, FakeMessagesApi.error(type, "from something in between"), headers = date)
-            assertNoReply(NoReplyReason.SERVER_ERROR, ask())
-            assertEquals(null, serverClock.now(), "an error of type \"$type\" set the clock")
+    @Test
+    fun `HTTP 200 that has a stop reason and is not a whole message of the API tells the clock nothing, whatever becomes of it`() {
+        val text = """[{"type":"text","text":"Hydrate."}]"""
+        val whole = com.google.gson.JsonParser.parseString(FakeMessagesApi.message(text)).asJsonObject
+        fun without(field: String) = whole.deepCopy().apply { remove(field) }.toString()
+        fun with(field: String, json: String) = whole.deepCopy().apply { add(field, com.google.gson.JsonParser.parseString(json)) }.toString()
+        val partial = listOf(
+            // What a gateway in between may answer: a stop reason, and nothing of a message.
+            """{"stop_reason":"maintenance"}""",
+            """{"stop_reason":"end_turn","content":$text}""",
+            without("id"), without("type"), without("role"), without("model"), without("usage"),
+            with("id", "\"\""), with("type", "\"error\""), with("role", "\"user\""), with("model", "\"\""),
+            with("usage", "{}"), with("usage", """{"input_tokens":"many","output_tokens":3}"""),
+            with("stop_reason", "\"maintenance\""),
+            // A refusal is judged without its content: here there is none at all.
+            whole.deepCopy().apply { remove("content"); addProperty("stop_reason", "refusal") }.toString(),
+        )
+        for (body in partial) {
+            api.answer = FakeMessagesApi.Answer(200, body, headers = date)
+
+            ask() // a reply, or none: decided by the stop reason and the content, as before
+
+            assertEquals(null, serverClock.now(), "the clock was set by: $body")
         }
 
-        api.answer = FakeMessagesApi.Answer(
-            529, FakeMessagesApi.error("overloaded_error", "Overloaded"),
-            headers = mapOf("date" to "Sat, 21 Nov 2026 00:30:00 GMT", "age" to "3600"),
-        )
-        assertNoReply(NoReplyReason.SERVER_ERROR, ask())
-        assertEquals(null, serverClock.now(), "an old error set the clock")
+        api.answer = FakeMessagesApi.Answer(200, whole.toString(), headers = date)
+        assertEquals(AIReplyResult.Reply("Hydrate."), ask())
+        assertEquals(java.time.Instant.parse("2026-11-21T05:30:00Z"), serverClock.now(), "a whole message tells the time")
+    }
 
-        api.answer = FakeMessagesApi.Answer(529, FakeMessagesApi.error("overloaded_error", "Overloaded"), headers = date)
-        assertNoReply(NoReplyReason.SERVER_ERROR, ask())
+    @Test
+    fun `a refusal is a whole message of the API too, and tells the time`() {
+        api.answer = FakeMessagesApi.Answer(200, FakeMessagesApi.message("[]", stopReason = "refusal"), headers = date)
+
+        assertNoReply(NoReplyReason.REFUSED, ask())
+
         assertEquals(java.time.Instant.parse("2026-11-21T05:30:00Z"), serverClock.now())
+    }
+
+    @Test
+    fun `a reply with two Age fields, or two Date fields, is a reply and does not tell the time`() {
+        val twice = listOf(
+            listOf("age" to "0", "age" to "3600"),
+            listOf("age" to "3600", "age" to "0"),
+            listOf("date" to "Sat, 21 Nov 2026 04:30:00 GMT"), // a second Date, beside the one in [date]
+        )
+        for (fields in twice) {
+            api.answer = FakeMessagesApi.Answer(200, FakeMessagesApi.message("""[{"type":"text","text":"Hydrate."}]"""), headers = date, moreHeaders = fields)
+
+            assertEquals(AIReplyResult.Reply("Hydrate."), ask())
+
+            assertEquals(null, serverClock.now(), "the clock was set with $fields")
+        }
     }
 
     @Test
@@ -914,6 +975,17 @@ class AnthropicReplyGeneratorTest {
         generator(timeout = Duration.ofSeconds(90)).syncClock(Duration.ofSeconds(20))
 
         assertEquals(java.time.Instant.parse("2026-11-21T05:30:00Z"), serverClock.now(), "the check was cut short: $log")
+    }
+
+    @Test
+    fun `an Error in what is done for the log after an answer came does not cost the answer`() {
+        api.answer = FakeMessagesApi.Answer(200, FakeMessagesApi.message("""[{"type":"text","text":"Hydrate."}]"""), headers = date)
+        val generator = AnthropicReplyGenerator(
+            apiKey = FAKE_KEY, log = { log.add(it) }, info = { throw NoClassDefFoundError("some/log/Class") },
+            serverClock = serverClock, requestTimeout = Duration.ofSeconds(5), baseUrl = api.baseUrl,
+        )
+
+        assertEquals(AIReplyResult.Reply("Hydrate."), ask(generator))
     }
 
     companion object {

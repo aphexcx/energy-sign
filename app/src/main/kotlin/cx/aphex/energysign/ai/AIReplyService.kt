@@ -21,6 +21,11 @@ import java.time.ZoneId
  *
  * A reply comes out whole or not at all: see [AIReplyLimits.fitToSign]. It comes out ready for
  * the sign: nothing is left to do with its text for whoever puts it into the list.
+ *
+ * AN ANSWER THAT WAS DELIVERED IS NEVER BOUGHT AGAIN. Once the generator has handed over an
+ * answer, nothing that fails in here can end as a result that lets the query be asked again:
+ * the failure ends the query ([NoReplyReason.FAILED_AFTER_ANSWER]). The log is never such a
+ * failure: a log line that cannot be written is lost, and nothing else.
  */
 class AIReplyService(
     private val generator: AIReplyGenerator,
@@ -43,6 +48,8 @@ class AIReplyService(
     private val timeCheckLimit: Duration = Duration.ofSeconds(5),
     /** Starts the one thread that reads the set times. Only tests set this. */
     startReadThread: (Runnable) -> Unit = { Thread(it, "ai-set-times").apply { isDaemon = true }.start() },
+    /** Makes an answer fit the sign. Only tests set this. */
+    private val fit: (String) -> String = AIReplyLimits::fitToSign,
 ) {
     /**
      * The set times are read apart from the call, by one thread at most: a read that hangs is
@@ -73,20 +80,7 @@ class AIReplyService(
                 )
                 when (val result = generator.generateReply(request)) {
                     is AIReplyResult.NoReply -> result.copy(detail = redact(result.detail))
-                    is AIReplyResult.Reply -> {
-                        val fitted = AIReplyLimits.fitToSign(result.text)
-                        if (fitted.isBlank()) {
-                            noReply(NoReplyReason.EMPTY, "nothing in the reply that the sign can show, or not one whole word that fits")
-                        } else {
-                            if (fitted.length < result.text.trim().length) {
-                                log(
-                                    "${generator.name}: reply went from ${result.text.length} to ${fitted.length} characters " +
-                                        "(what the sign cannot show was dropped, and it is cut when it is too long)"
-                                )
-                            }
-                            AIReplyResult.Reply(fitted)
-                        }
-                    }
+                    is AIReplyResult.Reply -> fitted(result)
                 }
             }
         } catch (e: CancellationException) {
@@ -115,30 +109,66 @@ class AIReplyService(
         try {
             val load = setTimesReader.await(deadline.atMost(setTimesLimit).toMillis())
                 ?: SetTimesLoad.Unusable("reading the set times took longer than ${setTimesLimit.seconds} s")
-            if (load is SetTimesLoad.Unusable) log("No set times in the prompt: ${load.why}")
+            if (load is SetTimesLoad.Unusable) say("No set times in the prompt: ${load.why}")
 
             if (now() == null) {
                 withContext(NonCancellable + Dispatchers.IO) { generator.syncClock(deadline.atMost(timeCheckLimit)) }
             }
             val instant = now()
             if (instant == null) {
-                log("The time is not known yet: no date, time or set times in the prompt")
+                say("The time is not known yet: no date, time or set times in the prompt")
                 ""
             } else {
                 FestivalContext.describe(instant, deviceZone(), load, buildDate).also {
-                    if (it.isEmpty()) log("The time reads $instant, which cannot be right: no date, time or set times in the prompt")
+                    if (it.isEmpty()) say("The time reads $instant, which cannot be right: no date, time or set times in the prompt")
                 }
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            log("The context for the prompt could not be built (${e.javaClass.simpleName}): the prompt goes without it")
+            say("The context for the prompt could not be built (${e.javaClass.simpleName}): the prompt goes without it")
             ""
         }
 
+    /**
+     * [answer] for the sign. The provider HAS answered when this is called, so whatever fails
+     * in here, an Error included, ends the query: it never becomes a reason to ask again.
+     */
+    private fun fitted(answer: AIReplyResult.Reply): AIReplyResult =
+        try {
+            val fitted = fit(answer.text)
+            if (fitted.isBlank()) {
+                noReply(NoReplyReason.EMPTY, "nothing in the reply that the sign can show, or not one whole word that fits")
+            } else {
+                if (fitted.length < answer.text.trim().length) {
+                    say(
+                        "${generator.name}: reply went from ${answer.text.length} to ${fitted.length} characters " +
+                            "(what the sign cannot show was dropped, and it is cut when it is too long)"
+                    )
+                }
+                AIReplyResult.Reply(fitted)
+            }
+        } catch (e: Throwable) {
+            noReply(NoReplyReason.FAILED_AFTER_ANSWER, e.javaClass.name)
+        }
+
+    /** The result for "no reply", with its line in the log. It never throws: see [say]. */
     private fun noReply(reason: NoReplyReason, detail: String): AIReplyResult.NoReply {
-        val safeDetail = redact(detail)
-        log("${generator.name}: no reply, $reason [$safeDetail]")
+        val safeDetail = try {
+            redact(detail)
+        } catch (e: Throwable) {
+            "" // what could not be cleaned of keys is not handed on
+        }
+        say("${generator.name}: no reply, $reason [$safeDetail]")
         return AIReplyResult.NoReply(reason, safeDetail)
+    }
+
+    /** A line for the log. A log that fails changes no result: there is nowhere to report it. */
+    private fun say(line: String) {
+        try {
+            log(line)
+        } catch (e: Throwable) {
+            // nothing
+        }
     }
 }

@@ -294,7 +294,11 @@ class MessageManagerRepliesTest {
 
     @Test
     fun `an empty answer, a cut-off answer and a rejected key retire the query too`() {
-        for (reason in listOf(NoReplyReason.EMPTY, NoReplyReason.TRUNCATED, NoReplyReason.KEY_REJECTED, NoReplyReason.MISSING_KEY)) {
+        val ending = listOf(
+            NoReplyReason.EMPTY, NoReplyReason.TRUNCATED, NoReplyReason.KEY_REJECTED, NoReplyReason.MISSING_KEY,
+            NoReplyReason.FAILED_AFTER_ANSWER, NoReplyReason.NOT_SET_UP,
+        )
+        for (reason in ending) {
             build(warmUp = false)
             nowMs += 3_600_000 // well clear of the pause after a failure of the round before
             val query = ask("ravegpt $reason")
@@ -555,5 +559,226 @@ class MessageManagerRepliesTest {
 
         assertEquals("NO", next().str)
         assertFalse(thinkingQueued())
+    }
+
+    // ---- a place is a message, not a number (round 3, deep 7)
+
+    /** A Bluetooth write, carried out by the owner. */
+    private fun phone(command: String) {
+        manager.processNewBytes(command.toByteArray())
+        ownerRuns()
+    }
+
+    /** The heading of a reply, as the sign is given it; the reply must be the very next thing. */
+    private fun restOfHeading() = assertEquals(listOf("SAYS.", "SAYS..", "SAYS..."), List(3) { next().str })
+
+    /** [query, NEWEST, a reply posted for NEWEST, MIDDLE, OLDEST], with the query shown and its call out, its notice over, and NEWEST shown. */
+    private fun aHeadingStartsWhileACallIsOut(): Message.Marquee.AIQuery {
+        val query = ask()
+        manager.onNewPostedAIReply(PostedAIAnswer("An answer from the laptop.", inReplyTo = "NEWEST"))
+        ownerRuns()
+        assertEquals(query, untilStored())
+        nowMs += 31_000
+        assertEquals("NEWEST", next().str)
+        assertEquals("RAVEGPT", next().str, "the heading of the posted reply starts")
+        return query
+    }
+
+    @Test
+    fun `a reply that is put in while a heading is on the sign does not come between the heading and its reply`() {
+        aHeadingStartsWhileACallIsOut()
+
+        replies.asked.single().answer(AIReplyResult.Reply("Loud enough."))
+        ownerRuns()
+
+        restOfHeading()
+        assertEquals("AN ANSWER FROM THE LAPTOP.", next().str, "after SAYS... comes the reply the heading was for, never a visitor's message")
+        assertEquals("MIDDLE", next().str, "and the sign goes on behind it: NEWEST was shown before the heading")
+    }
+
+    @Test
+    fun `a new message that comes in while a heading is on the sign waits behind the heading's reply`() {
+        aHeadingStartsWhileACallIsOut()
+
+        manager.processNewUserMessage("fresh words")
+        ownerRuns()
+
+        restOfHeading()
+        assertEquals("AN ANSWER FROM THE LAPTOP.", next().str)
+        assertFalse(next() is Message.Marquee, "then the announcement of the new message")
+        assertEquals("FRESH WORDS", untilStored().str.uppercase(), "and the new message is the next stored one")
+    }
+
+    @Test
+    fun `a notice that is asked for while a heading is on the sign goes up behind the heading's reply`() {
+        aHeadingStartsWhileACallIsOut()
+
+        manager.togglePersistentThinkingMessage(true)
+        ownerRuns()
+
+        restOfHeading()
+        assertEquals("AN ANSWER FROM THE LAPTOP.", next().str)
+        assertIs<Message.ColorMessage.AIThinking>(next())
+    }
+
+    @Test
+    fun `advertisements that are set while a heading is on the sign do not split it from its reply`() {
+        aHeadingStartsWhileACallIsOut()
+
+        phone("!🅰\n👾")
+
+        restOfHeading()
+        assertEquals("AN ANSWER FROM THE LAPTOP.", next().str)
+        assertIs<Message.ColorMessage.IconInvaders>(next())
+    }
+
+    @Test
+    fun `a heading slide or a headed reply that could not be written is the next thing again`() {
+        aHeadingStartsWhileACallIsOut()
+
+        val slide = next()
+        assertEquals("SAYS.", slide.str)
+        manager.returnUnsent(slide)
+        restOfHeading()
+        val reply = next()
+        assertEquals("AN ANSWER FROM THE LAPTOP.", reply.str)
+        manager.returnUnsent(reply)
+
+        assertEquals("AN ANSWER FROM THE LAPTOP.", next().str, "a heading that was shown is followed by its reply, also after a failed write")
+        assertEquals("MIDDLE", next().str, "and it is shown once")
+    }
+
+    @Test
+    fun `a reply that is deleted while its heading is on the sign takes the rest of the heading with it`() {
+        aHeadingStartsWhileACallIsOut() // [query, NEWEST, the reply, MIDDLE, OLDEST]
+
+        phone("!choose")
+        phone("!first")
+        phone("!next")
+        phone("!next")
+        assertTrue(next().str.contains("AN ANSWER"), next().str)
+        phone("!delete")
+        phone("!endchoose")
+
+        assertEquals("MIDDLE", next().str, "no SAYS... in front of a visitor's message, and no deleted reply")
+        assertFalse(stored().any { it.contains("LAPTOP") })
+    }
+
+    @Test
+    fun `a reply that comes in time is still the next thing after its query, under its heading`() {
+        val query = ask()
+        assertEquals(query, untilStored())
+        assertIs<Message.ColorMessage.AIThinking>(next())
+
+        replies.asked.single().answer(AIReplyResult.Reply("Loud enough."))
+        ownerRuns()
+
+        assertEquals("RAVEGPT", next().str)
+        restOfHeading()
+        assertEquals("LOUD ENOUGH.", next().str)
+        assertEquals("NEWEST", next().str)
+    }
+
+    @Test
+    fun `a late reply does not make the sign show the message after the query twice`() {
+        val query = ask()
+        assertEquals(query, untilStored())
+        nowMs += 31_000
+        assertEquals("NEWEST", next().str)
+
+        replies.asked.single().answer(AIReplyResult.Reply("Sorry, I was loading."))
+        ownerRuns()
+
+        assertEquals("MIDDLE", next().str, "NEWEST was shown; the reply is shown when its place comes round")
+        assertEquals("OLDEST", next().str)
+        assertEquals(query.str, next().str)
+        assertEquals("RAVEGPT", next().str)
+    }
+
+    /** Chooser mode on MIDDLE, at place 3 of [query, NEWEST, MIDDLE, OLDEST], with the query's call out. */
+    private fun theChooserIsOnMiddleWhileACallIsOut(): Message.Marquee.AIQuery {
+        val query = ask()
+        assertEquals(query, untilStored())
+        phone("!choose")
+        phone("!first")
+        phone("!next")
+        phone("!next")
+        assertEquals("MIDDLE", assertIs<Message.Chooser>(next()).str)
+        return query
+    }
+
+    @Test
+    fun `in chooser mode a reply that is put in leaves the chooser on its message, and a delete removes that message`() {
+        val query = theChooserIsOnMiddleWhileACallIsOut()
+
+        replies.asked.single().answer(AIReplyResult.Reply("Loud enough."))
+        ownerRuns()
+        phone("!delete") // before the sign's next poll: the person saw MIDDLE
+
+        assertEquals(listOf("User:${query.str}", "AIReply:LOUD ENOUGH.", "User:NEWEST", "User:OLDEST"), stored())
+        assertEquals("OLDEST", assertIs<Message.Chooser>(next()).str)
+    }
+
+    @Test
+    fun `in chooser mode a reply posted from outside leaves the chooser on its message too`() {
+        theChooserIsOnMiddleWhileACallIsOut()
+
+        manager.onNewPostedAIReply(PostedAIAnswer("An answer from the laptop.", inReplyTo = "NEWEST"))
+        ownerRuns()
+
+        assertEquals("MIDDLE", assertIs<Message.Chooser>(next()).str, "put in at the chosen message's own place")
+        manager.onNewPostedAIReply(PostedAIAnswer("A second one.", inReplyTo = "NEWEST"))
+        ownerRuns()
+        assertEquals("MIDDLE", assertIs<Message.Chooser>(next()).str)
+        phone("!delete")
+        assertFalse(stored().contains("User:MIDDLE"))
+        assertEquals(5, stored().size, "${stored()}")
+    }
+
+    @Test
+    fun `the query the chooser is on stays chosen when its reply is put in behind it`() {
+        val query = ask()
+        assertEquals(query, untilStored())
+        phone("!choose")
+        phone("!first")
+
+        replies.asked.single().answer(AIReplyResult.Reply("Loud enough."))
+        ownerRuns()
+        phone("!delete")
+
+        assertEquals(listOf("AIReply:LOUD ENOUGH.", "User:NEWEST", "User:MIDDLE", "User:OLDEST"), stored(), "the delete removed what the chooser showed: the question")
+        assertTrue(next().str.contains("LOUD ENOUGH"), "and the chooser is on the reply now, for the person to decide")
+    }
+
+    // ---- added for the guard table of these fixes
+
+    @Test
+    fun `a reply that comes round again later, as a stored message, is not put back when it could not be written`() {
+        aHeadingStartsWhileACallIsOut()
+        restOfHeading()
+        assertEquals("AN ANSWER FROM THE LAPTOP.", next().str)
+
+        // Once round the list: the reply comes again, from the list this time, with no heading.
+        var again: Message? = null
+        repeat(8) { if (again == null) again = next().takeIf { it.str == "AN ANSWER FROM THE LAPTOP." } }
+        assertIs<Message.Marquee.Chonky>(again)
+        manager.returnUnsent(again!!)
+
+        assertEquals("MIDDLE", next().str, "a stored message comes round by itself: it is not queued a second time")
+    }
+
+    @Test
+    fun `another message that is deleted while a heading is on the sign leaves the heading and its reply`() {
+        aHeadingStartsWhileACallIsOut() // [query, NEWEST, the reply, MIDDLE, OLDEST]
+
+        phone("!choose")
+        phone("!last")
+        assertEquals("OLDEST", assertIs<Message.Chooser>(next()).str)
+        phone("!delete")
+        phone("!endchoose")
+
+        restOfHeading()
+        assertEquals("AN ANSWER FROM THE LAPTOP.", next().str)
+        assertEquals("MIDDLE", next().str)
     }
 }

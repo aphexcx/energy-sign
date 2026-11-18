@@ -169,4 +169,18 @@ class LocalStandInTest {
             }
         }
     }
+
+    // ---- round 3 of the gates
+
+    @Test
+    fun `a stand-in whose thread cannot be started gives its socket back`() {
+        for (refusal in listOf<Throwable>(InternalError("unable to create native thread"), IllegalStateException("no"))) {
+            val socket = java.net.ServerSocket(0, 2, java.net.InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1)))
+
+            val thrown = runCatching { LocalStandIn("{}", socket, seen = {}, startThread = { throw refusal }) }.exceptionOrNull()
+
+            assertTrue(thrown === refusal, "the caller hears why there is no stand-in: $thrown")
+            assertTrue(socket.isClosed, "the listening socket was left open after $refusal")
+        }
+    }
 }

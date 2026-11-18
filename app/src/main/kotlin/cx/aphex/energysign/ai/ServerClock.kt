@@ -2,8 +2,11 @@ package cx.aphex.energysign.ai
 
 import java.time.DateTimeException
 import java.time.Instant
-import java.time.ZonedDateTime
+import java.time.LocalDateTime
+import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
+import java.time.format.ResolverStyle
+import java.util.Locale
 
 /**
  * The time as the provider's server told it, kept running by a clock that only counts.
@@ -14,7 +17,13 @@ import java.time.format.DateTimeFormatter
  * carries the server's time in its `Date` header, over TLS. That time is taken here, and from
  * then on the time is "what the server said, plus what has passed since", whatever the device's
  * own clock does. The time is true or absent: a response that is not the API's, or not fresh,
- * tells it nothing (see [syncFromHeaders]).
+ * tells it nothing (see [syncFromHeaderFields]).
+ *
+ * WHO MAY TELL IT, as the callers keep it: only a response that was read to its end and found to
+ * be whole and of the expected kind (a message, the description of the model), with the moment
+ * its headers arrived taken BEFORE its body was read. Never an error response: the body of an
+ * error has been read by the time the error is known, so nobody can say when its headers came,
+ * and "an error of the API" cannot be told from a page that copies one.
  */
 class ServerClock(
     /** A clock that only counts (milliseconds since some start), untouched by the wall clock. */
@@ -38,28 +47,44 @@ class ServerClock(
     }
 
     /**
-     * Takes the time from the headers of a response, when it tells the time of NOW: a `Date`
-     * that can be read, and no `Age` that says the response has been kept somewhere (a cache
-     * hands out the `Date` of the moment it stored the response). An `Age` of 0 is fresh; one
-     * that cannot be read counts as old.
+     * Takes the time from the headers of a response, when they tell the time of NOW and say one
+     * thing only. [dates] and [ages] are ALL the `Date` and `Age` fields of the response, as
+     * they came:
+     * - exactly one `Date`, and it is an HTTP date to the letter ([parseHttpDate]);
+     * - no `Age` at all, or exactly one that reads `0`. An `Age` says the response has been kept
+     *   somewhere, and a cache hands out the `Date` of the moment it stored the response. Any
+     *   other value is old, one that cannot be read too; and two `Age` fields are old whatever
+     *   they say: something on the way has added one.
      *
-     * The caller answers for the rest: it calls this only for a response it has read and
-     * recognised as the API's own.
+     * The caller answers for the rest: see the class comment.
      */
-    fun syncFromHeaders(date: String?, age: String?, arrivedAtMs: Long? = null) {
-        if (age != null && age.trim().toLongOrNull() != 0L) return
-        parseHttpDate(date)?.let { sync(it, arrivedAtMs) }
+    fun syncFromHeaderFields(dates: List<String>, ages: List<String>, arrivedAtMs: Long? = null) {
+        if (dates.size != 1 || ages.size > 1) return
+        if (ages.isNotEmpty() && ages[0].trim() != "0") return
+        parseHttpDate(dates[0])?.let { sync(it, arrivedAtMs) }
     }
+
+    /** The same, for a response with one `Date` field at most and one `Age` field at most. */
+    fun syncFromHeaders(date: String?, age: String?, arrivedAtMs: Long? = null) =
+        syncFromHeaderFields(listOfNotNull(date), listOfNotNull(age), arrivedAtMs)
 
     /** The time now, or null as long as no server has told it. */
     fun now(): Instant? = anchor?.let { it.serverTime.plusMillis(monotonicMs() - it.atMs) }
 
     companion object {
-        /** An HTTP date ("Fri, 20 Nov 2026 05:30:00 GMT"), or null when it is none. */
+        /**
+         * The one form an HTTP date has today (RFC 9110, IMF-fixdate), and nothing near it: the
+         * day with two digits, the year with four, always GMT. STRICT: a date that does not
+         * exist (31 November) and a weekday that is not that date's are refused, not made to fit.
+         */
+        private val HTTP_DATE: DateTimeFormatter =
+            DateTimeFormatter.ofPattern("EEE, dd MMM uuuu HH:mm:ss 'GMT'", Locale.US).withResolverStyle(ResolverStyle.STRICT)
+
+        /** An HTTP date ("Fri, 20 Nov 2026 05:30:00 GMT"), or null when it is not exactly one. */
         fun parseHttpDate(value: String?): Instant? =
             try {
                 value?.trim()?.takeIf { it.isNotEmpty() }
-                    ?.let { ZonedDateTime.parse(it, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant() }
+                    ?.let { LocalDateTime.parse(it, HTTP_DATE).toInstant(ZoneOffset.UTC) }
             } catch (e: DateTimeException) {
                 null
             }

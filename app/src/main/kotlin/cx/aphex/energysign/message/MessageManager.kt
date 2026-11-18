@@ -222,6 +222,9 @@ class MessageManager(
     fun storedMessages(): List<Message.Marquee> = owner.ask { msgRepo.marqueeMessages.toList() }
 
     private fun addNewUserMessage(str: String, isQuery: Boolean) {
+        // The new message is what the sign shows next, and in chooser mode the one that is
+        // chosen (as before; MessageManagerOwnerTest has it): the index is MOVED to it here,
+        // on purpose. Where a message is only put in, the index stays with its message (madeRoomAt).
         currentIdx.update { 0 }
 
 //        String(value).split("++").filter { it.isNotBlank() }.reversed().forEach {
@@ -306,9 +309,17 @@ class MessageManager(
 
                 is Message.Marquee.AIReply -> {
                     logD("Converting AIReply to User message!")
-                    msgRepo.marqueeMessages[currentIdx.value] = curMsg.toChonkyMessage()
+                    val reply = curMsg.toChonkyMessage()
+                    msgRepo.marqueeMessages[currentIdx.value] = reply
                     msgRepo.saveMarqueeMessages(filesDir)
-                    msgRepo.pushOneTimeMessages(
+                    // The heading and its reply are ONE piece, and the reply is shown from the
+                    // queue, behind its heading: the index goes on past it now. The list may
+                    // change in any way while the heading is on the sign (a late reply is put
+                    // in, a new message comes, somebody moves the chooser): what follows
+                    // "SAYS..." is this reply, or nothing of the heading is shown any more
+                    // (the reply was deleted, the keyboard emptied the queue).
+                    getIdxAndAdvance()
+                    msgRepo.pushInOnePiece(listOf(
 //                        Message.ColorMessage.ChonkySlide("BAAAHS", context.getColor(R.color.green)),
                         Message.ColorMessage.ChonkySlide("RAVEGPT", context.getColor(R.color.green), delayMs = 750),
 //                        Message.ColorMessage.ChonkySlide("GARBAGE", context.getColor(R.color.green), delayMs = 750),
@@ -328,7 +339,8 @@ class MessageManager(
                         // Message.Starfield(stars = 100),
                         // Message.ColorMessage.IconInvaders.BAAAHS(context.getColor(R.color.instahandle)),
                         // Message.ChonkyMarquee(thought.toUpperCasePreservingASCIIRules())
-                    )
+                        reply,
+                    ))
                 }
 
                 else -> {}
@@ -350,6 +362,7 @@ class MessageManager(
         }
 
         // Fallthrough to regular marquee mode; display next user message
+        msgRepo.onePieceShown() // the queue is empty: whatever was one piece has been shown or dropped
         val idx = getIdxAndAdvance()
         val currentMsg: Message.Marquee = msgRepo.marqueeMessages[idx]
         logD("getNextMessage: messages[$idx] = $currentMsg")
@@ -419,15 +432,34 @@ class MessageManager(
     /**
      * [message] was taken by getNextMessage and could not be written to the sign. A one-time
      * message (a command such as the microphone switch, an announcement) goes back to the front
-     * of its queue; a stored message needs nothing, it comes round again. Owner thread only.
+     * of its queue; a stored message needs nothing, it comes round again. A reply that was taken
+     * from the queue, behind its heading, goes back like a one-time message. Owner thread only.
      */
     fun returnUnsent(message: Message) {
         // (the thinking message put its follow-up in the queue when it was taken)
-        if (message !is Message.Marquee && message !is Message.Chooser && message !is Message.KeyboardEcho &&
+        // A reply that was taken from the queue, behind its heading, is not one that "comes
+        // round again" now: its heading has been shown.
+        val fromTheList = message is Message.Marquee && !msgRepo.isOfOnePiece(message)
+        if (!fromTheList && message !is Message.Chooser && message !is Message.KeyboardEcho &&
             message !is Message.ColorMessage.AIThinking
         ) {
-            msgRepo.pushOneTimeMessage(message)
+            msgRepo.putBackOneTimeMessage(message)
         }
+    }
+
+    /**
+     * A message was put into the list at [place], and every message from there on stands one
+     * place further back. The index is a MESSAGE, not a number: it goes with its message.
+     *
+     * In chooser mode it is the message a person is looking at and may delete next, so it
+     * follows that message also when the new one took exactly its place. Outside chooser mode
+     * it is the message that comes next, which nobody has seen yet: a reply that is put in
+     * right there (its query was the last thing shown) is the next message.
+     */
+    private fun madeRoomAt(place: Int) {
+        if (place < 0) return
+        val at = currentIdx.value
+        if (place < at || (isInChooserMode && place == at)) currentIdx.update { it + 1 }
     }
 
     private fun getIdxAndAdvance(): Int {
@@ -474,7 +506,9 @@ class MessageManager(
             "!d",
             "!delete" -> {
                 if (msgRepo.marqueeMessages.isNotEmpty()) {
-                    msgRepo.marqueeMessages.removeAt(currentIdx.value)
+                    val deleted = msgRepo.marqueeMessages.removeAt(currentIdx.value)
+                    // A reply that is waiting behind its heading: neither is shown any more.
+                    msgRepo.dropOnePieceOf(deleted)
                     currentIdx.update {
                         if (it >= msgRepo.marqueeMessages.lastIndex) msgRepo.marqueeMessages.lastIndex else it
                     }
@@ -772,10 +806,12 @@ class MessageManager(
     private fun insertPostedAIReply(reply: Message.Marquee.AIReply?, inReplyTo: String): Boolean {
         thinkingFromOutside = false
         endThinkingUnlessWanted()
-        if (reply == null || !msgRepo.insertPostedAIReply(reply, inReplyTo)) {
+        val place = if (reply == null) MessageRepository.NOT_PUT_IN else msgRepo.insertPostedAIReply(reply, inReplyTo)
+        if (place == MessageRepository.NOT_PUT_IN) {
             logW("AI Answer is blank, or there is no message to reply to; not adding to messages.")
             return false
         }
+        madeRoomAt(place)
         msgRepo.saveMarqueeMessages(filesDir)
         logD("Inserted a posted AI reply")
         return true
@@ -796,13 +832,16 @@ class MessageManager(
             // In every case: the change first, the save, and the log line after them. A log
             // call that fails must not leave a result half dealt with or unsaved.
             when (val outcome = desk.finished(query, result, nowMs())) {
-                is AIQueryDesk.Outcome.Reply ->
-                    if (reply != null && msgRepo.insertAIReply(query, reply, seenAt[query])) {
+                is AIQueryDesk.Outcome.Reply -> {
+                    val place = if (reply == null) MessageRepository.NOT_PUT_IN else msgRepo.insertAIReply(query, reply, seenAt[query])
+                    if (place != MessageRepository.NOT_PUT_IN) {
+                        madeRoomAt(place)
                         msgRepo.saveMarqueeMessages(filesDir)
                         logD("Inserted the AI reply after its query")
                     } else {
                         logD("The query was deleted while its reply was on the way; the reply is dropped.")
                     }
+                }
 
                 is AIQueryDesk.Outcome.Retired -> {
                     // Asking again would change nothing: it stays on the sign as the message it was.
@@ -822,10 +861,10 @@ class MessageManager(
                             Message.ColorMessage.ChonkySlide("LATER!", context.getColor(R.color.instahandle), delayMs = 400),
                             Message.Starfield()
                         )
-                        msgRepo.pushOneTimeMessages(*slides)
                         // A notice that was asked for from outside is still wanted: it took the
                         // place of the query's own, and comes back right behind the slides.
-                        if (thinkingFromOutside) msgRepo.oneTimeMessages.add(slides.size, thinkingNotice())
+                        if (thinkingFromOutside) msgRepo.pushOneTimeMessage(thinkingNotice())
+                        msgRepo.pushOneTimeMessages(*slides)
                     }
                     logW("AI Reply Error: ${outcome.why}")
                 }

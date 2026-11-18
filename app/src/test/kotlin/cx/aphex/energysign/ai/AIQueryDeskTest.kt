@@ -608,7 +608,11 @@ class AIQueryDeskTest {
 
     @Test
     fun `a result for which nothing was sent says nothing about the provider - the row of failures stands`() {
-        for (notSent in listOf(NoReplyReason.WITHDRAWN, NoReplyReason.MISSING_KEY, NoReplyReason.NOTHING_TO_ASK)) {
+        val nothingSent = listOf(
+            NoReplyReason.WITHDRAWN, NoReplyReason.MISSING_KEY, NoReplyReason.NOTHING_TO_ASK, NoReplyReason.NOT_SET_UP,
+            NoReplyReason.TOO_LATE_TO_SEND,
+        )
+        for (notSent in nothingSent) {
             sent.clear()
             val desk = desk()
             val a = query("a")
@@ -629,7 +633,7 @@ class AIQueryDeskTest {
             now += 1_000_000
         }
         assertEquals(
-            setOf(NoReplyReason.WITHDRAWN, NoReplyReason.MISSING_KEY, NoReplyReason.NOTHING_TO_ASK),
+            setOf(NoReplyReason.WITHDRAWN, NoReplyReason.MISSING_KEY, NoReplyReason.NOTHING_TO_ASK, NoReplyReason.NOT_SET_UP, NoReplyReason.TOO_LATE_TO_SEND),
             NoReplyReason.values().filter { it.nothingWasSent }.toSet(),
         )
     }
@@ -640,11 +644,14 @@ class AIQueryDeskTest {
         val expected = mapOf(
             NoReplyReason.MISSING_KEY to (false to false),
             NoReplyReason.NOTHING_TO_ASK to (false to false),
+            NoReplyReason.NOT_SET_UP to (false to false),
             NoReplyReason.WITHDRAWN to (true to false),
+            NoReplyReason.TOO_LATE_TO_SEND to (true to false),
             NoReplyReason.REFUSED to (false to false),
             NoReplyReason.EMPTY to (false to false),
             NoReplyReason.TRUNCATED to (false to false),
             NoReplyReason.UNEXPECTED_RESPONSE to (false to false),
+            NoReplyReason.FAILED_AFTER_ANSWER to (false to false),
             NoReplyReason.NOT_A_MESSAGE to (true to true),
             NoReplyReason.TIMEOUT to (true to true),
             NoReplyReason.NETWORK to (true to true),

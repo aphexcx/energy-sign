@@ -335,4 +335,38 @@ class AIReplyRunnerTest {
         assertEquals(100_000L to 40_000L, handed.poll(5, TimeUnit.SECONDS))
         next()
     }
+
+    // ---- nothing optional can keep the sign link from starting (round 3, deep 8)
+
+    @Test
+    fun `replies that cannot be built, whatever is thrown, are no replies - not an exception on the way to the sign link`() {
+        val failures = listOf<Throwable>(
+            IllegalStateException("boom"), NoClassDefFoundError("some/sdk/Class"), InternalError("unable to create native thread"),
+            ExceptionInInitializerError("static"),
+        )
+        for (failure in failures) {
+            val warned = mutableListOf<String>()
+
+            val source = aiRepliesOrNone(warn = { warned += it }) { throw failure }
+
+            assertFalse(source.warmUp { error("there is no warm-up to end") }, "$failure")
+            source.ask("hey ravegpt") { results.add(it) }
+            val result = assertIs<AIReplyResult.NoReply>(next())
+            assertEquals(NoReplyReason.NOT_SET_UP, result.reason)
+            assertFalse(result.reason.askAgain || result.reason.backOff, "the query becomes a plain message, quietly")
+            assertNull(results.poll(50, TimeUnit.MILLISECONDS), "one result an ask")
+            assertTrue(warned.single().contains(failure.javaClass.name), "$warned")
+            assertFalse(warned.single().contains("boom") || warned.single().contains("some/sdk"), "only the kind of failure is logged")
+        }
+    }
+
+    @Test
+    fun `a log that fails while the replies cannot be built changes nothing, and replies that can be built are used as they are`() {
+        val quiet = aiRepliesOrNone(warn = { throw IllegalStateException("the log failed") }) { throw IllegalStateException("boom") }
+        quiet.ask("hey") { throw IllegalStateException("the caller failed") } // must not throw here either
+        assertFalse(quiet.warmUp {})
+
+        val real = AIReplyRunner(reply = { _, _, _ -> AIReplyResult.Reply("ok") })
+        assertSame(real, aiRepliesOrNone(warn = { error("nothing to warn of") }) { real })
+    }
 }

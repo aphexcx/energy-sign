@@ -349,7 +349,7 @@ class OpenAIReplyGeneratorTest {
             generator().generateReply(AIReplyRequest("s", "u", deadline = Deadline.after(java.time.Duration.ofSeconds(5))))
         }
 
-        assertEquals(NoReplyReason.TIMEOUT, reason(result))
+        assertEquals(NoReplyReason.TOO_LATE_TO_SEND, reason(result))
         assertTrue(api.received.isEmpty(), "a request went out with 5 s left")
     }
 
