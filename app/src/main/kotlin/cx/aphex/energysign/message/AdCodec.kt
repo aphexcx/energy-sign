@@ -31,8 +31,9 @@ class AdFileException(message: String) : Exception(message)
  *    shorter or different list.
  *  - The VALUES of an ad that can be rebuilt are held to the rules of an ad line ([AdRules],
  *    [AdSizeLimit]): its text, its delay and the size of its JSON. An older version of the app
- *    saved ads without these rules. Such an ad is corrected, not refused, and each correction is
- *    reported. A `<3` that was saved stays a `<3`: the heart is made when the line is sent.
+ *    saved ads without these rules. Such an ad is corrected, or left out when it has no text,
+ *    and the rest of the list is kept; each correction is reported. A `<3` that was saved stays
+ *    a `<3`: the heart is made when the line is sent.
  */
 object AdCodec {
     private val gson = Gson()
@@ -49,7 +50,7 @@ object AdCodec {
         val root = parseWhole(json)
         if (!root.isJsonArray) throw AdFileException("not a JSON list")
 
-        return root.asJsonArray.mapIndexed { index, element ->
+        return root.asJsonArray.mapIndexedNotNull { index, element ->
             val place = "ad ${index + 1}"
             try {
                 if (!element.isJsonObject) throw AdFileException("not a JSON object")
@@ -81,19 +82,19 @@ object AdCodec {
      * Ads are built with their constructors (Gson would create them without one, leaving the
      * colour and every missing key at zero).
      */
-    private fun adFrom(ad: JsonObject, note: (String) -> Unit): Message =
+    private fun adFrom(ad: JsonObject, note: (String) -> Unit): Message? =
         when (val type = ad.text("type")) {
             "C" -> {
                 val colour = ad.colour()
                 val delay = ad.delay(note)
                 val scroll = ad.flag("scroll")
-                AdSizeLimit.fit(ad.adText(note), note) { text -> ChonkySlide(text, colour, delay, shouldScrollToLastLetter = scroll) }
+                AdRules.textAd(ad.adText(note), note) { text -> ChonkySlide(text, colour, delay, shouldScrollToLastLetter = scroll) }
             }
 
             "O" -> {
                 val colour = ad.colour()
                 val delay = ad.delay(note)
-                AdSizeLimit.fit(ad.adText(note), note) { text -> OneByOneMessage(text, colour, delay) }
+                AdRules.textAd(ad.adText(note), note) { text -> OneByOneMessage(text, colour, delay) }
             }
 
             // The place of the now-playing track. An ad line gives it no text and none is ever

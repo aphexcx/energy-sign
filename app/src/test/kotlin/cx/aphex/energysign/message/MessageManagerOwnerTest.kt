@@ -636,4 +636,27 @@ class MessageManagerOwnerTest {
         assertEquals(legacy, restarted.adsFile.readText())
         assertEquals(emptyList(), restarted.unsaved)
     }
+
+    @Test
+    fun `an ad without a text never goes to the sign, from a command or from the file`() {
+        // from a command: the second line is a chonky ad with a clock and no text
+        val filesDir = newFilesDir()
+        val app = App(filesDir)
+        app.phone("!$A\n${CL}ONE\n$CL$CLOCK\n${O}TWO")
+        ownerRuns()
+        app.saverRuns()
+
+        assertEquals(listOf("ONE", "TWO", "ONE", "TWO"), (1..4).map { app.manager.getNextMessage().str })
+        assertEquals(listOf("ONE", "TWO"), AdCodec.decode(app.adsFile.readText()).map { it.str })
+
+        // from a file of the old app, which saved the empty ad
+        val oldDir = newFilesDir()
+        File(oldDir, "ads.json").writeText(
+            "[{\"dly\":2000,\"scroll\":false,\"str\":\"\",\"type\":\"C\",\"b\":3,\"g\":2,\"r\":1}," +
+                    "{\"dly\":1000,\"str\":\"TWO\",\"type\":\"O\",\"b\":3,\"g\":2,\"r\":1}]"
+        )
+        val restarted = App(oldDir)
+
+        assertEquals(listOf("TWO", "TWO", "TWO"), (1..3).map { restarted.manager.getNextMessage().str })
+    }
 }

@@ -135,8 +135,73 @@ class AdRestoreRulesTest {
         val restored = load(oneByOne(""""dly":1000,"str":"$asJson"""")).single()
         val sent = fromCommand(O + raw)
 
-        assertEquals("CAF \"HI\" - OK!?", restored.str)
+        assertEquals("CAF \"HI\" - OK!${Message.VT}?", restored.str, "the bell is gone, the vertical tab stays")
         assertEquals(sent.str, restored.str)
+        assertEquals(1, notes.size)
+    }
+
+    @Test
+    fun `the vertical tab, a thin space on the sign, is kept on both paths and counted by its bytes`() {
+        val restored = load(chonky(""""dly":1000,"str":"A\u000bB"""")).single()
+        val sent = fromCommand(CL + "A${Message.VT}B")
+
+        assertEquals("A${Message.VT}B", restored.str)
+        assertEquals("A${Message.VT}B", sent.str)
+        assertEquals(emptyList(), notes)
+        // Gson writes it as \u000b: six bytes, which the size limit counts
+        assertEquals(AdSizeLimit.jsonBytes(fromCommand(CL + "AB")) + 6, AdSizeLimit.jsonBytes(sent))
+    }
+
+    // ---- an ad without a text
+
+    @Test
+    fun `a saved chonky or one by one ad without a text is left out and the rest of the list is kept`() {
+        val ads = load(
+            """[{"dly":1000,"scroll":false,"str":"","type":"C","b":3,"g":2,"r":1},""" +
+                    """{"dly":1000,"str":"KEPT","type":"O","b":3,"g":2,"r":1},""" +
+                    """{"dly":2000,"str":"","type":"O","b":3,"g":2,"r":1},""" +
+                    """{"str":"","type":"T"},""" +
+                    """{"str":"1","type":"I","b":3,"g":2,"r":1}]"""
+        )
+
+        assertEquals(listOf("KEPT", "", "1"), ads.map { it.str })
+        assertIs<OneByOneMessage>(ads[0])
+        assertIs<Message.NowPlayingTrackMessage>(ads[1])
+        assertIs<Message.ColorMessage.IconInvaders.Enemy1>(ads[2])
+        assertEquals(2, notes.size, notes.toString())
+        assertTrue(notes[0].startsWith("ad 1: ") && notes[1].startsWith("ad 3: "), notes.toString())
+    }
+
+    @Test
+    fun `a saved text with nothing the sign can show is no text`() {
+        val ads = load(oneByOne(""""dly":1000,"str":"é\u0007中""""))
+
+        assertEquals(emptyList(), ads)
+    }
+
+    @Test
+    fun `an ad line without a text is no ad, and that is reported`() {
+        val warnings = mutableListOf<String>()
+        val heart = String(intArrayOf(0x1F497), 0, 1) // a heart emoji: the colour, no text
+        val lines = listOf(CL, O + heart, CL + CLOCK + CLOCK, "${O}KEPT", CL + "é")
+
+        val ads = AdLineParser.parse(lines.joinToString("\n"), palette) { warnings += it }
+
+        assertEquals(listOf("KEPT"), ads.map { it.str })
+        assertEquals(4, warnings.size, warnings.toString())
+    }
+
+    @Test
+    fun `a space, a vertical tab or a typed heart is a text`() {
+        assertEquals(" ", fromCommand("$CL ").str)
+        assertEquals("${Message.VT}", fromCommand(O + Message.VT).str)
+        assertEquals("${Message.HEART}", fromCommand("$O<3").str)
+        assertEquals(listOf(" "), load(chonky(""""dly":1000,"str":" """")).map { it.str })
+    }
+
+    @Test
+    fun `a list of nothing but ads without a text is an empty list, not an unreadable file`() {
+        assertEquals(emptyList(), load(oneByOne(""""dly":1000,"str":""""")))
         assertEquals(1, notes.size)
     }
 
@@ -151,9 +216,12 @@ class AdRestoreRulesTest {
     }
 
     @Test
-    fun `an ad line cannot put a control character on the sign either`() {
-        assertEquals("AB", fromCommand(O + "A\u0001\u0007\u000B\u001FB").str)
+    fun `an ad line cannot put a control character on the sign either, but for the vertical tab`() {
+        assertEquals("A${Message.VT}B", fromCommand(O + "A\u0001\u0007\u000B\u001FB").str)
         assertEquals("AB", fromCommand(CL + "A\tB").str)
+        // every control character but the vertical tab, and the line ends an ad command is split at
+        val controls = (0..31).map { it.toChar() }.filter { it != Message.VT && it != '\n' && it != '\r' }.joinToString("")
+        assertEquals("AB", fromCommand(O + "A" + controls + "B").str)
     }
 
     @Test

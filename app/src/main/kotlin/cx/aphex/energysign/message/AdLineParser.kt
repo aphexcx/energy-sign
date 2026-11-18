@@ -69,13 +69,13 @@ object AdLineParser {
                 line.startsWith(CL_BUTTON) -> {
                     val color = colorOf(line, palette) ?: palette.chonkyDefault
                     val delay = delayMs(line)
-                    AdSizeLimit.fit(adText(line), warn) { text -> ChonkySlide(text, color, delay) }
+                    AdRules.textAd(adText(line), warn) { text -> ChonkySlide(text, color, delay) }
                 }
 
                 line.startsWith(O_BUTTON) -> {
                     val color = colorOf(line, palette) ?: palette.instagram
                     val delay = delayMs(line)
-                    AdSizeLimit.fit(adText(line), warn) { text -> OneByOneMessage(text, color, delay) }
+                    AdRules.textAd(adText(line), warn) { text -> OneByOneMessage(text, color, delay) }
                 }
 
                 line.startsWith(RAILWAY_TRACK) -> Message.NowPlayingTrackMessage("")

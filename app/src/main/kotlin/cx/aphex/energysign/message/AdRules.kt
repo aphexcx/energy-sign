@@ -16,11 +16,26 @@ object AdRules {
     const val MS_PER_SECOND: Int = 1000
 
     /**
-     * The text of an ad: only what the sign's fonts have, the characters from the space to `~`
-     * and the heart (0x7F). Look-alikes of ASCII characters are replaced by them first; anything
-     * else, control characters included, is taken out.
+     * The text of an ad: only what the sign can draw, the characters from the space to `~`, the
+     * heart (0x7F) and the vertical tab (0x0B), which is a thin space on the sign. Look-alikes
+     * of ASCII characters are replaced by them first; anything else, the other control
+     * characters included, is taken out.
      */
-    fun text(raw: String): String = raw.toNormalized().filter { it in ' '..Message.HEART }
+    fun text(raw: String): String = raw.toNormalized().filter { it in ' '..Message.HEART || it == Message.VT }
+
+    /**
+     * The chonky or one-by-one ad that [make] builds from [text], which has been through [text]
+     * already: cut to fit the sign ([AdSizeLimit]), or null when there is no text. An ad without
+     * a text is left out, because the firmware reads past the end of an empty string. [note]
+     * gets one line when the ad was cut or left out.
+     */
+    fun <M : Message> textAd(text: String, note: (String) -> Unit, make: (String) -> M): M? {
+        if (text.isEmpty()) {
+            note("An ad without a text was left out.")
+            return null
+        }
+        return AdSizeLimit.fit(text, note, make)
+    }
 
     /**
      * The `dly` of an ad for a wish of [ms]: whole seconds, from one to thirty.
