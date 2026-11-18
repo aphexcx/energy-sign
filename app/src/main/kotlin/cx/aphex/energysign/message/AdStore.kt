@@ -35,8 +35,8 @@ class AdStore(private val dir: File) {
             SavedAds.Ads(AdCodec.decode(adsFile.readText()))
         } catch (e: AdFileException) {
             SavedAds.Unreadable(e.message ?: "no reason given")
-        } catch (e: Exception) {
-            // Whatever else goes wrong here must not stop the app from starting.
+        } catch (e: Throwable) {
+            // Whatever else goes wrong here, an Error included, must not stop the app from starting.
             SavedAds.Unreadable("${e.javaClass.simpleName}: ${e.message}")
         }
     }
@@ -55,7 +55,7 @@ class AdStore(private val dir: File) {
     fun loadPeriod(): Int? =
         try {
             if (periodFile.exists()) periodFile.readText().trim().toIntOrNull()?.takeIf(::isValidPeriod) else null
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             null
         }
 

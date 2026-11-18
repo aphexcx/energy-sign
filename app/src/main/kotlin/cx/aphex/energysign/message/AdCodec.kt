@@ -112,6 +112,7 @@ object AdCodec {
     private fun JsonObject.wholeNumber(key: String): Long? {
         val value = this[key]?.takeUnless { it.isJsonNull } ?: return null
         if (!value.isJsonPrimitive || !value.asJsonPrimitive.isNumber) throw AdFileException("\"$key\" is not a number")
-        return value.asBigDecimal.toBigIntegerExact().longValueExact()
+        // BigDecimal's own longValueExact: BigInteger's is not there before Android 12 (API 31).
+        return value.asBigDecimal.longValueExact()
     }
 }
