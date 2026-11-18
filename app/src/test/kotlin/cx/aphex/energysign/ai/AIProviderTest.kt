@@ -111,7 +111,7 @@ class AIProviderTest {
     fun `the OpenAI generator without a key is no reply too`() {
         val log = mutableListOf<String>()
 
-        val result = runBlocking { OpenAIReplyGenerator(apiKey = "") { log.add(it) }.generateReply(AIReplyRequest("s", "u")) }
+        val result = runBlocking { OpenAIReplyGenerator(apiKey = "", log = { log.add(it) }).generateReply(AIReplyRequest("s", "u")) }
 
         assertEquals(NoReplyReason.MISSING_KEY, assertIs<AIReplyResult.NoReply>(result).reason)
         assertEquals(1, log.size)

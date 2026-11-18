@@ -36,6 +36,7 @@ object AIReplyLimits {
             val middle = (fits + tooLong) / 2
             if (jsonBytes(text.substring(0, middle)) <= MAX_REPLY_JSON_BYTES) fits = middle else tooLong = middle
         }
+        if (fits == 0) return ""
         val cutInsideAWord = !text[fits].isWhitespace() && !text[fits - 1].isWhitespace()
         val lastSpace = text.lastIndexOf(' ', fits - 1)
         val end = if (cutInsideAWord && lastSpace > 0) lastSpace else fits

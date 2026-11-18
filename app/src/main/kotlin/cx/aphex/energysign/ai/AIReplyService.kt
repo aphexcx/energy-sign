@@ -31,7 +31,10 @@ class AIReplyService(
                         fitted.isBlank() -> noReply(NoReplyReason.EMPTY, "nothing in the reply that the sign can show")
                         else -> {
                             if (fitted.length < result.text.trim().length) {
-                                log("${generator.name}: reply cut from ${result.text.length} to ${fitted.length} characters to fit the sign")
+                                log(
+                                    "${generator.name}: reply went from ${result.text.length} to ${fitted.length} characters " +
+                                        "(what the sign cannot show was dropped, and it is cut when it is too long)"
+                                )
                             }
                             AIReplyResult.Reply(fitted)
                         }

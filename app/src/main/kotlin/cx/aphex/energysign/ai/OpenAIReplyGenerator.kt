@@ -16,6 +16,7 @@ import com.aallam.openai.api.http.Timeout
 import com.aallam.openai.api.model.ModelId
 import com.aallam.openai.client.OpenAI
 import com.aallam.openai.client.OpenAIConfig
+import com.aallam.openai.client.OpenAIHost
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.mapNotNull
@@ -32,6 +33,8 @@ import kotlin.time.Duration.Companion.seconds
 class OpenAIReplyGenerator(
     apiKey: String,
     private val log: (String) -> Unit,
+    /** Only tests set this, to a local fake of the API. */
+    private val baseUrl: String? = null,
 ) : AIReplyGenerator {
 
     private val apiKey: String = apiKey.trim()
@@ -43,6 +46,7 @@ class OpenAIReplyGenerator(
             OpenAIConfig(
                 token = this.apiKey,
                 timeout = Timeout(request = TIMEOUT, connect = TIMEOUT, socket = TIMEOUT),
+                host = baseUrl?.let { OpenAIHost(baseUrl = it) } ?: OpenAIHost.OpenAI,
             )
         )
     }
