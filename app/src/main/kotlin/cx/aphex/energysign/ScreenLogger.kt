@@ -10,9 +10,12 @@ object ScreenLogger {
 
     private val timeFormat = SimpleDateFormat("HH:mm:ss")
 
-    /** From any thread (the sign link thread logs too); SimpleDateFormat is not thread-safe. */
-    fun log(s: String) {
-        val timestamp = synchronized(timeFormat) { timeFormat.format(Date(System.currentTimeMillis())) }
+    /**
+     * From any thread (the sign link thread logs too). One caller at a time: SimpleDateFormat is
+     * not thread-safe, and neither is the relay for concurrent accept() calls.
+     */
+    fun log(s: String) = synchronized(timeFormat) {
+        val timestamp = timeFormat.format(Date(System.currentTimeMillis()))
 
         logLines.accept("$timestamp $s")
     }

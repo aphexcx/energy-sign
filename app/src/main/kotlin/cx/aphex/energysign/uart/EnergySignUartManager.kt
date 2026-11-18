@@ -16,6 +16,7 @@ import cx.aphex.energysign.message.SignRequest
 import io.reactivex.rxjava3.subjects.BehaviorSubject
 import java.io.IOException
 import java.lang.reflect.Method
+import java.util.concurrent.locks.LockSupport
 
 /**
  * The UART to the sign. It is opened here; from [start] on, the [SignLink] thread is the only
@@ -23,8 +24,8 @@ import java.lang.reflect.Method
  *
  * Two switches for measuring on the device, both without a rebuild:
  *  - the timing log: `adb shell setprop log.tag.SignUart VERBOSE` (see [UartTimingLog])
- *  - how a push gets the sign's attention: `adb shell setprop debug.energysign.attn break|zeros|off`
- *    (read at every push; see [ATTN_PROPERTY])
+ *  - how a push gets the sign's attention: `adb shell setprop debug.energysign.attn break|zeros|off`,
+ *    or empty for the default (read at every push; see [ATTN_PROPERTY])
  */
 class EnergySignUartManager(val viewModel: MainViewModel) {
     private val uartDevice: UartDevice = configureUart()
@@ -40,19 +41,39 @@ class EnergySignUartManager(val viewModel: MainViewModel) {
         threadCpuNanos = { Debug.threadCpuTimeNanos() },
     )
 
-    /** Set when sendBreak has failed once: the 0x00 run is used from then on. Link thread only. */
-    private var breakUnsupported = false
+    /**
+     * Set when sendBreak has thrown, or taken far longer than asked: the 0x00 run is used from
+     * then on unless the property says `break`. Link thread only.
+     */
+    private var breakUnusable = false
+
+    /**
+     * When the bytes written so far will have left the wire. write() returns before they are
+     * sent (it is non-blocking), at 14400 baud a message takes 30 to 70 ms. Link thread only.
+     */
+    private var wireBusyUntilNs = 0L
 
     private val wire = object : SignWire {
         override fun read(buffer: ByteArray, length: Int): Int = uartDevice.read(buffer, length)
 
+        /** Returns when the line is HIGH again, in both modes. */
         override fun attention(millis: Int) {
-            if (attentionMode() != ATTN_ZEROS && !breakUnsupported) {
+            // Not behind a reply that is still going out: the LOW must start now, and end before the guard
+            sleepUntil(wireBusyUntilNs)
+
+            val mode = attentionMode()
+            if (mode == ATTN_BREAK || (mode != ATTN_ZEROS && !breakUnusable)) {
                 try {
+                    val callNs = System.nanoTime()
                     uartDevice.sendBreak(millis)
+                    val tookMs = (System.nanoTime() - callNs) / 1_000_000
+                    if (tookMs > millis * BREAK_TOO_LONG_FACTOR && !breakUnusable) {
+                        breakUnusable = true
+                        logW("sendBreak($millis) took $tookMs ms on $UART_DEVICE_NAME, using a run of 0x00 from now on")
+                    }
                     return
                 } catch (e: IOException) {
-                    breakUnsupported = true
+                    breakUnusable = true
                     logW("sendBreak($millis) failed on $UART_DEVICE_NAME, using a run of 0x00 from now on: $e")
                 }
             }
@@ -62,6 +83,23 @@ class EnergySignUartManager(val viewModel: MainViewModel) {
             if (wrote != zeros.size) {
                 logW("Attention: wrote $wrote of ${zeros.size} zero bytes to $UART_DEVICE_NAME")
             }
+            wrote(wrote)
+            sleepUntil(wireBusyUntilNs)
+        }
+    }
+
+    /** [count] more bytes are queued for the wire: ten bit times each. */
+    private fun wrote(count: Int) {
+        if (count > 0) {
+            wireBusyUntilNs = maxOf(wireBusyUntilNs, System.nanoTime()) + count * 10_000_000_000L / UART_BAUD_RATE
+        }
+    }
+
+    private fun sleepUntil(deadlineNs: Long) {
+        while (true) {
+            val leftNs = deadlineNs - System.nanoTime()
+            if (leftNs <= 0 || Thread.currentThread().isInterrupted) return
+            LockSupport.parkNanos(leftNs)
         }
     }
 
@@ -184,6 +222,7 @@ class EnergySignUartManager(val viewModel: MainViewModel) {
             val callNs = System.nanoTime()
             val count = uartDevice.write(bytes, bytes.size)
             timing.tx(callNs, System.nanoTime(), count, bytes.size, isPollReport = !log)
+            wrote(count)
             if (log || count != bytes.size) {
                 logD("Wrote $count of ${bytes.size} bytes to $UART_DEVICE_NAME")
             }
@@ -192,14 +231,14 @@ class EnergySignUartManager(val viewModel: MainViewModel) {
         }
     }
 
-    /** [ATTN_PROPERTY] as it is set now; [ATTN_BREAK] when it is unset, unknown or unreadable. */
+    /** [ATTN_PROPERTY] as it is set now; [ATTN_AUTO] when it is unset, unknown or unreadable. */
     private fun attentionMode(): String =
         try {
-            (SYSTEM_PROPERTY_GET?.invoke(null, ATTN_PROPERTY, ATTN_BREAK) as? String)
-                ?.takeIf { it == ATTN_ZEROS || it == ATTN_OFF }
+            (SYSTEM_PROPERTY_GET?.invoke(null, ATTN_PROPERTY, ATTN_AUTO) as? String)
+                ?.takeIf { it == ATTN_BREAK || it == ATTN_ZEROS || it == ATTN_OFF }
         } catch (e: Exception) {
             null
-        } ?: ATTN_BREAK
+        } ?: ATTN_AUTO
 
     companion object {
 
@@ -212,14 +251,19 @@ class EnergySignUartManager(val viewModel: MainViewModel) {
 
         /**
          * System property that picks how a push gets the sign's attention:
-         *  - unset or `break`: `UartDevice.sendBreak(50)`. Its documentation says only "Send a
-         *    break to the device", duration in milliseconds: whether the call waits, and whether
-         *    the platform really takes milliseconds (the Linux call underneath, tcsendbreak,
-         *    counts in tenths of a second), is for the `push` timing line to show.
+         *  - unset: `UartDevice.sendBreak(50)`. Its documentation says only "Send a break to the
+         *    device", duration in milliseconds: whether the call waits, and whether the platform
+         *    really takes milliseconds (the Linux call such an API usually sits on, tcsendbreak,
+         *    counts in tenths of a second), is for the `push` timing line to show. If the call
+         *    throws, or takes more than [BREAK_TOO_LONG_FACTOR] times what was asked, the 0x00
+         *    run is used from then on (until the app restarts).
+         *  - `break`: sendBreak always, whatever it did before.
          *  - `zeros`: 50 ms worth of 0x00 bytes instead (the fallback in the contract note).
          *  - `off`: no pushes at all, the app behaves as contract 2.1.
          */
         private const val ATTN_PROPERTY: String = "debug.energysign.attn"
+        private const val ATTN_AUTO: String = ""
+        private const val BREAK_TOO_LONG_FACTOR: Int = 3
         private const val ATTN_BREAK: String = "break"
         private const val ATTN_ZEROS: String = "zeros"
         private const val ATTN_OFF: String = "off"

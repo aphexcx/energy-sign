@@ -297,20 +297,38 @@ class SignLinkTest {
     }
 
     @Test
-    fun `a push and a reply never interleave, a request that came during the push is answered after it`() {
+    fun `a request that came during the push is answered by the push, not a second time`() {
         link.requestPush()
-        arrives(10, "~") // lands while the line is held low
+        arrives(10, "?") // lands while the line is held low
+        arrives(65, "~") // and one in the guard
         runUntil(200)
-        assertEquals(listOf("attention(50)@0", "push:A@70", "reply[~]:A@70"), events)
+        assertEquals(listOf("attention(50)@0", "push:A@70"), events)
+        assertEquals(listOf("drop t_us=70000 n=2 bytes=[?~]"), timingLines.filter { it.startsWith("drop ") })
     }
 
     @Test
-    fun `a push goes before a request that is already waiting`() {
+    fun `a request that was already waiting is answered by the push of the newest state`() {
         arrives(0, "~")
         state = "B"
         link.requestPush()
         runUntil(200)
-        assertEquals(listOf("attention(50)@0", "push:B@70", "reply[~]:B@70"), events)
+        assertEquals(listOf("attention(50)@0", "push:B@70"), events)
+    }
+
+    @Test
+    fun `a push and a reply never interleave, a request after the push gets its own reply`() {
+        link.requestPush()
+        arrives(71, "~")
+        runUntil(200)
+        assertEquals(listOf("attention(50)@0", "push:A@70", "reply[~]:A@72"), events)
+    }
+
+    @Test
+    fun `a wire that never runs dry does not hold up a push`() {
+        link.requestPush()
+        for (t in 0..400) arrives(t.toLong(), "x".repeat(40))
+        link.step()
+        assertEquals("push:A@70", events[1])
     }
 
     @Test

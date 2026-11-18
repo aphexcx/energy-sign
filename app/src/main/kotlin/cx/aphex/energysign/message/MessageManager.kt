@@ -214,7 +214,8 @@ class MessageManager(
         } ?: emptyList()
 
         // Hack to avoid advertising back to back with another advertisement.
-        if (!msgRepo.oneTimeMessages.any { it is Message.ColorMessage.IconInvaders }) {
+        // (under the list's own lock: KeyboardManager clears this list from the main thread)
+        if (!synchronized(msgRepo.oneTimeMessages) { msgRepo.oneTimeMessages.any { it is Message.ColorMessage.IconInvaders } }) {
             val ads = advertisements.flatMap {
                 if (it is Message.NowPlayingTrackMessage) {
                     nowPlayingMsgs
@@ -287,7 +288,7 @@ class MessageManager(
         }
 
         // Display one-time messages first
-        msgRepo.oneTimeMessages.removeFirstOrNull()?.let {
+        synchronized(msgRepo.oneTimeMessages) { msgRepo.oneTimeMessages.removeFirstOrNull() }?.let {
             if (it is Message.ColorMessage.GPTThinking) {
                 logD("GPT is still thinking, injecting another thinking notification")
                 msgRepo.pushOneTimeMessage(it.thinkMore())

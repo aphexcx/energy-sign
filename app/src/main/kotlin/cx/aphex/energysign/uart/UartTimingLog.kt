@@ -25,6 +25,8 @@ package cx.aphex.energysign.uart
  *         One write. T: write() returned. C: write() was called. W of L bytes were taken.
  *         report is a chooser poll report, message a full message. R: the t_us of the latest
  *         rx line, so T - R is request-to-reply inside the app.
+ *     drop t_us=T n=N bytes=[...]
+ *         Request bytes read away just before a push was written: the push is their answer.
  *     push t_us=T call_us=C break_us=B guard_us=G
  *         One push of the chooser (contract VERSION 3). C: the break was asked for. B: that call
  *         returned. G: the guard after the break ended. T: the message was written (its tx line
@@ -33,7 +35,7 @@ package cx.aphex.energysign.uart
  *         How late the main thread ran something posted to it when an rx was seen: what a
  *         request handled on the main thread, as before this link, would have waited.
  *     stat t_us=T window_ms=W polls=P rx=N read_avg_us=A read_max_us=M gap_max_us=G cpu_ms=C
- *         Every ten seconds: P reads of the UART in W ms, N of them with bytes, the mean and
+ *         Every ten seconds: P reads of the UART in W ms, N requests among them, the mean and
  *         longest time inside read(), the longest time between two reads (the link thread was
  *         kept waiting when this is far above its pause), and the CPU time the link thread used.
  *
@@ -97,6 +99,12 @@ class UartTimingLog(
             "tx t_us=${returnNs / 1000} n=$wrote/$of kind=${if (isPollReport) "report" else "message"} " +
                     "call_us=${callNs / 1000} rx_us=${lastRxNs / 1000}"
         )
+    }
+
+    /** [count] bytes of [buffer] were read away before a push. */
+    fun dropped(atNs: Long, buffer: ByteArray, count: Int) {
+        if (!enabled(atNs)) return
+        emit("drop t_us=${atNs / 1000} n=$count bytes=[${printable(buffer, count)}]")
     }
 
     /** A push finished. */

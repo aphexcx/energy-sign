@@ -54,7 +54,10 @@ interface SignWire {
  * then pulls the line LOW for [ATTN_BREAK_MS], waits [ATTN_GUARD_MS] and calls [onPush], which
  * writes the message the app would answer to `~` at that moment. Only a flag is kept, never a
  * queue: any number of changes before the message is written are one push of the newest state,
- * and a change after that is the next push.
+ * and a change after that is the next push. Request bytes that arrived before the message is
+ * written are read and dropped: the pushed message is their answer. Answering them as well would
+ * send a second message straight behind the first, and outside chooser mode (the push on
+ * leaving it) that second message would be taken from the list and never shown.
  */
 class SignLink(
     private val wire: SignWire,
@@ -178,6 +181,11 @@ class SignLink(
         sleepUntil(breakEndNs + ATTN_GUARD_MS * NS_PER_MS)
         if (stopped) return
         val guardEndNs = nanoTime()
+        try {
+            dropWaitingRequests()
+        } catch (e: IOException) {
+            onError("read", e)
+        }
         // Changes up to here go out in this push; a change from here on is the next push
         pushWanted.set(false)
         try {
@@ -188,6 +196,15 @@ class SignLink(
         val doneNs = nanoTime()
         heard(doneNs)
         timing.push(callNs, breakReturnedNs, guardEndNs, doneNs)
+    }
+
+    /** Reads away what the sign sent before a push is written; the push answers it. */
+    private fun dropWaitingRequests() {
+        repeat(MAX_DROP_READS) {
+            val count = read(buffer)
+            if (count <= 0) return
+            timing.dropped(nanoTime(), buffer, count)
+        }
     }
 
     /** The sign is in a conversation: read at the short pause for the next [ACTIVE_WINDOW_MS]. */
@@ -234,6 +251,9 @@ class SignLink(
 
         /** The most bytes handed over as one request (the size the UART callback read with). */
         const val READ_BUFFER_LEN: Int = 32
+
+        /** At most this many reads are spent on emptying the input before a push is written. */
+        private const val MAX_DROP_READS: Int = 4
 
         private const val NS_PER_MS: Long = 1_000_000L
     }
