@@ -34,6 +34,9 @@ object ChooserProtocol {
     /** Request byte of a chooser poll. Every other byte means "send the next message". */
     const val POLL_REQUEST: Char = '?'
 
+    /** Request byte of "send the next message". The sign sends this one or [POLL_REQUEST], then waits. */
+    const val NEXT_REQUEST: Char = '~'
+
     /**
      * The chooser text for [message]: from its first character, cut at [CHOOSER_MAX_CHARS], no
      * ellipsis. One rule for every message type; the sign decides what fits and scrolls the rest.
@@ -103,6 +106,8 @@ object ChooserProtocol {
  *
  * [write] gets the reply and whether it is a poll report (about five a second in chooser mode;
  * the caller keeps those out of the log).
+ *
+ * Called on the sign link thread, one call at a time.
  */
 class SignResponder(
     private val nextMessage: () -> Message,
@@ -121,6 +126,18 @@ class SignResponder(
         }
 
         // `~`, garbled bytes, or a poll outside chooser mode: the next message in full.
+        write(GSON.toJson(message), false)
+        return message
+    }
+
+    /**
+     * Sends, unasked, the message the app would answer to `~` right now, and returns it
+     * (contract VERSION 3: the app pushes the chooser when it changes, after getting the sign's
+     * attention). Like a reply it is made from the state at this moment; outside chooser mode,
+     * which is the push on leaving it, the message is consumed like any other.
+     */
+    fun push(): Message {
+        val message = nextMessage()
         write(GSON.toJson(message), false)
         return message
     }

@@ -377,4 +377,51 @@ class SignResponderTest {
         assertFalse(markedAsPollReport.any { it.contains("type") })
         assertEquals(5, written.size)
     }
+
+    // ---- the push (contract VERSION 3): unasked, the same message a `~` would get
+
+    @Test
+    fun `a push in chooser mode writes the whole chooser message and consumes nothing`() {
+        source.inChooserMode = true
+        source.idx = 2
+
+        val pushed = responder.push()
+
+        assertTrue(pushed is Message.Chooser)
+        val json = JsonParser.parseString(written.single()).asJsonObject
+        assertEquals("H", json["type"].asString)
+        assertEquals("HELLO W", json["str"].asString)
+        assertEquals("3/12", json["flashy"].asString)
+        assertTrue(markedAsPollReport.isEmpty())
+        assertEquals(0, source.ordinaryServed)
+        // and the `~` that follows gets the very same bytes
+        request("~")
+        assertEquals(written[0], written[1])
+    }
+
+    @Test
+    fun `a push is made from the state at that moment, whatever was pushed before`() {
+        source.inChooserMode = true
+        source.idx = 0
+        responder.push()
+        source.idx = 4
+        responder.push()
+        responder.push()
+
+        assertEquals(3, written.size)
+        assertEquals("1/12", JsonParser.parseString(written[0]).asJsonObject["flashy"].asString)
+        assertEquals("5/12", JsonParser.parseString(written[1]).asJsonObject["flashy"].asString)
+        assertEquals(written[1], written[2])
+    }
+
+    @Test
+    fun `the push on leaving chooser mode sends the next ordinary message, once`() {
+        source.inChooserMode = false
+
+        val pushed = responder.push()
+
+        assertEquals("ORDINARY 1", pushed.str)
+        assertEquals(1, source.ordinaryServed)
+        assertEquals("ORDINARY 1", JsonParser.parseString(written.single()).asJsonObject["str"].asString)
+    }
 }
