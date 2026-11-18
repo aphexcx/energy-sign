@@ -1,6 +1,7 @@
 package cx.aphex.energysign
 
 import android.app.Application
+import android.os.Looper
 import androidx.lifecycle.AndroidViewModel
 import cx.aphex.energysign.beatlinkdata.DnsSdAnnouncer
 import cx.aphex.energysign.bluetooth.BluetoothStatusUpdate
@@ -52,6 +53,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
         // First, before anything can deliver a command: MessageManager is built by its first
         // use, and that must be here on the main thread (it observes LiveData), with the push
         // already wired. Commands that arrive before the link thread runs wait in the owner's queue.
+        owner.neverWaitsOn(Looper.getMainLooper().thread)
         messageManager.onChooserChanged = energySignUartManager::requestPush
         Thread({ SignResponder.warmUp() }, "sign-json-warmup").apply {
             isDaemon = true

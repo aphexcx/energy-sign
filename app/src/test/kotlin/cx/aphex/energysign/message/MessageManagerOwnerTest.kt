@@ -18,8 +18,12 @@ import org.koin.core.context.stopKoin
 import org.koin.dsl.module
 import java.io.File
 import java.nio.file.Files
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.FutureTask
 import java.util.concurrent.Executor
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
@@ -110,6 +114,26 @@ class MessageManagerOwnerTest {
 
     private fun shown(): String? = manager.chooserShown()?.let { "${it.flashy} ${it.str}" }
 
+    /**
+     * A call from the HTTP server: on its own thread, which waits for the owner. [beforeOwnerRuns]
+     * is looked at while the call is waiting; then this thread, the owner, takes its turns.
+     */
+    private fun <T> fromServer(beforeOwnerRuns: () -> Unit = {}, call: () -> T): T {
+        val result = FutureTask(Callable(call))
+        Thread(result, "http").start()
+        Thread.sleep(50)
+        beforeOwnerRuns()
+        while (!result.isDone) {
+            ownerRuns()
+            Thread.sleep(1)
+        }
+        return try {
+            result.get()
+        } catch (e: ExecutionException) {
+            throw e.cause ?: e
+        }
+    }
+
     // ---- one owner (class E)
 
     @Test
@@ -143,19 +167,63 @@ class MessageManagerOwnerTest {
 
     @Test
     fun `everything from other threads goes through the owner, a new message, a GPT state, a GPT reply, a track`() {
-        manager.processNewUserMessage("FRESH")
-        manager.togglePersistentThinkingMessage(true)
-        manager.onNewPostedGPTReply(PostedGptAnswer(answer = "an answer", inReplyTo = "MESSAGE 2"))
-        manager.processNowPlayingTrack(BeatLinkTrack(id = 1, title = "Title", artist = "Artist"))
-        assertEquals(5, repo.marqueeMessages.size)
-        assertEquals(0, repo.oneTimeMessages.size)
-        ownerRuns()
+        val untouched = {
+            assertEquals(5, repo.marqueeMessages.size)
+            assertEquals(0, repo.oneTimeMessages.size)
+        }
+        fromServer(untouched) { manager.processNewUserMessage("FRESH") }
+        repo.oneTimeMessages.clear() // (the announcement of the new message)
+        val stillOnlyThat = {
+            assertEquals(6, repo.marqueeMessages.size)
+            assertEquals(0, repo.oneTimeMessages.size)
+        }
+        fromServer(stillOnlyThat) { manager.togglePersistentThinkingMessage(true) }
+        repo.oneTimeMessages.clear()
+        fromServer(stillOnlyThat) { manager.onNewPostedGPTReply(PostedGptAnswer(answer = "an answer", inReplyTo = "MESSAGE 2")) }
+        fromServer({ assertEquals(0, repo.oneTimeMessages.size) }) {
+            manager.processNowPlayingTrack(BeatLinkTrack(id = 1, title = "Title", artist = "Artist"))
+        }
         assertEquals("FRESH", repo.marqueeMessages.first().str)
         assertEquals(7, repo.marqueeMessages.size)
         assertEquals("AN ANSWER", repo.marqueeMessages[repo.marqueeMessages.indexOfFirst { it.str == "MESSAGE 2" } + 1].str)
         assertTrue(repo.oneTimeMessages.any { it is Message.NowPlayingTrackMessage })
-        // (the posted reply ended the thinking message that the line before it had started)
         assertTrue(repo.oneTimeMessages.none { it is Message.ColorMessage.GPTThinking })
+    }
+
+    // ---- the HTTP server is told what happened
+
+    @Test
+    fun `a posted message is there when its POST returns, and in the list the next GET gets`() {
+        val call = FutureTask(Callable { manager.processNewUserMessage("FRESH") })
+        Thread(call, "http").start()
+        Thread.sleep(50)
+        assertFalse(call.isDone) // the POST is not answered before the owner has made the change
+        while (!call.isDone) {
+            ownerRuns()
+            Thread.sleep(1)
+        }
+        assertEquals("FRESH", repo.marqueeMessages.first().str)
+        assertEquals("FRESH", fromServer { manager.storedMessages() }.first().str)
+    }
+
+    @Test
+    fun `a posted reply is stored, and a reply for nothing or a blank one is refused, not thrown`() {
+        assertTrue(fromServer { manager.onNewPostedGPTReply(PostedGptAnswer(answer = "an answer", inReplyTo = "MESSAGE 2")) })
+        assertEquals(6, repo.marqueeMessages.size)
+
+        assertFalse(fromServer { manager.onNewPostedGPTReply(PostedGptAnswer(answer = "  ", inReplyTo = "MESSAGE 2")) })
+        assertEquals(6, repo.marqueeMessages.size)
+
+        repo.marqueeMessages.clear()
+        assertFalse(fromServer { manager.onNewPostedGPTReply(PostedGptAnswer(answer = "an answer", inReplyTo = "GONE")) })
+        assertEquals(0, repo.marqueeMessages.size)
+    }
+
+    @Test
+    fun `the list a GET gets is a copy the owner made`() {
+        val list = fromServer { manager.storedMessages() }
+        repo.marqueeMessages.clear()
+        assertEquals(5, list.size)
     }
 
     @Test
@@ -214,7 +282,7 @@ class MessageManagerOwnerTest {
     fun `a command that changes nothing on the sign asks for no push, and nothing is pushed outside chooser mode`() {
         phone("!next")
         phone("!delete")
-        manager.processNewUserMessage("FRESH")
+        phone("FRESH")
         phone("!endchoose") // was not choosing
         ownerRuns()
         assertEquals(0, pushes)

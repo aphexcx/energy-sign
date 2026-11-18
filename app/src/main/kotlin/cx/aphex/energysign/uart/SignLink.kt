@@ -61,7 +61,11 @@ class LineClock(private val baud: Int, startNs: Long) {
     var freeAtNs: Long = startNs
         private set
 
-    /** [count] bytes were handed to the transmitter at [atNs]: they leave behind what is still leaving. */
+    /**
+     * [count] bytes were handed to the transmitter by a write that returned at [atNs]: they leave
+     * behind what is still leaving. The return of the call, not its start: a call that stalls
+     * before it hands the bytes over must not free the line early.
+     */
     fun wrote(atNs: Long, count: Int) {
         if (count > 0) freeAtNs = later(freeAtNs, atNs) + count * 10 * NS_PER_S / baud
     }
@@ -337,25 +341,28 @@ class SignLink(
     }
 
     /**
-     * Hands all of [bytes] to the transmitter. A write may take only some (it does not wait):
-     * the rest is offered again until [WRITE_PATIENCE_MS] have passed with nothing taken.
-     * Returns how many bytes were taken; fewer than all is a failure for the caller to act on.
+     * Hands all of [bytes] to the transmitter. A write may take only some (it does not wait), so
+     * the rest is offered again, but only while the frame can still reach the sign in one piece:
+     * the sign gives up 60 ms after a byte. Before every offer the clock is looked at, and once
+     * the line has stood still for [WRITE_PATIENCE_MS] (since the call when nothing was taken
+     * yet, since the last byte taken left the line otherwise) not a byte more is sent.
+     * Returns how many bytes were taken; fewer than all is a failed frame for the caller to act
+     * on. The sign throws the torn start away with its failed read and asks again.
      */
     private fun writeAll(bytes: ByteArray, kind: String): Int {
         val callNs = nanoTime()
-        var progressNs = callNs
         var done = 0
         try {
-            while (true) {
+            while (!stopped) {
+                val stillSinceNs = if (done == 0) callNs else clock.freeAtNs
+                if (nanoTime() - stillSinceNs >= WRITE_PATIENCE_MS * NS_PER_MS) break
                 val rest = if (done == 0) bytes else bytes.copyOfRange(done, bytes.size)
-                val atNs = nanoTime()
                 val took = wire.write(rest, rest.size).coerceIn(0, rest.size)
                 if (took > 0) {
-                    clock.wrote(atNs, took)
+                    clock.wrote(nanoTime(), took)
                     done += took
-                    progressNs = atNs
                 }
-                if (done == bytes.size || stopped || nanoTime() - progressNs >= WRITE_PATIENCE_MS * NS_PER_MS) break
+                if (done == bytes.size) break
                 sleepNanos(ACTIVE_PAUSE_MS * NS_PER_MS)
             }
         } catch (e: Exception) {
@@ -442,8 +449,9 @@ class SignLink(
                 complain("write", e)
                 0
             }
-            clock.wrote(atNs, took)
-            timing.tx(atNs, nanoTime(), took, zeros.size, "attention")
+            val takenNs = nanoTime()
+            clock.wrote(takenNs, took)
+            timing.tx(atNs, takenNs, took, zeros.size, "attention")
             if (took != zeros.size) {
                 complain("push", "the attention run was not taken in full ($took of ${zeros.size} bytes)")
                 return false
@@ -515,7 +523,7 @@ class SignLink(
         const val READ_BUFFER_LEN: Int = 32
 
         // ---- Writing and failing
-        /** How long a write is offered again while the transmitter takes nothing (below the sign's 60 ms a byte). */
+        /** How long the line may stand still inside a frame before the rest is given up (below the sign's 60 ms a byte). */
         const val WRITE_PATIENCE_MS: Int = 50
 
         /** Pause after a read that failed, and before a failed push is tried again. */

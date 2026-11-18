@@ -59,6 +59,12 @@ class SignLinkTest {
     private var failWrites = 0
     private var closes = 0
 
+    /** The next write call stalls this long before it hands its bytes over (once). */
+    private var writeStallNs = 0L
+
+    /** The next sleep of the link lasts this much longer than asked (once): the thread was kept waiting. */
+    private var sleepOverrunNs = 0L
+
     private val wire = object : SignWire {
         override fun read(buffer: ByteArray, length: Int): Int {
             reads++
@@ -82,6 +88,8 @@ class SignLinkTest {
                 failWrites--
                 throw IOException("write failed")
             }
+            now += writeStallNs
+            writeStallNs = 0
             if (now >= stuckUntilNs) takesBeforeStuck = Int.MAX_VALUE
             val take = minOf(length, takesPerWrite, takesBeforeStuck)
             if (take == 0) return 0
@@ -120,6 +128,7 @@ class SignLinkTest {
     private var answerCostNs = 0L
     private var frameCostNs = 0L
     private var answerThrows = 0
+    private var answers = 0
     private var frameThrows = 0
     private var mode = Attention.AUTO
 
@@ -162,7 +171,8 @@ class SignLinkTest {
         nanoTime = { now },
         sleepNanos = { nanos ->
             sleeps += nanos
-            now += nanos
+            now += nanos + sleepOverrunNs
+            sleepOverrunNs = 0
             if (now >= stopAtNs) stop()
         },
         log = { line += "log:$it" },
@@ -173,6 +183,7 @@ class SignLinkTest {
 
     /** What MainViewModel and SignResponder do: a poll in chooser mode gets a report, everything else a message. */
     private fun answer(buffer: ByteArray, count: Int) {
+        answers++
         if (answerThrows > 0) {
             answerThrows--
             throw IllegalStateException("boom")
@@ -185,7 +196,11 @@ class SignLinkTest {
             else -> {
                 val message = ordinary.removeFirst()
                 taken += message
-                link.send(message, false)
+                if (!link.send(message, false)) {
+                    // what SignResponder and MessageManager.returnUnsent do: back to the front
+                    taken.removeAt(taken.lastIndex)
+                    ordinary.addFirst(message)
+                }
             }
         }
     }
@@ -447,8 +462,39 @@ class SignLinkTest {
         runUntil(500)
         assertEquals("tx[H:L]@400", wire().last())
         assertTrue(line.contains("log:Wrote 3 of 8 bytes to UART"))
-        // it gave up after WRITE_PATIENCE_MS, not sooner and not never
-        assertTrue(timingLines.any { it.startsWith("tx t_us=${(400 + SignLink.WRITE_PATIENCE_MS) * 1000} n=3/8 ") }, timingLines.takeLast(3).toString())
+        // given up when the line had stood still for WRITE_PATIENCE_MS (the 3 bytes were gone at 402), not sooner and not never
+        assertTrue(timingLines.any { it.startsWith("tx t_us=${(400 + 4 + SignLink.WRITE_PATIENCE_MS) * 1000} n=3/8 ") }, timingLines.takeLast(3).toString())
+    }
+
+    @Test
+    fun `the rest of a frame is not sent after the line has stood still too long, and its message is not lost`() {
+        // the gate's case: one byte is taken, the thread is kept waiting 80 ms; the sign gave up after 60
+        chooser = null
+        ordinary.addFirst("micOff")
+        takesBeforeStuck = 1
+        stuckUntilNs = 5 * ms
+        sleepOverrunNs = 80 * ms
+        arrives(0, "~")
+        runUntil(150)
+        assertEquals(listOf("tx[m]@0"), wire()) // not a byte more
+        assertEquals(emptyList(), taken)
+        assertEquals("micOff", ordinary.first()) // back at the front
+        assertTrue(line.contains("log:Wrote 1 of 6 bytes to UART"))
+        // the sign's read failed, it threw the torn start away and asks again
+        arrives(200, "~")
+        runUntil(300)
+        assertEquals(listOf("tx[m]@0", "tx[micOff]@200"), wire())
+        assertEquals(listOf("micOff"), taken)
+    }
+
+    @Test
+    fun `a frame taken in pieces close together is whole, the clock is looked at before every piece`() {
+        chooser = "ABCDEFGHIJKLMNOPQRSTUVWXY"
+        takesPerWrite = 10
+        sleepOverrunNs = 40 * ms // a hole, but shorter than the sign's patience
+        arrives(0, "~")
+        link.step()
+        assertEquals(listOf("tx[H:ABCDEFGH]@0", "tx[IJKLMNOPQR]@42", "tx[STUVWXY]@44"), wire())
     }
 
     @Test
@@ -568,6 +614,19 @@ class SignLinkTest {
         assertTrue(lows.single() >= replyGoneNs, "break at ${lows.single() / ms} ms")
         assertEquals("tx[H:Y]@110", wire().last())
         assertTrue(txs[1].atNs >= lows.single() + (SignLink.ATTN_BREAK_MS + SignLink.ATTN_GUARD_MS) * ms)
+    }
+
+    @Test
+    fun `a write call that stalls before it hands the bytes over does not free the line early`() {
+        // the gate's case: the reply's bytes are on the line from the RETURN of the write
+        chooser = "X".repeat(56) // 58 bytes, 40 ms
+        writeStallNs = 30 * ms
+        arrives(0, "~")
+        command(1, "Y")
+        runUntil(1_000)
+        assertEquals(emptyList(), faults)
+        assertEquals(70, txs[0].goneAtNs / ms) // handed over at 30, gone at 70
+        assertTrue(lows.single() >= txs[0].goneAtNs, "break at ${lows.single() / ms} ms")
     }
 
     @Test
@@ -832,8 +891,8 @@ class SignLinkTest {
         takesBeforeStuck = 2
         stuckUntilNs = 150 * ms
         runUntil(2_000)
-        // 70: two bytes; gives up at 120; again 100 ms later
-        assertEquals(listOf("low@0", "tx[H:]@70", "low@220", "tx[H:BCDEFGH]@290"), wire())
+        // 70: two bytes, gone at 71; the line stands still for 50 ms, given up at 122; again 100 ms later
+        assertEquals(listOf("low@0", "tx[H:]@70", "low@222", "tx[H:BCDEFGH]@292"), wire())
         assertEquals(1, timingLines.count { it.startsWith("push ") })
     }
 
@@ -897,6 +956,8 @@ class SignLinkTest {
         stopAtNs = 30 * ms
         runUntilStopped()
         assertEquals(listOf("low@0"), wire())
+        assertEquals(emptyList(), warnings()) // it is over, not a push that failed
+        assertEquals(emptyList(), published)
     }
 
     @Test
@@ -927,6 +988,7 @@ class SignLinkTest {
         arrives(0, "~")
         link.stop()
         link.step()
+        assertEquals(0, answers) // not asked at all: nothing is taken, no index moves
         assertEquals(emptyList(), taken)
         assertEquals(emptyList(), wire())
     }

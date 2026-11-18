@@ -1,6 +1,11 @@
 package cx.aphex.energysign.message
 
+import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.FutureTask
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 /**
  * The work queue of the ONE thread that owns the message state: the stored messages, the
@@ -23,6 +28,12 @@ class OwnerQueue {
     @Volatile
     var wake: () -> Unit = {}
 
+    @Volatile
+    private var ownerThread: Thread? = null
+
+    @Volatile
+    private var mustNotWait: Thread? = null
+
     /** Hands [event] to the owner. From any thread; returns at once. */
     fun post(event: () -> Unit) {
         events.add(event)
@@ -30,10 +41,40 @@ class OwnerQueue {
     }
 
     /**
+     * Hands [change] to the owner and waits until the owner has run it: returns what it returned,
+     * throws what it threw. For a caller that has to tell someone what really happened (an HTTP
+     * client). Waits at most [timeoutMs]; a change the owner did not get to in that time is
+     * withdrawn (it will not be made later, behind the caller's back) and this throws a
+     * TimeoutException.
+     * Never from a thread named with [neverWaitsOn]; the owner asking itself is answered at once.
+     */
+    fun <T> ask(timeoutMs: Long = ASK_TIMEOUT_MS, change: () -> T): T {
+        val asker = Thread.currentThread()
+        if (asker === ownerThread) return change()
+        check(asker !== mustNotWait) { "a change must be posted from ${asker.name}, not waited for" }
+        val answer = FutureTask(Callable(change))
+        post { answer.run() }
+        try {
+            return answer.get(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (e: ExecutionException) {
+            throw e.cause ?: e
+        } catch (e: TimeoutException) {
+            answer.cancel(false)
+            throw TimeoutException("the sign link did not get to the change within $timeoutMs ms")
+        }
+    }
+
+    /** [thread] (the main thread) must never wait for the owner: [ask] from it throws. */
+    fun neverWaitsOn(thread: Thread) {
+        mustNotWait = thread
+    }
+
+    /**
      * Runs what has been posted, in order, at most [max] events so that the owner gets back to
      * the wire. An event that throws is reported and does not stop the others. Owner only.
      */
     fun drain(max: Int = MAX_PER_DRAIN, onError: (Throwable) -> Unit = {}): Int {
+        ownerThread = Thread.currentThread()
         var ran = 0
         while (ran < max) {
             val event = events.poll() ?: break
@@ -49,5 +90,8 @@ class OwnerQueue {
 
     companion object {
         const val MAX_PER_DRAIN: Int = 16
+
+        /** The owner looks at its queue every 10 ms at the latest; this is for an owner that is not running. */
+        const val ASK_TIMEOUT_MS: Long = 2_000
     }
 }
