@@ -4,7 +4,6 @@ import androidx.annotation.ColorInt
 import com.google.gson.JsonDeserializationContext
 import com.google.gson.JsonDeserializer
 import com.google.gson.JsonElement
-import com.google.gson.JsonObject
 import com.google.gson.JsonParseException
 import com.google.gson.JsonSerializationContext
 import com.google.gson.JsonSerializer
@@ -159,7 +158,6 @@ sealed class Message {
             }
         }
 
-        @JsonAdapter(IconInvaders.IconInvadersSerializer::class)
         sealed class IconInvaders(
             override val str: String,
             @ColorInt color: Int
@@ -173,39 +171,6 @@ sealed class Message {
             class BAAAHS(@ColorInt color: Int) : IconInvaders("B", color)
             class DREAMSTATE(@ColorInt color: Int) : IconInvaders("D", color)
             class EDC(@ColorInt color: Int) : IconInvaders("E", color)
-
-            class IconInvadersSerializer : JsonSerializer<IconInvaders>, JsonDeserializer<IconInvaders> {
-                override fun serialize(
-                    src: IconInvaders,
-                    typeOfSrc: Type,
-                    context: JsonSerializationContext
-                ): JsonElement {
-                    val jsonObject = JsonObject()
-                    jsonObject.addProperty("str", src.str)
-                    jsonObject.addProperty("color", src.r shl 16 or (src.g shl 8) or src.b)
-                    return jsonObject
-                }
-
-                override fun deserialize(
-                    json: JsonElement,
-                    typeOfT: Type,
-                    context: JsonDeserializationContext
-                ): IconInvaders {
-                    val jsonObject = json.asJsonObject
-                    val str = jsonObject.get("str").asString
-                    val color = jsonObject.get("color").asInt
-                    return when (str) {
-                        "1" -> Enemy1(color)
-                        "2" -> Enemy2(color)
-                        "X" -> Explosion(color)
-                        "A" -> ANJUNA(color)
-                        "B" -> BAAAHS(color)
-                        "D" -> DREAMSTATE(color)
-                        "E" -> EDC(color)
-                        else -> throw JsonParseException("Unknown IconInvaders str: $str")
-                    }
-                }
-            }
         }
     }
 
@@ -334,16 +299,21 @@ sealed class Message {
                     MSGTYPE.TRACKID -> context.deserialize(json, NowPlayingTrackMessage::class.java)
                     MSGTYPE.CHONKYMARQUEE -> context.deserialize(json, Marquee.Chonky::class.java)
                     MSGTYPE.ICON -> {
-                        when (json.asJsonObject["str"].asString) {
-                            "1" -> context.deserialize(json, ColorMessage.IconInvaders.Enemy1::class.java)
-                            "2" -> context.deserialize(json, ColorMessage.IconInvaders.Enemy2::class.java)
-                            "X" -> context.deserialize(json, ColorMessage.IconInvaders.Explosion::class.java)
-                            "A" -> context.deserialize(json, ColorMessage.IconInvaders.ANJUNA::class.java)
-                            "B" -> context.deserialize(json, ColorMessage.IconInvaders.BAAAHS::class.java)
-                            "D" -> context.deserialize(json, ColorMessage.IconInvaders.DREAMSTATE::class.java)
-                            "E" -> context.deserialize(json, ColorMessage.IconInvaders.EDC::class.java)
-                            else -> throw JsonParseException("Unknown IconInvader: ${json.asJsonObject["str"].asString}")
-                        }
+                        // The class is chosen first and the call names its type. With the `throw`
+                        // among the deserialize calls, their type was inferred as Nothing and
+                        // every icon failed a cast to java.lang.Void.
+                        val iconClass: Class<out ColorMessage.IconInvaders> =
+                            when (val icon = json.asJsonObject["str"].asString) {
+                                "1" -> ColorMessage.IconInvaders.Enemy1::class.java
+                                "2" -> ColorMessage.IconInvaders.Enemy2::class.java
+                                "X" -> ColorMessage.IconInvaders.Explosion::class.java
+                                "A" -> ColorMessage.IconInvaders.ANJUNA::class.java
+                                "B" -> ColorMessage.IconInvaders.BAAAHS::class.java
+                                "D" -> ColorMessage.IconInvaders.DREAMSTATE::class.java
+                                "E" -> ColorMessage.IconInvaders.EDC::class.java
+                                else -> throw JsonParseException("Unknown IconInvader: $icon")
+                            }
+                        context.deserialize<Message>(json, iconClass)
                     }
 
                     MSGTYPE.DEFAULT -> context.deserialize(json, Marquee.User::class.java)
