@@ -34,16 +34,17 @@ enum class Attention {
     /** A run of 0x00 bytes as long as the break: LOW nine tenths of the time. */
     ZEROS,
 
-    /** No pushes at all: the app behaves as chooser contract 2.1. */
+    /** No pushes at all: the app behaves as chooser contract 2.1. The default. */
     OFF;
 
     companion object {
-        /** The value of the switch as typed (`break`, `zeros`, `off`); anything else, or nothing, is [AUTO]. */
-        fun of(value: String?): Attention = when (value?.trim()) {
+        /** One of the four words `off`, `auto`, `break`, `zeros`; null for anything else. */
+        fun parse(word: String?): Attention? = when (word?.trim()) {
+            "off" -> OFF
+            "auto" -> AUTO
             "break" -> BREAK
             "zeros" -> ZEROS
-            "off" -> OFF
-            else -> AUTO
+            else -> null
         }
     }
 }
@@ -52,8 +53,8 @@ enum class Attention {
  * WHEN THE TRANSMIT LINE IS FREE. The one place that knows.
  *
  * `write` and `sendBreak` do not wait, so the line is busy after they return: a byte takes ten
- * bit times to leave, a break holds the line from the moment it is asked for, and the guard is
- * a silence the app owes the sign after the break. Everything the link sends is booked here,
+ * bit times to leave, a break holds the line for its length, and the guard is a silence the app
+ * owes the sign after the break. All of it is counted from the RETURN of the call. Everything the link sends is booked here,
  * and before every break and every pushed frame the link waits for [freeAtNs].
  */
 class LineClock(private val baud: Int, startNs: Long) {
@@ -70,9 +71,13 @@ class LineClock(private val baud: Int, startNs: Long) {
         if (count > 0) freeAtNs = later(freeAtNs, atNs) + count * 10 * NS_PER_S / baud
     }
 
-    /** A break of [millis] ms was asked for at [calledNs] and the call returned at [returnedNs]. */
-    fun low(calledNs: Long, returnedNs: Long, millis: Int) {
-        freeAtNs = later(freeAtNs, later(calledNs + millis * NS_PER_MS, returnedNs))
+    /**
+     * A break of [millis] ms was asked for by a call that returned at [returnedNs]. Counted from
+     * the return, the latest moment the LOW can have begun: a time taken before the call would
+     * be too early whenever the thread is held up between taking it and making the call.
+     */
+    fun low(returnedNs: Long, millis: Int) {
+        freeAtNs = later(freeAtNs, returnedNs + millis * NS_PER_MS)
     }
 
     /** [millis] ms of silence after what is on the line now. */
@@ -119,8 +124,16 @@ class LineClock(private val baud: Int, startNs: Long) {
  * [chooserFrame] is all a push can reach: it cannot take a message from a queue or move an
  * index, so whatever becomes of a push, nothing is lost with it.
  *
+ * A REQUEST IS ANSWERED WHILE THE SIGN LISTENS. The sign waits 60 ms for the answer to a poll.
+ * The link knows how long a byte can have waited: since the read before the one that found it.
+ * A `?` that may have waited longer than [POLL_FRESH_MS] (the thread was kept from the wire: a
+ * sleep that overran, a read that kept failing) is old: the sign has given up, and an answer
+ * now could hand a message to nobody. It is read away; the sign polls again. A `~` is answered
+ * whenever it is found: the sign waits a second for that one.
+ *
  * ONE REQUEST, ONE FRAME. The rule, and the only place it is decided ([step], [readRequest]):
- *  1. Every turn reads the wire first. A request found there is answered with one frame.
+ *  1. Every turn runs the waiting changes, then reads the wire, before anything else. A
+ *     request found there is answered with one frame.
  *  2. If that frame was a full message, a push that was wanted is dropped: the sign has just
  *     been sent, at its own asking, the state the push would carry. (The break would hit a sign
  *     that is waiting for its answer.)
@@ -135,9 +148,6 @@ class LineClock(private val baud: Int, startNs: Long) {
  *     came after it is answered.
  *  5. After a push the next one waits [PUSH_SPACING_MS], so that however fast the changes come,
  *     the sign can ask in between and is answered.
- *  6. After a poll report a push waits [REPORT_SETTLE_MS]. A 2.1 sign that sees in the report
- *     that the chooser changed asks `~` at once; that request then gets the full message (and
- *     rule 2 drops the push) instead of running into the LOW.
  * The boundary of rule 3 is as fine as the reads are apart ([ACTIVE_PAUSE_MS]): a sign that
  * asks within a few ms of the end of a pushed frame may go unanswered once and asks again.
  */
@@ -154,8 +164,8 @@ class SignLink(
     private val chooserFrame: () -> String?,
     /** The frame [chooserFrame] last gave has been written to the sign in full. Not called for a push that failed, or had no frame. */
     private val pushed: () -> Unit = {},
-    /** Read when a push is about to start. */
-    private val attention: () -> Attention = { Attention.AUTO },
+    /** Read when a push is about to start. Pushes are off unless this says otherwise. */
+    private val attention: () -> Attention = { Attention.OFF },
     private val timing: UartTimingLog,
     private val nanoTime: () -> Long = System::nanoTime,
     /** Sleeps about this long; may return early (the loop then looks at the clock again). */
@@ -182,7 +192,7 @@ class SignLink(
     private var voidBeforeNs = takenUpToNs
 
     private var pushNotBeforeNs = takenUpToNs
-    private var heldForReport = false
+    private var readFailures = 0
     private var lastHeardNs = takenUpToNs - ACTIVE_WINDOW_MS * NS_PER_MS
     private var lastEmptyReadNs = takenUpToNs
     private var breakFailed = false
@@ -236,6 +246,7 @@ class SignLink(
             events()
             doing = "read"
             val busy = readRequest()
+            readFailures = 0
             if (stopped) return
             doing = "push"
             if (pushWanted.get() && nanoTime() - pushNotBeforeNs >= 0) {
@@ -247,7 +258,10 @@ class SignLink(
             // Whatever it was (the port, the peripheral service, a change that threw): this is the
             // only thread the sign can reach, so it waits a little and goes on
             complain(doing, e)
-            sleepNanos(ERROR_PAUSE_MS * NS_PER_MS)
+            // A read that failed is tried again at once, inside the time the sign listens; the
+            // long pause is for a port that keeps failing
+            val again = doing == "read" && ++readFailures <= QUICK_READ_RETRIES
+            sleepNanos((if (again) ACTIVE_PAUSE_MS else ERROR_PAUSE_MS) * NS_PER_MS)
         }
     }
 
@@ -265,19 +279,8 @@ class SignLink(
         sentOf = bytes.size
         sentBytes = writeAll(bytes, if (isPollReport) "report" else "message")
         val whole = sentBytes == bytes.size
-        if (whole && !isPollReport) pushSettled()
-        if (isPollReport && pushWanted.get() && !heldForReport) {
-            // Rule 6, once per push: a sign that polls without end must not hold a push off for ever
-            heldForReport = true
-            holdPushUntil(clock.freeAtNs + REPORT_SETTLE_MS * NS_PER_MS)
-        }
+        if (whole && !isPollReport) pushWanted.set(false)
         return whole
-    }
-
-    /** The push that was wanted is on its way or no longer needed; a change from here on is the next one. */
-    private fun pushSettled() {
-        pushWanted.set(false)
-        heldForReport = false
     }
 
     private fun holdPushUntil(notBeforeNs: Long) {
@@ -304,6 +307,12 @@ class SignLink(
         if (!isRequestByte(buffer[count - 1])) {
             timing.dropped(readNs, buffer, count)
             log("Read $count bytes from $name that are not a request: [${String(buffer, 0, count)}]")
+            return true
+        }
+        if (buffer[count - 1] == POLL && readNs - cameAfterNs > POLL_FRESH_MS * NS_PER_MS) {
+            // The link was kept from the wire for longer than the sign waits for this answer
+            timing.dropped(readNs, buffer, count)
+            log("Read an old poll from $name (up to ${(readNs - cameAfterNs) / NS_PER_MS} ms ago): not answered")
             return true
         }
         // Not after stop: a message taken now would be written to a port that is closing
@@ -376,7 +385,7 @@ class SignLink(
         val mode = attention()
         // A change from here on is the next push. None can come before the frame is chosen:
         // changes are made by this thread, in events().
-        pushSettled()
+        pushWanted.set(false)
         if (mode == Attention.OFF) return
         val wantedNs = nanoTime()
         val text = try {
@@ -427,17 +436,16 @@ class SignLink(
     /** Holds the line LOW for [ATTN_BREAK_MS] and books the guard. False when the LOW was not given in full. */
     private fun raiseAttention(mode: Attention): Boolean {
         if (mode == Attention.BREAK || (mode == Attention.AUTO && !breakFailed)) {
-            val calledNs = nanoTime()
             try {
                 wire.sendBreak(ATTN_BREAK_MS)
             } catch (e: Exception) {
                 breakFailed = true
                 complain("break", e)
                 // It may have pulled the line LOW before it failed: the line counts as held
-                clock.low(calledNs, nanoTime(), ATTN_BREAK_MS)
+                clock.low(nanoTime(), ATTN_BREAK_MS)
                 return false
             }
-            clock.low(calledNs, nanoTime(), ATTN_BREAK_MS)
+            clock.low(nanoTime(), ATTN_BREAK_MS)
         } else {
             // A 0x00 byte is the start bit and 8 data bits LOW, then the stop bit HIGH.
             // Taken in one piece or it is no attention: two halves with a pause between are two short LOWs
@@ -492,8 +500,7 @@ class SignLink(
         }
     }
 
-    private fun isRequestByte(byte: Byte): Boolean =
-        byte == ChooserProtocol.POLL_REQUEST.code.toByte() || byte == ChooserProtocol.NEXT_REQUEST.code.toByte()
+    private fun isRequestByte(byte: Byte): Boolean = byte == POLL || byte == ChooserProtocol.NEXT_REQUEST.code.toByte()
 
     companion object {
         // ---- The push (chooser contract VERSION 3.1)
@@ -506,9 +513,6 @@ class SignLink(
         /** From the end of one push to the start of the next: a 2.1 sign polls at least every 250 ms, so it gets a turn. */
         const val PUSH_SPACING_MS: Int = 250
 
-        /** From the end of a poll report to a push: time for a 2.1 sign to ask `~` when the report differs (rule 6). */
-        const val REPORT_SETTLE_MS: Int = 15
-
         // ---- Reading
         /** Pause between two reads while the sign is talking. A request waits at most this long to be seen. */
         const val ACTIVE_PAUSE_MS: Int = 2
@@ -518,6 +522,12 @@ class SignLink(
 
         /** How long after the last byte from the sign (or a push) the short pause is kept. */
         const val ACTIVE_WINDOW_MS: Int = 2_000
+
+        /** A poll that may have waited longer than this is not answered: the sign listens 60 ms, an answer takes up to 10. */
+        const val POLL_FRESH_MS: Int = 50
+
+        /** So many failed reads in a row are each tried again after [ACTIVE_PAUSE_MS]; after that, [ERROR_PAUSE_MS]. */
+        const val QUICK_READ_RETRIES: Int = 10
 
         /** The most bytes taken in one read (the size the UART callback read with). */
         const val READ_BUFFER_LEN: Int = 32
@@ -532,6 +542,7 @@ class SignLink(
         const val WARN_EVERY_MS: Int = 5_000
 
         private const val MAX_ARDUINO_JSON_SIZE: Int = 700
+        private const val POLL: Byte = '?'.code.toByte()
         private const val NS_PER_MS: Long = 1_000_000L
     }
 }

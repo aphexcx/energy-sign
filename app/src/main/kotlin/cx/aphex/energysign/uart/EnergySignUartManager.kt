@@ -13,6 +13,7 @@ import cx.aphex.energysign.ext.logE
 import cx.aphex.energysign.ext.logW
 import cx.aphex.energysign.message.OwnerQueue
 import io.reactivex.rxjava3.subjects.BehaviorSubject
+import java.io.File
 import java.io.IOException
 import java.lang.reflect.Method
 
@@ -24,12 +25,19 @@ import java.lang.reflect.Method
  *
  * Three switches for measuring on the device, without a rebuild:
  *  - the timing log: `adb shell setprop log.tag.SignUart VERBOSE` (see [UartTimingLog])
- *  - how a push gets the sign's attention: `adb shell setprop debug.energysign.attn break|zeros|off`,
- *    or empty for the default (read at every push; see [ATTN_PROPERTY])
+ *  - whether and how the chooser is pushed: `adb shell setprop debug.energysign.attn off|auto|break|zeros`
+ *    (read at every push; wins over the saved switch while it is set; see [ATTN_PROPERTY])
  *  - the priority of the link thread: `adb shell setprop debug.energysign.nice -16`
  *    (read when the app starts; see [NICE_PROPERTY])
  */
-class EnergySignUartManager(private val viewModel: MainViewModel, private val owner: OwnerQueue) {
+class EnergySignUartManager(
+    private val viewModel: MainViewModel,
+    private val owner: OwnerQueue,
+    /** The app's files directory: the push switch is kept there. */
+    filesDir: File,
+    /** Writes a file later, on the saver's thread. */
+    saveLater: (write: () -> Unit) -> Unit,
+) {
     private val uartDevice: UartDevice = configureUart()
 
     val receivedBytes: BehaviorSubject<ByteArray> = BehaviorSubject.createDefault(byteArrayOf())
@@ -50,6 +58,14 @@ class EnergySignUartManager(private val viewModel: MainViewModel, private val ow
         override fun close() = uartDevice.close()
     }
 
+    /** Whether and how the chooser is pushed. Off unless switched on; see [AttentionSwitch]. */
+    private val attentionSwitch = AttentionSwitch(
+        file = File(filesDir, AttentionSwitch.FILE_NAME),
+        property = { property(ATTN_PROPERTY) },
+        saveLater = saveLater,
+        log = { line -> logD(line) },
+    )
+
     private val link = SignLink(
         wire = wire,
         baud = UART_BAUD_RATE,
@@ -58,7 +74,7 @@ class EnergySignUartManager(private val viewModel: MainViewModel, private val ow
         answer = ::answer,
         chooserFrame = { viewModel.chooserFrame() },
         pushed = { viewModel.onChooserPushed() },
-        attention = ::attentionMode,
+        attention = attentionSwitch::inForce,
         timing = timing,
         log = { line -> logD(line) },
         warn = { line -> logW(line) },
@@ -110,6 +126,9 @@ class EnergySignUartManager(private val viewModel: MainViewModel, private val ow
      */
     fun requestPush() = link.requestPush()
 
+    /** The `!attn` command: sets and keeps the push switch. On the link thread. */
+    fun setAttention(word: String): Boolean = attentionSwitch.set(word)
+
     /** Writes one reply to the sign. For the answer to a request, on the link thread. */
     fun send(frame: String, isPollReport: Boolean): Boolean = link.send(frame, isPollReport)
 
@@ -154,9 +173,6 @@ class EnergySignUartManager(private val viewModel: MainViewModel, private val ow
             null
         }
 
-    /** [ATTN_PROPERTY] as it is set now; [Attention.AUTO] when it is unset, unknown or unreadable. */
-    private fun attentionMode(): Attention = Attention.of(property(ATTN_PROPERTY))
-
     private fun linkNice(): Int = property(NICE_PROPERTY)?.trim()?.toIntOrNull()?.coerceIn(-19, 0) ?: DEFAULT_NICE
 
     companion object {
@@ -168,13 +184,14 @@ class EnergySignUartManager(private val viewModel: MainViewModel, private val ow
         private const val STOP_JOIN_MS: Long = 1_000
 
         /**
-         * System property that picks how a push gets the sign's attention:
-         *  - unset: `UartDevice.sendBreak(50)`. On the Pico the call returns after 1 ms; that the
+         * System property that, while it holds one of these words, wins over the saved switch
+         * (the `!attn` command, [AttentionSwitch]); it is gone after a restart of the board:
+         *  - `off`: no pushes at all, the app behaves as contract 2.1. Also the saved default.
+         *  - `auto`: `UartDevice.sendBreak(50)`. On the Pico the call returns after 1 ms; that the
          *    line is then LOW for 50 ms is for the firmware's numbers to show. If the call
          *    throws, the 0x00 run is used from then on (until the app restarts).
          *  - `break`: sendBreak always, whatever it did before.
          *  - `zeros`: 50 ms worth of 0x00 bytes instead (the fallback in the contract note).
-         *  - `off`: no pushes at all, the app behaves as contract 2.1.
          */
         private const val ATTN_PROPERTY: String = "debug.energysign.attn"
 

@@ -73,6 +73,9 @@ class MessageManager(
     private val gptViewModel: GPTViewModel by inject()
     private val keyboardManager = KeyboardManager
 
+    /** Read once, here on the main thread: the owner must not ask the context for it at every save. */
+    private val filesDir: File = context.filesDir
+
     /*
      * THREADS. ONE thread owns everything in here, the lists of MessageRepository and the input
      * of KeyboardManager: the sign link thread (see OwnerQueue). It alone calls getNextMessage
@@ -94,6 +97,10 @@ class MessageManager(
     @Volatile
     var onChooserChanged: () -> Unit = {}
 
+    /** Gets the word of an `!attn` command (off, auto, break, zeros). Called on the owner thread. */
+    @Volatile
+    var onAttentionCommand: (word: String) -> Unit = {}
+
     private val chooserWatch = ChooserChangeWatch(view = { chooserShown() }) { onChooserChanged() }
 
     /** Hands [change], which may alter the messages, the index or the mode, to the owner; it runs under the chooser watch. */
@@ -109,7 +116,7 @@ class MessageManager(
 
     init {
 
-        msgRepo.marqueeMessages.addAll(msgRepo.loadUserMessages(context))
+        msgRepo.marqueeMessages.addAll(msgRepo.loadUserMessages(filesDir))
         val ads: List<Message> = loadAds()
 
         advertisements.addAll(
@@ -207,7 +214,7 @@ class MessageManager(
         }
         msgRepo.enqueueOneTimeMessage(Message.CountDownAnnouncement.NewMessageAnnouncement)
         msgRepo.pushMarqueeMessage(newUserMessage)
-        msgRepo.saveMarqueeMessages(context)
+        msgRepo.saveMarqueeMessages(filesDir)
     }
 
 
@@ -266,7 +273,7 @@ class MessageManager(
                 is Message.Marquee.GPTReply -> {
                     logD("Converting GPTReply to User message!")
                     msgRepo.marqueeMessages[currentIdx.value] = curMsg.toChonkyMessage()
-                    msgRepo.saveMarqueeMessages(context)
+                    msgRepo.saveMarqueeMessages(filesDir)
                     msgRepo.pushOneTimeMessages(
 //                        Message.ColorMessage.ChonkySlide("BAAAHS", context.getColor(R.color.green)),
                         Message.ColorMessage.ChonkySlide("RAVEGPT", context.getColor(R.color.green), delayMs = 750),
@@ -443,7 +450,7 @@ class MessageManager(
                     currentIdx.update {
                         if (it >= msgRepo.marqueeMessages.lastIndex) msgRepo.marqueeMessages.lastIndex else it
                     }
-                    msgRepo.saveMarqueeMessages(context)
+                    msgRepo.saveMarqueeMessages(filesDir)
                 }
             }
 
@@ -490,6 +497,9 @@ class MessageManager(
 //                        🛤️
 //                        👾
                     }
+
+                    // before "!A": whether and how the chooser is pushed to the sign
+                    cmd.startsWith("!attn") -> onAttentionCommand(cmd.drop(5).trim())
 
                     cmd.startsWith("!B", ignoreCase = true) -> {
                         msgRepo.pushOneTimeMessage(
@@ -633,7 +643,7 @@ class MessageManager(
 
     private fun loadAds(): List<Message> {
         try {
-            with(File(context.filesDir, ADS_FILE_NAME)) {
+            with(File(filesDir, ADS_FILE_NAME)) {
                 if (createNewFile()) {
                     logD("$ADS_FILE_NAME does not exist; created new, with default ad of <Invaders>.")
                     writeText(gson.toJson(DEFAULT_ADS))
@@ -656,10 +666,11 @@ class MessageManager(
     }
 
     private fun saveAds() {
-        val json = gson.toJson(advertisements)
+        val snapshot = ArrayList(advertisements)
         msgRepo.saveLater {
         try {
-            with(File(context.filesDir, ADS_FILE_NAME)) {
+            val json = gson.toJson(snapshot)
+            with(File(filesDir, ADS_FILE_NAME)) {
                 when (createNewFile()) {
                     true -> logD("$ADS_FILE_NAME does not exist; created new.")
                     else -> logD("$ADS_FILE_NAME exists. Writing ads...")
@@ -673,18 +684,25 @@ class MessageManager(
     }
 
 
-    fun processNewBytes(value: ByteArray) {
+    /** A command or a new message, as the phone writes it. Posted: it has not been carried out when this returns. */
+    fun processNewBytes(value: ByteArray) = change(bytesChange(value))
+
+    /** The same, for a caller that says "done" to someone: returns when the owner has carried it out. Not from the main thread. */
+    fun processNewBytesAndWait(value: ByteArray): Unit = changeAndWait(bytesChange(value))
+
+    /** What [value] asks for, as a change for the owner. What can be done here, on the caller's thread, is done here. */
+    private fun bytesChange(value: ByteArray): () -> Unit {
         val cmd = String(value)
-        if (cmd.startsWith("!🅰")) {
+        return if (cmd.startsWith("!🅰")) {
             logD("Procesing Uart command $cmd")
             val ads = parseAds(cmd.drop(2))
-            change { replaceAdsWith(ads) }
+            ({ replaceAdsWith(ads) })
         } else if (cmd.startsWith("!")) {
             // logged here, by the caller: the owner has the sign to answer
             logD("Procesing Uart command $cmd")
-            change { processUartCommand(value) }
+            ({ processUartCommand(value) })
         } else {
-            change { addNewUserMessage(cmd, isQuery = false) }
+            ({ addNewUserMessage(cmd, isQuery = false) })
         }
     }
 
@@ -730,7 +748,7 @@ class MessageManager(
             return false
         }
         msgRepo.insertGPTReplyToUserMessage(postedGptAnswer)
-        msgRepo.saveMarqueeMessages(context)
+        msgRepo.saveMarqueeMessages(filesDir)
         return true
     }
 
@@ -744,7 +762,7 @@ class MessageManager(
             return
         }
         msgRepo.insertGPTReply(gptAnswerResponse)
-        msgRepo.saveMarqueeMessages(context)
+        msgRepo.saveMarqueeMessages(filesDir)
     }
 
     /** Returns when the owner has made the change. */

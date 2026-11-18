@@ -59,8 +59,8 @@ class SignLinkTest {
     private var failWrites = 0
     private var closes = 0
 
-    /** The next write call stalls this long before it hands its bytes over (once). */
-    private var writeStallNs = 0L
+    /** The next write or break call stalls this long before the line sees it (once): the thread was taken off the processor. */
+    private var stallNs = 0L
 
     /** The next sleep of the link lasts this much longer than asked (once): the thread was kept waiting. */
     private var sleepOverrunNs = 0L
@@ -88,8 +88,8 @@ class SignLinkTest {
                 failWrites--
                 throw IOException("write failed")
             }
-            now += writeStallNs
-            writeStallNs = 0
+            now += stallNs
+            stallNs = 0
             if (now >= stuckUntilNs) takesBeforeStuck = Int.MAX_VALUE
             val take = minOf(length, takesPerWrite, takesBeforeStuck)
             if (take == 0) return 0
@@ -108,6 +108,8 @@ class SignLinkTest {
                 failBreaks--
                 throw IOException("no break")
             }
+            now += stallNs
+            stallNs = 0
             if (now < txBusyUntilNs) faults += "break at ${now / ms} ms, while bytes are leaving until ${txBusyUntilNs / ms} ms"
             lows += now
             line += "low@${now / ms}"
@@ -359,29 +361,82 @@ class SignLinkTest {
         assertTrue(reads in 88..92, "$reads reads")
     }
 
-    @Test
-    fun `a sign that polls without end does not hold up a push`() {
-        // a poll every 5 ms: the reports alone (3.5 ms each) fill most of the line
-        readCostNs = ms / 5
-        for (t in 0..400 step 5) arrives(t.toLong(), "?")
-        command(0, "B")
-        runUntil(150)
-        // held back once behind the first report (rule 6), not behind every one
-        assertEquals(1, lows.size)
-        assertTrue(lows.single() / ms in SignLink.REPORT_SETTLE_MS..SignLink.REPORT_SETTLE_MS + 10, "LOW at ${lows.single() / ms} ms")
-    }
-
     // ================= errors
 
     @Test
-    fun `a failing read is waited out and tried again, and a dead port does not flood the log`() {
-        failReads = 60 // six seconds of it
-        arrives(0, "~")
-        runUntil(7_000)
-        assertEquals(listOf("tx[H:A]@6000"), wire())
+    fun `one failed read is tried again at once, the request behind it is answered while the sign listens`() {
+        // the gate's sequence: the microphone command is queued, the chooser is left, a read fails, the poll comes 1 ms later
+        chooser = null
+        ordinary.addFirst("micOff")
+        failReads = 1
+        arrives(1, "?")
+        runUntil(50)
+        assertEquals(listOf("tx[micOff]@2"), wire()) // 2 ms after the failure, inside the sign's 60 ms
+        assertEquals(listOf("micOff"), taken)
+        // and so is every later single failure: the count starts again after a read that worked
+        repeat(SignLink.QUICK_READ_RETRIES + 5) {
+            failReads = 1
+            runUntil(now / ms + 50)
+        }
+        assertFalse(sleeps.contains(SignLink.ERROR_PAUSE_MS * ms))
+    }
+
+    @Test
+    fun `reads that keep failing are spaced out, and a dead port does not flood the log`() {
+        failReads = 62 // a little over five seconds of it
+        arrives(5_500, "~")
+        runUntil(6_000)
+        val quick = SignLink.QUICK_READ_RETRIES
+        assertEquals(List(quick) { SignLink.ACTIVE_PAUSE_MS * ms } + List(62 - quick) { SignLink.ERROR_PAUSE_MS * ms }, sleeps.take(62))
         assertEquals(2, warnings().size, warnings().toString()) // at the start, and once more after five seconds
         assertTrue(warnings().first().contains("read failed"))
-        assertEquals(List(60) { SignLink.ERROR_PAUSE_MS * ms }, sleeps.take(60))
+        assertEquals(1, wire().size) // and it is back at work afterwards
+    }
+
+    // ================= a request is answered while the sign listens
+
+    @Test
+    fun `a poll found after reads kept failing is old, it takes nothing, and the next fresh request gets the message`() {
+        chooser = null
+        ordinary.addFirst("micOff")
+        failReads = SignLink.QUICK_READ_RETRIES + 2 // 20 ms of quick tries, then two long pauses: 220 ms off the wire
+        arrives(1, "?")
+        runUntil(300)
+        assertEquals(emptyList(), wire()) // the sign gave up 160 ms ago
+        assertEquals(0, answers)
+        assertEquals("micOff", ordinary.first())
+        assertTrue(line.any { it.startsWith("log:Read an old poll from UART") }, line.toString())
+        arrives(400, "?") // it polls again
+        runUntil(500)
+        assertEquals(listOf("tx[micOff]@400"), wire())
+        assertEquals(listOf("micOff"), taken)
+    }
+
+    @Test
+    fun `a poll found after the link slept 80 ms is old, in chooser mode too`() {
+        // measured on the Pico: the 2 ms sleep runs 40 to 83 ms late a few times a minute
+        sleepOverrunNs = 80 * ms
+        arrives(5, "?")
+        runUntil(150)
+        assertEquals(emptyList(), wire())
+        assertEquals(1, drops().size)
+        arrives(200, "?")
+        runUntil(250)
+        assertEquals(listOf("tx[{c:A}]@200"), wire())
+    }
+
+    @Test
+    fun `a poll that waited less than the sign listens is answered, and a request for the next message keeps its second`() {
+        sleepOverrunNs = 30 * ms // 40 ms off the wire: the sign is still listening
+        arrives(5, "?")
+        runUntil(100)
+        assertEquals(listOf("tx[{c:A}]@40"), wire())
+
+        chooser = null
+        sleepOverrunNs = 500 * ms
+        arrives(110, "~")
+        runUntil(1_000)
+        assertEquals(1, taken.size) // half a second old, and answered: the sign waits a second for this one
     }
 
     @Test
@@ -519,14 +574,27 @@ class SignLinkTest {
     }
 
     @Test
-    fun `the guard counts from the call of the break, whether the call returns at once or when the line is HIGH`() {
+    fun `the LOW and the guard are counted from the return of the break call`() {
         command(0, "B")
         runUntil(500)
+        assertEquals(listOf("low@0", "tx[H:B]@70"), wire())
+        // a call that returns only when the line is HIGH again: the frame comes later, never too early
         breakBlocks = true
         command(1_000, "C")
         runUntil(2_000)
-        assertEquals(listOf("low@0", "tx[H:B]@70", "low@1000", "tx[H:C]@1070"), wire())
+        assertEquals(listOf("low@0", "tx[H:B]@70", "low@1000", "tx[H:C]@1120"), wire())
         assertEquals(emptyList(), faults)
+    }
+
+    @Test
+    fun `a thread held up just before the break call does not write its frame into the LOW`() {
+        // the gate's case: the time is taken, the thread is off the processor for 40 ms, then the call is made
+        stallNs = 40 * ms
+        command(0, "B")
+        runUntil(500)
+        assertEquals(emptyList(), faults)
+        assertEquals(40, lows.single() / ms) // the line went LOW at 40, until 90
+        assertEquals("tx[H:B]@110", wire().last()) // 90 + the guard
     }
 
     @Test
@@ -620,7 +688,7 @@ class SignLinkTest {
     fun `a write call that stalls before it hands the bytes over does not free the line early`() {
         // the gate's case: the reply's bytes are on the line from the RETURN of the write
         chooser = "X".repeat(56) // 58 bytes, 40 ms
-        writeStallNs = 30 * ms
+        stallNs = 30 * ms
         arrives(0, "~")
         command(1, "Y")
         runUntil(1_000)
@@ -699,27 +767,8 @@ class SignLinkTest {
         command(0, "B")
         arrives(0, "?")
         runUntil(1_000)
-        // the report (5 bytes, 3 ms on the line), then the push, REPORT_SETTLE_MS behind it (rule 6)
-        assertEquals(listOf("tx[{c:B}]@0", "low@18", "tx[H:B]@88"), wire())
-        assertEquals(emptyList(), faults)
-    }
-
-    @Test
-    fun `rule 6, a 2 point 1 sign that reads the change in the report and asks at once gets the message, not the LOW`() {
-        command(0, "B")
-        arrives(0, "?")
-        arrives(9, "~") // it saw another checksum and asks for the message, as its contract says
-        runUntil(1_000)
-        assertEquals(listOf("tx[{c:B}]@0", "tx[H:B]@10"), wire())
-        assertEquals(emptyList(), drops())
-    }
-
-    @Test
-    fun `rule 6 is for a report that carries the change, a report before the change holds nothing back`() {
-        arrives(0, "?")
-        command(1, "B")
-        runUntil(1_000)
-        assertEquals(listOf("tx[{c:A}]@0", "low@3", "tx[H:B]@73"), wire())
+        // the report (5 bytes, 3 ms on the line), then the push behind it
+        assertEquals(listOf("tx[{c:B}]@0", "low@3", "tx[H:B]@73"), wire())
         assertEquals(emptyList(), faults)
     }
 
@@ -779,6 +828,18 @@ class SignLinkTest {
         arrives(300, "~")
         runUntil(400)
         assertEquals(listOf("M1"), taken)
+    }
+
+    @Test
+    fun `rule 3, more than one read's worth sent into a LOW is void to its last byte`() {
+        // 33 bytes with a request byte last: the first read is full, so it says nothing about when the rest came
+        chooser = "A"
+        command(0, null)
+        arrives(10, "x".repeat(SignLink.READ_BUFFER_LEN) + "~")
+        runUntil(200)
+        assertEquals(listOf("low@0"), wire())
+        assertEquals(emptyList(), taken)
+        assertEquals(2, drops().size)
     }
 
     @Test
@@ -972,14 +1033,34 @@ class SignLinkTest {
     }
 
     @Test
-    fun `the switch is read as typed, and anything else is the default`() {
-        assertEquals(Attention.BREAK, Attention.of("break"))
-        assertEquals(Attention.ZEROS, Attention.of("zeros"))
-        assertEquals(Attention.OFF, Attention.of("off"))
-        assertEquals(Attention.OFF, Attention.of(" off\n"))
-        assertEquals(Attention.AUTO, Attention.of(""))
-        assertEquals(Attention.AUTO, Attention.of(null))
-        assertEquals(Attention.AUTO, Attention.of("OFF!"))
+    fun `the switch has four words, and anything else is no word`() {
+        assertEquals(Attention.OFF, Attention.parse("off"))
+        assertEquals(Attention.AUTO, Attention.parse("auto"))
+        assertEquals(Attention.BREAK, Attention.parse("break"))
+        assertEquals(Attention.ZEROS, Attention.parse("zeros"))
+        assertEquals(Attention.OFF, Attention.parse(" off\n"))
+        assertEquals(null, Attention.parse(""))
+        assertEquals(null, Attention.parse(null))
+        assertEquals(null, Attention.parse("OFF!"))
+        assertEquals(null, Attention.parse("on"))
+    }
+
+    @Test
+    fun `a link that is told nothing about pushes does not push`() {
+        var asked = false
+        val plain = SignLink(
+            wire = wire, baud = baud, name = "UART", events = {}, answer = { _, _ -> },
+            chooserFrame = {
+                asked = true
+                "H:B"
+            },
+            timing = UartTimingLog(isEnabled = { false }, emit = {}),
+            nanoTime = { now }, sleepNanos = { now += it },
+        )
+        plain.requestPush()
+        while (now < 500 * ms) plain.step()
+        assertEquals(emptyList(), wire())
+        assertFalse(asked)
     }
 
     @Test
@@ -1018,6 +1099,7 @@ class SignLinkTest {
         chooserFrame: () -> String? = { null },
     ) = SignLink(
         wire = wire, baud = baud, name = "UART", events = events, answer = answer, chooserFrame = chooserFrame,
+        attention = { Attention.AUTO },
         timing = UartTimingLog(isEnabled = { false }, emit = {}),
         sleepNanos = { nanos -> LockSupport.parkNanos(maxOf(nanos, 5_000 * ms)) },
     )

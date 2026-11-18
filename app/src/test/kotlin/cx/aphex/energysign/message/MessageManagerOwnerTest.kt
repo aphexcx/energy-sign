@@ -41,8 +41,12 @@ import kotlin.test.assertTrue
 class MessageManagerOwnerTest {
     private val dir: File = Files.createTempDirectory("es89l-manager").toFile()
 
+    private var filesDirAsked = 0
     private val context: Context = object : ContextWrapper(null) {
-        override fun getFilesDir(): File = dir
+        override fun getFilesDir(): File {
+            filesDirAsked++
+            return dir
+        }
     }
 
     /** The saver's thread, run by hand. */
@@ -387,15 +391,63 @@ class MessageManagerOwnerTest {
 
     @Test
     fun `a command that saves the list leaves the writing to the saver`() {
+        val file = File(dir, "signstrings.txt")
+        file.writeText("what was on disk before\n")
         phone("!choose")
         phone("!delete")
         ownerRuns()
         assertEquals(4, repo.marqueeMessages.size)
         assertEquals(1, unsaved.size)
-        val file = File(dir, "signstrings.txt")
-        val before = if (file.exists()) file.readText() else null
-        assertEquals(before, if (file.exists()) file.readText() else null)
+        assertEquals("what was on disk before\n", file.readText()) // the owner has written nothing
         unsaved.removeAt(0).run()
         assertEquals(listOf("MESSAGE 5", "MESSAGE 4", "MESSAGE 3", "MESSAGE 2"), file.readLines())
+    }
+
+    @Test
+    fun `the files directory is asked of the context once, at the start, not at a save`() {
+        phone("!choose")
+        phone("!delete")
+        phone("!delete")
+        phone("FRESH")
+        ownerRuns()
+        assertEquals(3, unsaved.size)
+        assertEquals(1, filesDirAsked)
+    }
+
+    // ---- the push switch command
+
+    @Test
+    fun `the attn command hands its word on, and is not taken for the ad period command`() {
+        val words = mutableListOf<String>()
+        manager.onAttentionCommand = { words += it }
+        phone("!attn zeros")
+        phone("!attn")
+        phone("!attn  off ")
+        ownerRuns()
+        assertEquals(listOf("zeros", "", "off"), words)
+        assertEquals(0, repo.oneTimeMessages.size) // "!A 5" would have announced a new period
+        assertEquals(0, pushes)
+        manager.onAttentionCommand = {}
+
+        phone("!A 5")
+        ownerRuns()
+        assertTrue(repo.oneTimeMessages.any { it is Message.FlashingAnnouncement.CustomFlashyAnnouncement })
+    }
+
+    // ---- the waiting entry for a caller that says "done" (the adb hook)
+
+    @Test
+    fun `the waiting twin of a command returns when the owner has carried it out`() {
+        val call = FutureTask(Callable { manager.processNewBytesAndWait("!choose".toByteArray()) })
+        Thread(call, "hook").start()
+        Thread.sleep(50)
+        assertFalse(call.isDone)
+        assertNull(shown())
+        while (!call.isDone) {
+            ownerRuns()
+            Thread.sleep(1)
+        }
+        assertEquals("1/5 MESSAGE 1", shown())
+        assertEquals(1, pushes)
     }
 }

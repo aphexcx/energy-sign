@@ -38,20 +38,21 @@ class LineClockTest {
     }
 
     @Test
-    fun `a break is LOW for its length from the call, when the call returns at once`() {
-        clock.low(calledNs = 200 * ms, returnedNs = 201 * ms, millis = 50)
-        assertEquals(250 * ms, clock.freeAtNs)
+    fun `a break holds the line for its length from the return of the call`() {
+        clock.low(returnedNs = 201 * ms, millis = 50)
+        assertEquals(251 * ms, clock.freeAtNs)
     }
 
     @Test
-    fun `a break call that returns later than its length holds the line until it returns`() {
-        clock.low(calledNs = 200 * ms, returnedNs = 262 * ms, millis = 50)
-        assertEquals(262 * ms, clock.freeAtNs)
+    fun `a break behind bytes that are still leaving does not free the line before they are gone`() {
+        clock.wrote(atNs = 100 * ms, count = 144) // 100 ms on the line
+        clock.low(returnedNs = 101 * ms, millis = 50)
+        assertEquals(100 * ms + air(144), clock.freeAtNs)
     }
 
     @Test
     fun `the guard is added to whatever is on the line`() {
-        clock.low(calledNs = 200 * ms, returnedNs = 201 * ms, millis = 50)
+        clock.low(returnedNs = 200 * ms, millis = 50)
         clock.guard(20)
         assertEquals(270 * ms, clock.freeAtNs)
         clock.wrote(atNs = 270 * ms, count = 72)

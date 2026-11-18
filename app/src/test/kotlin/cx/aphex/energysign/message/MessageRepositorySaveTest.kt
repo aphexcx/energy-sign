@@ -3,6 +3,8 @@ package cx.aphex.energysign.message
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
 import java.util.concurrent.Executor
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -75,23 +77,67 @@ class MessageRepositorySaveTest {
     }
 
     @Test
-    fun `saving the 77 messages of the sign costs the owner a copy, the files cost the saver`() {
-        // the list on the sign on 2026-11-17: 77 messages, here 60 characters each
-        repeat(77) { repo.pushMarqueeMessage(Message.Marquee.User("MESSAGE $it ".padEnd(60, 'x'))) }
-        repeat(200) { repo.saveMarqueeMessages(dir) } // warm
-        waiting.clear()
+    fun `what the owner does for a save does not grow with the text, the lines are made by the saver`() {
+        // far more than the sign will ever hold: 300 000 messages of 256 characters
+        val text = "x".repeat(256)
+        repeat(300_000) { repo.marqueeMessages.add(Message.Marquee.User(text)) }
+        // a copy of 300 000 references takes about a millisecond; making 600 000 lines of 77 million characters does not
+        val ownerMs = (1..5).minOf {
+            val t0 = System.nanoTime()
+            repo.saveMarqueeMessages(dir)
+            (System.nanoTime() - t0) / 1_000_000
+        }
+        println("a save of 300 000 messages on this machine: the owner's share is $ownerMs ms")
+        assertTrue(ownerMs < 25, "the owner's share took $ownerMs ms")
+        assertEquals(5, waiting.size)
+    }
 
-        val rounds = 200
-        val t0 = System.nanoTime()
-        repeat(rounds) { repo.saveMarqueeMessages(dir) }
-        val ownerUs = (System.nanoTime() - t0) / 1000 / rounds
-        val t1 = System.nanoTime()
-        waiting.forEach { it.run() }
-        val saverUs = (System.nanoTime() - t1) / 1000 / rounds
+    // ---- whole or not at all
 
-        println("save of 77 messages on this machine: owner $ownerUs us (the copy), saver $saverUs us (two files)")
-        assertEquals(77, strings().size)
-        // the bound is loose on purpose: what matters is that the owner's share has no file in it
-        assertTrue(ownerUs < 5_000, "the owner's share took $ownerUs us")
+    /** A file that takes [bytes] bytes and then fails: the power went, the storage is full. */
+    private fun dyingAfter(bytes: Int): (File) -> FileOutputStream = { file ->
+        object : FileOutputStream(file) {
+            var left = bytes
+            override fun write(b: ByteArray, off: Int, len: Int) {
+                if (len > left) {
+                    super.write(b, off, left)
+                    flush()
+                    throw IOException("the writer died")
+                }
+                left -= len
+                super.write(b, off, len)
+            }
+        }
+    }
+
+    @Test
+    fun `a writer that dies after some bytes leaves the old files readable and whole`() {
+        repo.pushMarqueeMessage(Message.Marquee.User("ONE"))
+        repo.pushMarqueeMessage(Message.Marquee.User("TWO"))
+        repo.saveMarqueeMessages(dir)
+        waiting.removeAt(0).run()
+        val before = File(dir, "signstrings.bin").readBytes()
+
+        repo.pushMarqueeMessage(Message.Marquee.User("THREE AND A GOOD DEAL MORE"))
+        repo.saveMarqueeMessages(dir, open = dyingAfter(bytes = 9))
+        waiting.removeAt(0).run()
+
+        assertEquals(listOf("ONE", "TWO"), strings())
+        assertTrue(before.contentEquals(File(dir, "signstrings.bin").readBytes()))
+        // and the app that starts after it reads the old list, and clears away what the cut-off save left
+        assertTrue(File(dir, "signstrings.bin.tmp").exists())
+        val loaded = MessageRepository(saver = { it.run() }).loadUserMessages(dir)
+        assertEquals(listOf("TWO", "ONE"), loaded.map { it.str })
+        assertFalse(File(dir, "signstrings.bin.tmp").exists())
+        assertFalse(File(dir, "signstrings.txt.tmp").exists())
+    }
+
+    @Test
+    fun `a save that went through leaves nothing beside the files`() {
+        repo.pushMarqueeMessage(Message.Marquee.User("ONE"))
+        repo.saveMarqueeMessages(dir)
+        waiting.removeAt(0).run()
+        assertEquals(setOf("signstrings.bin", "signstrings.txt"), dir.list()!!.toSet())
+        assertEquals(listOf("ONE"), MessageRepository(saver = { it.run() }).loadUserMessages(dir).map { it.str })
     }
 }

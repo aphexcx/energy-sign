@@ -31,7 +31,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
     private val owner: OwnerQueue by inject()
     private val messageManager: MessageManager by inject()
     private val energySignBluetoothManager: EnergySignBluetoothManager
-    private val energySignUartManager: EnergySignUartManager = EnergySignUartManager(this, owner)
+    private val energySignUartManager: EnergySignUartManager = EnergySignUartManager(
+        viewModel = this,
+        owner = owner,
+        filesDir = application.filesDir,
+        saveLater = { write -> messageManager.msgRepo.saveLater(write) },
+    )
 
     /** The answer to a REQUEST of the sign, and the only way to MessageManager.getNextMessage. */
     private val signResponder = SignResponder(
@@ -55,6 +60,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
         // already wired. Commands that arrive before the link thread runs wait in the owner's queue.
         owner.neverWaitsOn(Looper.getMainLooper().thread)
         messageManager.onChooserChanged = energySignUartManager::requestPush
+        messageManager.onAttentionCommand = { word -> energySignUartManager.setAttention(word) }
         Thread({ SignResponder.warmUp() }, "sign-json-warmup").apply {
             isDaemon = true
             priority = Thread.MIN_PRIORITY
