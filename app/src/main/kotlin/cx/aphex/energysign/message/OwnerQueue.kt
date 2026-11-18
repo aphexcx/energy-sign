@@ -6,6 +6,7 @@ import java.util.concurrent.ExecutionException
 import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * The work queue of the ONE thread that owns the message state: the stored messages, the
@@ -43,9 +44,10 @@ class OwnerQueue {
     /**
      * Hands [change] to the owner and waits until the owner has run it: returns what it returned,
      * throws what it threw. For a caller that has to tell someone what really happened (an HTTP
-     * client). Waits at most [timeoutMs]; a change the owner did not get to in that time is
-     * withdrawn (it will not be made later, behind the caller's back) and this throws a
-     * TimeoutException.
+     * client). Waits at most [timeoutMs] for the owner to take the change up; a change the owner
+     * has not taken up by then is withdrawn (it will not be made later, behind the caller's
+     * back) and this throws a TimeoutException. A change the owner has taken up is waited for
+     * to its end, whatever the clock says: its real result is the only true answer.
      * Never from a thread named with [neverWaitsOn]; the owner asking itself is answered at once.
      */
     fun <T> ask(timeoutMs: Long = ASK_TIMEOUT_MS, change: () -> T): T {
@@ -53,14 +55,19 @@ class OwnerQueue {
         if (asker === ownerThread) return change()
         check(asker !== mustNotWait) { "a change must be posted from ${asker.name}, not waited for" }
         val answer = FutureTask(Callable(change))
-        post { answer.run() }
+        val takenUp = AtomicBoolean(false) // set once, by whoever is first: the owner taking it up, or the asker withdrawing it
+        post { if (takenUp.compareAndSet(false, true)) answer.run() }
         try {
-            return answer.get(timeoutMs, TimeUnit.MILLISECONDS)
+            return try {
+                answer.get(timeoutMs, TimeUnit.MILLISECONDS)
+            } catch (e: TimeoutException) {
+                if (takenUp.compareAndSet(false, true)) {
+                    throw TimeoutException("the sign link did not get to the change within $timeoutMs ms")
+                }
+                answer.get()
+            }
         } catch (e: ExecutionException) {
             throw e.cause ?: e
-        } catch (e: TimeoutException) {
-            answer.cancel(false)
-            throw TimeoutException("the sign link did not get to the change within $timeoutMs ms")
         }
     }
 

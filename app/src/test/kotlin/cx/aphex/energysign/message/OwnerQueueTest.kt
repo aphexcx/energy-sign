@@ -111,6 +111,21 @@ class OwnerQueueTest {
     }
 
     @Test
+    fun `a change the owner has taken up when the time runs out is waited for, its asker gets the real result`() {
+        // the gate's case: the owner starts the change just before the bound; a 503 here and a retry would store it twice
+        var made = 0
+        val answer = asked(ownerWaitsMs = 30) {
+            queue.ask(timeoutMs = 60) {
+                Thread.sleep(150) // still under way when the 60 ms are over
+                made++
+                "stored"
+            }
+        }
+        assertEquals("stored", answer.getOrThrow())
+        assertEquals(1, made)
+    }
+
+    @Test
     fun `the owner asking itself is answered at once, it does not wait for itself`() {
         queue.drain()
         assertEquals(7, queue.ask(timeoutMs = 50) { 7 })

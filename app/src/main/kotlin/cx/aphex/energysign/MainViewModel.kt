@@ -7,6 +7,8 @@ import cx.aphex.energysign.beatlinkdata.DnsSdAnnouncer
 import cx.aphex.energysign.bluetooth.BluetoothStatusUpdate
 import cx.aphex.energysign.bluetooth.EnergySignBluetoothManager
 import cx.aphex.energysign.ext.NonNullMutableLiveData
+import cx.aphex.energysign.ext.logE
+import cx.aphex.energysign.message.ChooserProtocol
 import cx.aphex.energysign.message.Message
 import cx.aphex.energysign.message.MessageManager
 import cx.aphex.energysign.message.OwnerQueue
@@ -37,6 +39,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
         nextMessage = { messageManager.getNextMessage() },
         write = { frame, reply -> energySignUartManager.send(frame, reply) },
         unsent = { message -> messageManager.returnUnsent(message) },
+        tooLong = { message, bytes ->
+            logE("Not sent: a message of $bytes bytes is more than the sign can take (${ChooserProtocol.MAX_FRAME_BYTES}): ${message.str.take(40)}...")
+        },
     )
     private val dnsSdAnnouncer: DnsSdAnnouncer
 

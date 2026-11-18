@@ -51,6 +51,9 @@ class SignLinkTest {
     private var stuckUntilNs = 0L
     private var failWrites = 0
 
+    /** The next write call that takes bytes returns this much later (once): the thread was held up inside the call. */
+    private var writeLastsNs = 0L
+
     private val wire = object : SignWire {
         override fun read(buffer: ByteArray, length: Int): Int {
             reads++
@@ -80,6 +83,8 @@ class SignLinkTest {
             if (takesBeforeStuck != Int.MAX_VALUE) takesBeforeStuck -= take
             txAtMs += now / ms
             line += "tx[${String(buffer, 0, take)}]@${now / ms}"
+            now += writeLastsNs
+            writeLastsNs = 0
             return take
         }
 
@@ -344,6 +349,19 @@ class SignLinkTest {
 
     // ================= a request is answered while the sign listens
 
+    /** The sign is in its normal display: it has asked for a message and got one in time. */
+    private fun inNormalDisplay() {
+        val was = chooser
+        chooser = null
+        arrives(now / ms, "~")
+        link.step()
+        chooser = was
+        line.clear()
+        txAtMs.clear()
+        taken.clear()
+        answers = 0
+    }
+
     /** The sign is in its chooser display: it has polled and got its report. */
     private fun inChooserDisplay() {
         arrives(now / ms, "?")
@@ -403,22 +421,23 @@ class SignLinkTest {
 
     @Test
     fun `outside the chooser display the sign listens a second, a request half a second old is answered and one older than that is not`() {
+        inNormalDisplay()
         chooser = null
         sleepOverrunNs = 500 * ms
         arrives(5, "~")
         runUntil(600)
-        assertEquals(listOf("M1"), taken)
+        assertEquals(listOf("M2"), taken)
 
         sleepOverrunNs = 1_000 * ms
         arrives(now / ms + 5, "~")
         runUntil(2_000)
-        assertEquals(listOf("M1"), taken)
+        assertEquals(listOf("M2"), taken)
         assertEquals(1, drops().size)
     }
 
     @Test
     fun `a poll says the sign is in its chooser display, whatever the app has sent before`() {
-        // the app was restarted while the sign stayed in its chooser display
+        inNormalDisplay()
         chooser = null
         sleepOverrunNs = 80 * ms
         arrives(5, "?")
@@ -427,26 +446,56 @@ class SignLinkTest {
     }
 
     @Test
-    fun `the first edge, the request that brings the chooser message is judged by a second, the poll after it by 60 ms`() {
+    fun `a link that has just started counts 60 ms until it has written a message in time`() {
+        // the gate's case: the app restarts under a sign that stays in its chooser display and asks with a `~`
         chooser = null
-        arrives(0, "~")
-        runUntil(10) // an ordinary message: the sign is in its normal display
-        command(1_000, "A") // !choose
-        sleepOverrunNs = 300 * ms
-        arrives(1_005, "~")
-        runUntil(1_400)
-        assertEquals("H:A", wire().last().substringAfter('[').substringBefore(']')) // 300 ms old, answered: it listens a second
-        // the chooser message has put the sign in its chooser display: from here on 80 ms is too old,
-        // for a poll and for the request it makes after a failed poll
-        val before = wire().size
+        ordinary.addFirst("micOff")
         sleepOverrunNs = 80 * ms
+        arrives(5, "~")
+        runUntil(150)
+        assertEquals(emptyList(), wire()) // 80 ms old: the sign may have waited only 60
+        assertEquals("micOff", ordinary.first())
+        arrives(200, "~") // it asks again, and is answered in time
+        runUntil(250)
+        assertEquals(listOf("micOff"), taken)
+        sleepOverrunNs = 500 * ms // from here on the link knows the sign is in its normal display
         arrives(now / ms + 5, "~")
-        runUntil(now / ms + 200)
-        assertEquals(before, wire().size)
+        runUntil(1_200)
+        assertEquals(listOf("micOff", "M1"), taken)
+    }
+
+    @Test
+    fun `the first byte of an answer must leave while the sign listens, a transmitter that takes it too late gets nothing more`() {
+        // the gate's case: a request 45 ms old is fresh, but its first byte could only go at 70 ms; the sign left at 60
+        inChooserDisplay()
+        chooser = null
+        ordinary.addFirst("micOff")
+        sleepOverrunNs = 43 * ms // read 45 ms after the read before it
+        arrives(now / ms + 1, "?")
+        takesBeforeStuck = 0
+        stuckUntilNs = now + 70 * ms
+        runUntil(now / ms + 150)
+        assertEquals(emptyList(), wire()) // nothing was written after the sign had stopped listening
+        assertEquals(emptyList(), taken)
+        assertEquals("micOff", ordinary.first()) // handed back
+        assertTrue(line.contains("log:Wrote 0 of 6 bytes to UART"), line.toString())
+    }
+
+    @Test
+    fun `the first edge, the request that brings the chooser message is judged by a second, every request after it by 60 ms`() {
+        inNormalDisplay()
+        chooser = "A" // !choose
+        runUntil(1_000)
+        sleepOverrunNs = 300 * ms
+        arrives(1_001, "~")
+        runUntil(1_400)
+        assertEquals(listOf("tx[H:A]@1302"), wire()) // 300 ms old, answered: the sign was in its normal display
+        // the chooser message has put the sign in its chooser display: from here on 80 ms is too old
         sleepOverrunNs = 80 * ms
-        arrives(now / ms + 5, "?")
+        arrives(now / ms + 1, "~")
         runUntil(now / ms + 200)
-        assertEquals(before, wire().size)
+        assertEquals(1, wire().size)
+        assertEquals(1, drops().size)
     }
 
     @Test
@@ -574,6 +623,23 @@ class SignLinkTest {
     }
 
     @Test
+    fun `the line stands still from the start of the write that took the last byte, a call that returned late does not stretch it`() {
+        // one byte is taken at once, but the call returns 30 ms later; the sign's 60 ms run from the byte, not from the return
+        inNormalDisplay()
+        chooser = null
+        val long = "m".repeat(60) // long enough that the time for the whole frame (42 ms + 50) is not what stops it
+        ordinary.addFirst(long)
+        takesBeforeStuck = 1
+        stuckUntilNs = now + 70 * ms // the transmitter takes the rest 70 ms after the first byte: too late
+        writeLastsNs = 30 * ms
+        arrives(now / ms, "~")
+        runUntil(now / ms + 150)
+        assertEquals(1, wire().size) // the first byte and nothing more
+        assertEquals(emptyList(), taken)
+        assertEquals(long, ordinary.first())
+    }
+
+    @Test
     fun `a frame taken in pieces close together is whole, the clock is looked at before every piece`() {
         chooser = "ABCDEFGHIJKLMNOPQRSTUVWXY"
         takesPerWrite = 10
@@ -581,6 +647,20 @@ class SignLinkTest {
         arrives(0, "~")
         link.step()
         assertEquals(listOf("tx[H:ABCDEFGH]@0", "tx[IJKLMNOPQR]@42", "tx[STUVWXY]@44"), wire())
+    }
+
+    @Test
+    fun `a transmitter that takes a byte now and then does not keep the link for longer than the frame needs`() {
+        // each small success used to renew the wait; a long frame could hold the one thread for seconds
+        inNormalDisplay()
+        chooser = "X".repeat(98) // a frame of 100 bytes: 69 ms on the line
+        takesPerWrite = 1 // one byte every 2 ms: 200 ms for the frame
+        val start = now / ms
+        arrives(start, "~")
+        link.step()
+        val tookMs = now / ms - start
+        assertTrue(tookMs <= 69 + SignLink.WRITE_PATIENCE_MS + SignLink.ACTIVE_PAUSE_MS, "the frame held the link for $tookMs ms")
+        assertTrue(line.any { it.matches(Regex("log:Wrote \\d+ of 100 bytes to UART")) && !it.contains("Wrote 100 of") }, line.takeLast(2).toString())
     }
 
     @Test
