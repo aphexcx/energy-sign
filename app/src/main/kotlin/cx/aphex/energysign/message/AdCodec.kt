@@ -42,7 +42,8 @@ object AdCodec {
 
     /**
      * The ads in [json]. [note] gets one line for every ad that had to be corrected to fit the
-     * rules.
+     * rules, once the whole list has been read: a list that is refused reports no correction of
+     * an ad that will never be shown.
      *
      * @throws AdFileException when [json] is not a list of ads.
      */
@@ -50,11 +51,12 @@ object AdCodec {
         val root = parseWhole(json)
         if (!root.isJsonArray) throw AdFileException("not a JSON list")
 
-        return root.asJsonArray.mapIndexedNotNull { index, element ->
+        val corrections = mutableListOf<String>()
+        val ads = root.asJsonArray.mapIndexedNotNull { index, element ->
             val place = "ad ${index + 1}"
             try {
                 if (!element.isJsonObject) throw AdFileException("not a JSON object")
-                adFrom(element.asJsonObject) { note("$place: $it") }
+                adFrom(element.asJsonObject) { corrections += "$place: $it" }
             } catch (e: AdFileException) {
                 throw AdFileException("$place: ${e.message}")
             } catch (e: RuntimeException) {
@@ -62,6 +64,8 @@ object AdCodec {
                 throw AdFileException("$place: ${e.javaClass.simpleName}: ${e.message}")
             }
         }
+        corrections.forEach(note)
+        return ads
     }
 
     /** [json] as one strict JSON value with nothing but white space after it. */

@@ -243,6 +243,28 @@ class AdRestoreRulesTest {
         }
     }
 
+    @Test
+    fun `a list that is refused reports no correction of an ad in it`() {
+        // the first ad would be corrected (its delay), the second refuses the list
+        val refused = """[{"dly":-32536,"scroll":false,"str":"LONG","type":"C","b":3,"g":2,"r":1},{"str":"X","type":"Z"}]"""
+
+        assertFailsWith<AdFileException> { load(refused) }
+
+        assertEquals(emptyList(), notes)
+    }
+
+    @Test
+    fun `the corrections of a list that is accepted come in the order of its ads`() {
+        load(
+            """[{"dly":-32536,"scroll":false,"str":"LONG","type":"C","b":3,"g":2,"r":1},""" +
+                    """{"dly":1000,"str":"","type":"O","b":3,"g":2,"r":1},""" +
+                    """{"dly":31000,"str":"OK","type":"O","b":3,"g":2,"r":1}]"""
+        )
+
+        assertEquals(3, notes.size, notes.toString())
+        assertTrue(notes[0].startsWith("ad 1: ") && notes[1].startsWith("ad 2: ") && notes[2].startsWith("ad 3: "), notes.toString())
+    }
+
     // ---- strict JSON, and all of it
 
     @Test

@@ -566,10 +566,11 @@ class MessageManager(
         }
 
     /**
-     * The owner hands over a copy of the list (its references: an ad never changes once it is
-     * made); the saver turns it into text and writes it (beside the file, to the disk, then
-     * moved into place). So nothing the owner does here grows with the list, it never waits for
-     * storage, and a later ad command cannot get into an earlier save.
+     * The owner copies the list: its n references, no more (an ad never changes once it is
+     * made). Turning the ads into text and writing the file (beside it, to storage, renamed
+     * into place) are the saver's work. So the owner's part grows with the number of ads only,
+     * not with their text, it never waits for storage, and a later ad command cannot get into
+     * an earlier save.
      */
     private fun saveAds() {
         val snapshot = ArrayList(advertisements)

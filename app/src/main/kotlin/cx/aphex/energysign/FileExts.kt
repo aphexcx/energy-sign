@@ -33,15 +33,15 @@ val File.replacement: File
 
 /**
  * Replaces the content of this file with [lines], whole or not at all: see [replaceContent].
- * [open] is how the file beside it is opened (a test opens one that fails); [syncDirectory] is
- * the last step of the sequence, the real one unless a test stands in it.
+ * [open] is how the file beside it is opened (a test opens one that fails); the other steps
+ * are the real ones.
  */
-fun File.replaceWith(
-    lines: Iterable<String>,
-    open: (File) -> FileOutputStream = ::FileOutputStream,
-    syncDirectory: (File) -> Unit = { it.syncDirectory() },
-) =
-    replaceContent(open = open, syncDirectory = syncDirectory) { out ->
+fun File.replaceWith(lines: Iterable<String>, open: (File) -> FileOutputStream = ::FileOutputStream) =
+    replaceWith(lines, SaveSteps(open = open))
+
+/** The same, with [steps] of the caller's (a test's). */
+fun File.replaceWith(lines: Iterable<String>, steps: SaveSteps) =
+    replaceContent(steps) { out ->
         val writer = out.bufferedWriter()
         for (line in lines) {
             writer.write(line)
@@ -62,27 +62,39 @@ fun File.replaceWith(
  * An error in 1 or 2 is thrown: nothing was saved. An error in 3 is not: the new content is in
  * place and stays unless the power goes right now, so the save is done and [warn] gets a line.
  *
- * [open], [syncData] and [syncDirectory] are the real steps unless a test stands in one.
+ * [steps] are the real steps unless a test stands in one.
  */
 fun File.replaceContent(
-    open: (File) -> FileOutputStream = ::FileOutputStream,
-    syncData: (FileOutputStream) -> Unit = { it.fd.sync() },
-    syncDirectory: (File) -> Unit = { it.syncDirectory() },
+    steps: SaveSteps = SaveSteps(),
     warn: (String) -> Unit = { logW(it) },
     write: (FileOutputStream) -> Unit,
 ) {
     val beside = replacement
-    open(beside).use { out ->
+    steps.open(beside).use { out ->
         write(out)
-        syncData(out)
+        steps.syncData(out)
     }
     if (!beside.renameTo(this)) throw IOException("could not rename ${beside.name} to $name")
     try {
-        syncDirectory(absoluteFile.parentFile!!)
+        steps.syncDirectory(absoluteFile.parentFile!!)
     } catch (e: Exception) {
         warn("$name is saved, but its directory could not be forced to storage: ${e.javaClass.simpleName}: ${e.message}")
     }
 }
+
+/**
+ * The steps of a save that touch storage, in the order [replaceContent] takes them. The values
+ * here are the real ones, and the only place they are written down: every file the app saves
+ * gets them from here. A test makes one with a step of its own.
+ */
+class SaveSteps(
+    /** Opens the file beside the one to replace. */
+    val open: (File) -> FileOutputStream = ::FileOutputStream,
+    /** Forces what was written to that file to storage. */
+    val syncData: (FileOutputStream) -> Unit = { it.fd.sync() },
+    /** Forces the directory to storage, after the rename. */
+    val syncDirectory: (File) -> Unit = { it.syncDirectory() },
+)
 
 /**
  * Forces this directory to storage: the names in it, so a file that was just renamed into place

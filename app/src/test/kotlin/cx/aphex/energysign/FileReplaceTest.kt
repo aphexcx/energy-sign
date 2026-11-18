@@ -1,14 +1,32 @@
 package cx.aphex.energysign
 
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
-import kotlin.test.assertTrue
+
+/**
+ * A file whose descriptor is closed as soon as something has been written to it. Whoever then
+ * really forces it to storage fails; whoever only says so does not notice. That is how a test
+ * can tell that the production step is the real one.
+ */
+class ClosesAfterWrite(file: File) : FileOutputStream(file) {
+    override fun write(b: ByteArray) {
+        super.write(b)
+        close()
+    }
+
+    override fun write(b: ByteArray, off: Int, len: Int) {
+        super.write(b, off, len)
+        close()
+    }
+}
 
 /**
  * The one sequence every saved file goes through ([replaceContent]): the data to storage, the
@@ -25,15 +43,19 @@ class FileReplaceTest {
     private fun state(): String =
         "beside " + (if (beside.exists()) beside.readText() else null) + ", in place " + (if (file.exists()) file.readText() else null)
 
+    // ---- the order of the steps (with steps of the test's own, to look from inside them)
+
     @Test
     fun `the data is forced to storage, then the file is renamed, then the directory is forced to storage`() {
         file.writeText("old")
-        val steps = mutableListOf<String>()
+        val seen = mutableListOf<String>()
 
         file.replaceContent(
-            syncData = { out -> steps += "data: " + state(); out.fd.sync() },
-            syncDirectory = { directory -> steps += "directory ${directory.canonicalFile == dir.canonicalFile}: " + state() },
-            warn = { steps += "warned: $it" },
+            SaveSteps(
+                syncData = { seen += "data: " + state() },
+                syncDirectory = { directory -> seen += "directory ${directory.canonicalFile == dir.canonicalFile}: " + state() },
+            ),
+            warn = { seen += "warned: $it" },
         ) { it.write("new".toByteArray()) }
 
         assertEquals(
@@ -41,33 +63,34 @@ class FileReplaceTest {
                 "data: beside new, in place old",
                 "directory true: beside null, in place new",
             ),
-            steps
+            seen
         )
     }
 
     @Test
     fun `a first save has the same three steps`() {
-        val steps = mutableListOf<String>()
+        val seen = mutableListOf<String>()
 
         file.replaceContent(
-            syncData = { steps += "data: " + state() },
-            syncDirectory = { steps += "directory: " + state() },
+            SaveSteps(syncData = { seen += "data: " + state() }, syncDirectory = { seen += "directory: " + state() }),
         ) { it.write("new".toByteArray()) }
 
-        assertEquals(listOf("data: beside new, in place null", "directory: beside null, in place new"), steps)
+        assertEquals(listOf("data: beside new, in place null", "directory: beside null, in place new"), seen)
     }
 
     @Test
     fun `the lines of a message file go the same way, the directory last`() {
         file.writeText("old\n")
-        val steps = mutableListOf<String>()
+        val seen = mutableListOf<String>()
 
-        file.replaceWith(listOf("one", "two"), syncDirectory = { steps += "directory: " + state() })
+        file.replaceWith(listOf("one", "two"), SaveSteps(syncDirectory = { seen += "directory: " + state() }))
 
         val twoLines = "one" + System.lineSeparator() + "two" + System.lineSeparator()
-        assertEquals(listOf("directory: beside null, in place $twoLines"), steps)
+        assertEquals(listOf("directory: beside null, in place $twoLines"), seen)
         assertEquals(listOf("one", "two"), file.readLines())
     }
+
+    // ---- a step that fails
 
     @Test
     fun `a directory that cannot be forced to storage is reported and the save is done`() {
@@ -75,7 +98,7 @@ class FileReplaceTest {
         val warnings = mutableListOf<String>()
 
         file.replaceContent(
-            syncDirectory = { throw IOException("not supported here") },
+            SaveSteps(syncDirectory = { throw IOException("not supported here") }),
             warn = { warnings += it },
         ) { it.write("new".toByteArray()) } // does not throw
 
@@ -90,7 +113,7 @@ class FileReplaceTest {
     fun `the default report of that goes to the log and the save is still done`() {
         file.writeText("old")
 
-        file.replaceWith(listOf("new"), syncDirectory = { throw IOException("not supported here") })
+        file.replaceWith(listOf("new"), SaveSteps(syncDirectory = { throw IOException("not supported here") }))
 
         assertEquals(listOf("new"), file.readLines())
     }
@@ -102,8 +125,7 @@ class FileReplaceTest {
 
         assertFailsWith<IOException> {
             file.replaceContent(
-                syncData = { throw IOException("no space left") },
-                syncDirectory = { directorySynced = true },
+                SaveSteps(syncData = { throw IOException("no space left") }, syncDirectory = { directorySynced = true }),
             ) { it.write("new".toByteArray()) }
         }
 
@@ -125,6 +147,73 @@ class FileReplaceTest {
         assertEquals("old", file.readText())
     }
 
+    // ---- the PRODUCTION steps: nothing of the test's own stands in the step under test
+
+    @Test
+    fun `the production data step really forces the file, a descriptor that is gone fails the save before the rename`() {
+        file.writeText("old")
+        var directorySynced = false
+
+        // only the way the file is opened is the test's; the data step is the default one
+        assertFailsWith<IOException> {
+            file.replaceContent(SaveSteps(open = ::ClosesAfterWrite, syncDirectory = { directorySynced = true })) {
+                it.write("new".toByteArray())
+            }
+        }
+
+        assertEquals("old", file.readText(), "nothing was renamed")
+        assertFalse(directorySynced)
+    }
+
+    @Test
+    fun `the same for the lines of a message file`() {
+        file.writeText("old\n")
+
+        assertFailsWith<IOException> { file.replaceWith(listOf("new"), open = ::ClosesAfterWrite) }
+
+        assertEquals(listOf("old"), file.readLines())
+    }
+
+    @Test
+    fun `the production directory step really opens the directory, one that may not be read is reported and the save is done`() {
+        file.writeText("old")
+        val warnings = mutableListOf<String>()
+        // Without the right to read it a directory can still take a new file and a rename,
+        // but it cannot be opened to be forced to storage.
+        assumeTrue(dir.setReadable(false, false) && !dir.canRead(), "this user can read every directory (root?)")
+        try {
+            // every step is the default one
+            file.replaceContent(warn = { warnings += it }) { it.write("new".toByteArray()) }
+        } finally {
+            dir.setReadable(true, false)
+        }
+
+        assertEquals("new", file.readText(), "the save is done")
+        assertFalse(beside.exists())
+        assertEquals(1, warnings.size, warnings.toString())
+        assertContains(warnings.single(), "list.txt")
+        assertContains(warnings.single(), "could not be forced to storage")
+    }
+
+    @Test
+    fun `the same for the lines of a message file, where the report goes to the log`() {
+        val messages = File(dir, "messages-of-this-test.txt")
+        messages.writeText("old\n")
+        val logged = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val watching = ScreenLogger.logLines.subscribe { line -> if ("messages-of-this-test.txt" in line) logged += line }
+        assumeTrue(dir.setReadable(false, false) && !dir.canRead(), "this user can read every directory (root?)")
+        try {
+            messages.replaceWith(listOf("new")) // every step is the default one
+        } finally {
+            dir.setReadable(true, false)
+            watching.dispose()
+        }
+
+        assertEquals(listOf("new"), messages.readLines())
+        assertEquals(1, logged.size, logged.toString())
+        assertContains(logged.single(), "could not be forced to storage")
+    }
+
     @Test
     fun `a real directory can be forced to storage, one that is not there cannot`() {
         dir.syncDirectory() // does not throw on this machine
@@ -133,13 +222,13 @@ class FileReplaceTest {
     }
 
     @Test
-    fun `the real steps, all three, on a real directory`() {
+    fun `the production steps, all three, on a real directory`() {
         val warnings = mutableListOf<String>()
 
         file.replaceContent(warn = { warnings += it }) { it.write("new".toByteArray()) }
 
         assertEquals("new", file.readText())
         assertEquals(emptyList(), warnings)
-        assertTrue(dir.list()!!.toList() == listOf("list.txt"))
+        assertEquals(listOf("list.txt"), dir.list()!!.toList())
     }
 }

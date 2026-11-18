@@ -3,6 +3,9 @@ package cx.aphex.energysign.message
 import cx.aphex.energysign.message.Message.ColorMessage.ChonkySlide
 import cx.aphex.energysign.message.Message.ColorMessage.IconInvaders
 import cx.aphex.energysign.message.Message.ColorMessage.OneByOneMessage
+import cx.aphex.energysign.ClosesAfterWrite
+import cx.aphex.energysign.SaveSteps
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
@@ -70,8 +73,10 @@ class AdStoreTest {
         val steps = mutableListOf<String>()
         val store = AdStore(
             dir,
-            syncData = { out -> steps += "data: " + files(); out.fd.sync() },
-            syncDirectory = { directory -> steps += "directory ${directory.name == dir.name}: " + files() },
+            steps = SaveSteps(
+                syncData = { steps += "data: " + files() },
+                syncDirectory = { directory -> steps += "directory ${directory.name == dir.name}: " + files() },
+            ),
         )
 
         store.saveAds(listOf(IconInvaders.EDC(0x04ff19)))
@@ -92,7 +97,7 @@ class AdStoreTest {
     fun `every save takes both steps once, the period too`() {
         var data = 0
         var directory = 0
-        val store = AdStore(dir, syncData = { out -> data++; out.fd.sync() }, syncDirectory = { directory++ })
+        val store = AdStore(dir, steps = SaveSteps(syncData = { data++ }, syncDirectory = { directory++ }))
 
         store.saveAds(someAds)
         assertEquals(1 to 1, data to directory)
@@ -109,8 +114,7 @@ class AdStoreTest {
         var directorySynced = false
         val store = AdStore(
             dir,
-            syncData = { throw java.io.IOException("no space left") },
-            syncDirectory = { directorySynced = true },
+            steps = SaveSteps(syncData = { throw java.io.IOException("no space left") }, syncDirectory = { directorySynced = true }),
         )
 
         assertFailsWith<java.io.IOException> { store.saveAds(emptyList()) }
@@ -124,7 +128,7 @@ class AdStoreTest {
     fun `when the directory cannot be forced to storage the save is done all the same, and that is reported`() {
         AdStore(dir).saveAds(someAds)
         val warnings = mutableListOf<String>()
-        val store = AdStore(dir, warn = { warnings += it }, syncDirectory = { throw java.io.IOException("not today") })
+        val store = AdStore(dir, warn = { warnings += it }, steps = SaveSteps(syncDirectory = { throw java.io.IOException("not today") }))
 
         store.saveAds(emptyList()) // does not throw
         store.savePeriod(7)
@@ -137,6 +141,66 @@ class AdStoreTest {
         assertContains(warnings[0], "ads.json")
         assertContains(warnings[0], "not today")
         assertContains(warnings[1], "ad-period.txt")
+    }
+
+    // ---- the PRODUCTION steps: nothing of the test's own stands in the step under test
+
+    @Test
+    fun `the ads and the period are really forced to storage, a descriptor that is gone fails the save and the old file stays`() {
+        AdStore(dir).saveAds(someAds)
+        AdStore(dir).savePeriod(3)
+        val oldAds = adsFile.readText()
+        // only the way the file is opened is the test's; the data step is the app's
+        val store = AdStore(dir, steps = SaveSteps(open = ::ClosesAfterWrite))
+
+        assertFailsWith<java.io.IOException> { store.saveAds(emptyList()) }
+        assertFailsWith<java.io.IOException> { store.savePeriod(9) }
+
+        assertEquals(oldAds, adsFile.readText())
+        assertEquals("3", periodFile.readText())
+        assertEquals(3, AdStore(dir).loadPeriod())
+    }
+
+    @Test
+    fun `a directory that cannot be opened to be forced is reported by the app's own step, and the ads are saved`() {
+        AdStore(dir).saveAds(someAds)
+        val warnings = mutableListOf<String>()
+        assumeTrue(dir.setReadable(false, false) && !dir.canRead(), "this user can read every directory (root?)")
+        try {
+            // every step is the app's
+            AdStore(dir, warn = { warnings += it }).saveAds(emptyList())
+        } finally {
+            dir.setReadable(true, false)
+        }
+
+        assertEquals("[]", adsFile.readText())
+        assertEquals(1, warnings.size, warnings.toString())
+        assertContains(warnings.single(), "ads.json")
+    }
+
+    // ---- a damaged file
+
+    @Test
+    fun `a file with a byte that is not UTF-8 is unreadable, not read with the byte taken out`() {
+        // a good list, but for one byte inside the text: 41 FF 42
+        val good = """[{"dly":1000,"str":"AB","type":"O","b":3,"g":2,"r":1}]""".toByteArray()
+        val at = String(good).indexOf("AB") + 1
+        val damaged = good.copyOfRange(0, at) + 0xFF.toByte() + good.copyOfRange(at, good.size)
+        adsFile.writeBytes(damaged)
+
+        val saved = assertIs<AdStore.SavedAds.Unreadable>(AdStore(dir).loadAds())
+
+        assertContains(saved.why, "UTF-8")
+        assertEquals(damaged.toList(), adsFile.readBytes().toList(), "the file is left as it is")
+    }
+
+    @Test
+    fun `text that is UTF-8 beyond ASCII is read, and held to the text rule`() {
+        adsFile.writeText("""[{"dly":1000,"str":"CAF\u00c9 é OK","type":"O","b":3,"g":2,"r":1}]""")
+
+        val saved = assertIs<AdStore.SavedAds.Ads>(AdStore(dir).loadAds())
+
+        assertEquals("CAF  OK", saved.ads.single().str)
     }
 
     @Test

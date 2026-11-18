@@ -544,10 +544,35 @@ class MessageManagerOwnerTest {
         assertEquals("[]", restarted.adsFile.readText())
         repeat(3) { assertTrue(restarted.manager.getNextMessage() is Message.Starfield, "the defaults do not come back") }
 
-        // and a message that arrives is shown
+        // and a message that arrives is shown at once: its announcement, then the message, and no starfield before them
         restarted.manager.processNewUserMessage("HELLO")
         ownerRuns()
-        assertTrue((1..3).map { restarted.manager.getNextMessage() }.any { it.str == "HELLO" })
+        val next = (1..3).map { restarted.manager.getNextMessage() }
+        assertSame(Message.CountDownAnnouncement.NewMessageAnnouncement, next[0])
+        assertTrue(next[1] is Message.Marquee.User)
+        assertEquals("HELLO", next[1].str)
+        assertEquals("HELLO", next[2].str, "the one stored message comes round again")
+    }
+
+    @Test
+    fun `an ad list that is only the place of a track, with no track and no messages, gets a starfield too`() {
+        val filesDir = newFilesDir()
+        val app = App(filesDir)
+        app.phone("!$A\n\uD83D\uDEE4")
+        ownerRuns()
+        app.saverRuns()
+        assertEquals("""[{"str":"","type":"T"}]""", app.adsFile.readText())
+
+        // the ad list is not empty, and still there is nothing to show
+        repeat(3) { assertTrue(app.manager.getNextMessage() is Message.Starfield) }
+
+        val restarted = App(filesDir)
+        repeat(3) { assertTrue(restarted.manager.getNextMessage() is Message.Starfield) }
+
+        restarted.manager.processNewUserMessage("HELLO")
+        ownerRuns()
+        assertSame(Message.CountDownAnnouncement.NewMessageAnnouncement, restarted.manager.getNextMessage())
+        assertEquals("HELLO", restarted.manager.getNextMessage().str)
     }
 
     @Test
@@ -734,6 +759,23 @@ class MessageManagerOwnerTest {
         app.unsaved.removeAt(0).run()
         assertEquals("6", app.periodFile.readText())
         assertEquals(listOf("ONE", "TWO", "THREE"), File(app.home, "signstrings.txt").readLines())
+    }
+
+    @Test
+    fun `the line of a track holds only what the sign can show, in the ad round and in the announcement`() {
+        // a bell in the artist; a NUL and a vertical tab in the title: the tab is a thin space and stays
+        val app = App(newFilesDir())
+        app.manager.processNowPlayingTrack(BeatLinkTrack(id = 2, title = "A\u0000B\u000bC", artist = "D\u0007J"))
+        ownerRuns()
+        app.phone("!$A\n\uD83D\uDEE4")
+        ownerRuns()
+
+        // the ad round (CURRENT, TRACK:, the track), then the announcement (NOW PLAYING, the track, stars)
+        val sent = (1..6).map { com.google.gson.JsonParser.parseString(frameFor(app)).asJsonObject }
+
+        assertEquals(listOf("O", "O", "T", "F", "T", "S"), sent.map { it["type"].asString })
+        assertEquals("DJ - AB\u000bC", sent[2]["str"].asString, "the line in the ad round")
+        assertEquals("DJ - AB\u000bC", sent[4]["str"].asString, "the line of the announcement")
     }
 
     @Test

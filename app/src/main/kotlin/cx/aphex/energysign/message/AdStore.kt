@@ -1,10 +1,12 @@
 package cx.aphex.energysign.message
 
+import cx.aphex.energysign.SaveSteps
 import cx.aphex.energysign.replaceContent
-import cx.aphex.energysign.syncDirectory
 import java.io.File
-import java.io.FileOutputStream
 import java.io.IOException
+import java.nio.ByteBuffer
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.CodingErrorAction
 
 /**
  * What the app keeps about ads across a restart, in [dir] (the app's files directory):
@@ -17,9 +19,8 @@ class AdStore(
     private val dir: File,
     /** Gets one line when a save is in place but its directory could not be forced to storage. */
     private val warn: (String) -> Unit = {},
-    /** The two steps that force a save to storage. A test puts itself in here to see when each is asked for. */
-    private val syncData: (FileOutputStream) -> Unit = { it.fd.sync() },
-    private val syncDirectory: (File) -> Unit = { it.syncDirectory() },
+    /** The steps of a save that touch storage: the app's real ones, unless a test stands in one. */
+    private val steps: SaveSteps = SaveSteps(),
 ) {
 
     /** What [loadAds] found. */
@@ -41,9 +42,11 @@ class AdStore(
     fun loadAds(note: (String) -> Unit = {}): SavedAds {
         if (!adsFile.exists()) return SavedAds.NoFile
         return try {
-            SavedAds.Ads(AdCodec.decode(adsFile.readText(), note))
+            SavedAds.Ads(AdCodec.decode(adsFile.readUtf8(), note))
         } catch (e: AdFileException) {
             SavedAds.Unreadable(e.message ?: "no reason given")
+        } catch (e: CharacterCodingException) {
+            SavedAds.Unreadable("not UTF-8 text: the file is damaged")
         } catch (e: Throwable) {
             // Whatever else goes wrong here, an Error included, must not stop the app from starting.
             SavedAds.Unreadable("${e.javaClass.simpleName}: ${e.message}")
@@ -68,7 +71,19 @@ class AdStore(
     }
 
     private fun File.replaceWith(text: String) =
-        replaceContent(syncData = syncData, syncDirectory = syncDirectory, warn = warn) { it.write(text.toByteArray()) }
+        replaceContent(steps, warn) { it.write(text.toByteArray()) }
+
+    /**
+     * The text of this file, which must be UTF-8 through and through. (readText would put a
+     * replacement character where a byte is wrong, and a damaged file would pass for a good one.)
+     */
+    @Throws(IOException::class)
+    private fun File.readUtf8(): String =
+        Charsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(readBytes()))
+            .toString()
 
     companion object {
         const val ADS_FILE_NAME = "ads.json"
