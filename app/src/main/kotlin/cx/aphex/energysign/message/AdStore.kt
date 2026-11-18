@@ -47,14 +47,7 @@ class AdStore(
     }
 
     @Throws(IOException::class)
-    fun saveAds(ads: List<Message>) = saveEncodedAds(AdCodec.encode(ads))
-
-    /**
-     * Writes [json], the text [AdCodec.encode] made of the ad list. For a caller that owns the
-     * list on one thread and writes on another: it encodes there and only the disk is touched here.
-     */
-    @Throws(IOException::class)
-    fun saveEncodedAds(json: String) = adsFile.replaceWith(json)
+    fun saveAds(ads: List<Message>) = adsFile.replaceWith(AdCodec.encode(ads))
 
     /** The saved ad period, null when none was saved or what is there is not a period. */
     fun loadPeriod(): Int? =

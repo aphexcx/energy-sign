@@ -698,6 +698,44 @@ class MessageManagerOwnerTest {
         )
     }
 
+    @Test
+    fun `the saver keeps only the newest message list, and every ad save and period save beside it`() {
+        // The message list has one place at the saver, where a newer list takes the place of one
+        // that is waiting. Ad saves and period saves do not share that place: each is a job of
+        // its own, in the order it was asked for.
+        val app = App(newFilesDir())
+        app.phone("!$A\n${CL}FIRST")   // an ad save
+        app.phone("ONE")               // a message save
+        app.phone("!A4")               // a period save
+        app.phone("TWO")               // a message save: takes the place of the one waiting
+        app.phone("!$A\n${CL}SECOND")  // an ad save
+        app.phone("!A6")               // a period save
+        app.phone("THREE")             // a message save, again in the one place
+        ownerRuns()
+
+        // ad, the message list (one job for the three saves), period, ad, period
+        assertEquals(5, app.unsaved.size)
+
+        app.unsaved.removeAt(0).run()
+        assertEquals(listOf("FIRST"), AdCodec.decode(app.adsFile.readText()).map { it.str })
+        assertTrue(!app.periodFile.exists())
+
+        app.unsaved.removeAt(0).run()
+        assertEquals(listOf("ONE", "TWO", "THREE"), File(app.home, "signstrings.txt").readLines(), "the newest list, whole")
+        assertEquals(listOf("FIRST"), AdCodec.decode(app.adsFile.readText()).map { it.str }, "a message save writes no ad file")
+
+        app.unsaved.removeAt(0).run()
+        assertEquals("4", app.periodFile.readText())
+
+        app.unsaved.removeAt(0).run()
+        assertEquals(listOf("SECOND"), AdCodec.decode(app.adsFile.readText()).map { it.str })
+        assertEquals("4", app.periodFile.readText())
+
+        app.unsaved.removeAt(0).run()
+        assertEquals("6", app.periodFile.readText())
+        assertEquals(listOf("ONE", "TWO", "THREE"), File(app.home, "signstrings.txt").readLines())
+    }
+
     /** One request of the sign, answered by the real responder: the text that goes out on the wire. */
     private fun frameFor(app: App): String {
         var frame: String? = null
