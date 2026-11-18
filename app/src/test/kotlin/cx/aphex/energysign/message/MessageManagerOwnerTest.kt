@@ -404,4 +404,208 @@ class MessageManagerOwnerTest {
         }
         assertEquals("1/5 MESSAGE 1", shown())
     }
+
+    // ---- ads: the command, the restart, the period (PR 5)
+
+    /**
+     * The app as it is after a start on [home], its files directory: a MessageManager of its own, with its own
+     * lists and its own saver (run by hand), on the owner of this test. Building a second one
+     * on the same directory is a restart.
+     */
+    private inner class App(val home: File) {
+        val unsaved = mutableListOf<Runnable>()
+        val repo = MessageRepository(saver = Executor { unsaved += it })
+        val manager: MessageManager
+
+        init {
+            // (a MessageManager takes the keyboard's Enter for itself; the one of this test keeps it)
+            val submitted = KeyboardManager.onSubmitted
+            manager = MessageManager(
+                object : ContextWrapper(null) {
+                    override fun getFilesDir(): File = home
+                },
+                repo,
+                owner,
+            )
+            KeyboardManager.onSubmitted = submitted
+        }
+
+        fun phone(command: String) = manager.processNewBytes(command.toByteArray())
+        fun saverRuns() {
+            while (unsaved.isNotEmpty()) unsaved.removeAt(0).run()
+        }
+
+        val adsFile get() = File(home, "ads.json")
+        val periodFile get() = File(home, "ad-period.txt")
+    }
+
+    private fun newFilesDir(): File = Files.createTempDirectory(dir.toPath(), "ads").toFile()
+
+    private val A = "🅰" // the A button: the ad command
+    private val CL = "🆑" // a chonky ad
+    private val O = "🅾" // a one-by-one ad
+    private val CLOCK = "🕰"
+    private val INVADER = "👾"
+
+    @Test
+    fun `an ad command changes nothing until the owner runs it, then the next requests get the ads`() {
+        val app = App(newFilesDir())
+
+        app.phone("!$A\n${CL}I <3 U\n$O$CLOCK${CLOCK}BYE")
+        assertEquals(0, app.repo.oneTimeMessages.size)
+
+        ownerRuns()
+        val first = app.manager.getNextMessage()
+        val second = app.manager.getNextMessage()
+
+        assertTrue(first is Message.ColorMessage.ChonkySlide)
+        assertEquals("I ${Message.HEART} U", first.str)
+        assertTrue(second is Message.ColorMessage.OneByOneMessage)
+        assertEquals("BYE", second.str)
+        assertEquals(3000, (second as Message.ColorMessage.OneByOneMessage).delayMs.toInt())
+    }
+
+    @Test
+    fun `the owner writes no ad file, the saver does, and the file is whole or not there`() {
+        val app = App(newFilesDir())
+
+        app.phone("!$A\n${CL}HELLO")
+        ownerRuns()
+
+        assertEquals(1, app.unsaved.size)
+        assertTrue(!app.adsFile.exists(), "nothing on disk before the saver runs")
+
+        app.saverRuns()
+
+        assertEquals(listOf("HELLO"), AdCodec.decode(app.adsFile.readText()).map { it.str })
+        assertTrue(app.home.list()!!.none { it.endsWith(".new") })
+    }
+
+    @Test
+    fun `a later change to the ads does not get into an earlier save`() {
+        val app = App(newFilesDir())
+
+        app.phone("!$A\n${CL}FIRST")
+        ownerRuns()
+        app.phone("!$A\n${CL}SECOND")
+        ownerRuns()
+        assertEquals(2, app.unsaved.size)
+
+        app.unsaved.removeAt(0).run()
+        assertEquals(listOf("FIRST"), AdCodec.decode(app.adsFile.readText()).map { it.str })
+        app.saverRuns()
+        assertEquals(listOf("SECOND"), AdCodec.decode(app.adsFile.readText()).map { it.str })
+    }
+
+    @Test
+    fun `the ads that were set are shown again after a restart`() {
+        val filesDir = newFilesDir()
+        App(filesDir).run {
+            phone("!$A\n${CL}HELLO\n$O${CLOCK}WORLD\n$INVADER")
+            ownerRuns()
+            saverRuns()
+        }
+
+        val restarted = App(filesDir)
+
+        // nothing stored and nothing queued: a request gets the ad round
+        val shown = (1..3).map { restarted.manager.getNextMessage() }
+        assertTrue(shown[0] is Message.ColorMessage.ChonkySlide)
+        assertEquals("HELLO", shown[0].str)
+        assertTrue(shown[1] is Message.ColorMessage.OneByOneMessage)
+        assertEquals("WORLD", shown[1].str)
+        assertEquals(2000, (shown[1] as Message.ColorMessage.OneByOneMessage).delayMs.toInt())
+        assertTrue(shown[2] is Message.ColorMessage.IconInvaders.Enemy1)
+        assertEquals(emptyList(), restarted.unsaved, "starting writes nothing")
+    }
+
+    @Test
+    fun `a first start shows the default ads and writes no file`() {
+        val app = App(newFilesDir())
+
+        assertTrue(app.manager.getNextMessage() is Message.ColorMessage.IconInvaders.Enemy1)
+        assertTrue(app.manager.getNextMessage() is Message.ColorMessage.IconInvaders.Enemy2)
+        assertTrue(!app.adsFile.exists())
+        assertEquals(emptyList(), app.unsaved)
+    }
+
+    @Test
+    fun `with no ads and no messages a request is answered with a starfield, before and after a restart`() {
+        val filesDir = newFilesDir()
+        val app = App(filesDir)
+        app.phone("!$A") // the ad list emptied on purpose
+        ownerRuns()
+        app.saverRuns()
+        assertEquals(0, app.repo.marqueeMessages.size)
+
+        repeat(3) { assertTrue(app.manager.getNextMessage() is Message.Starfield) }
+
+        val restarted = App(filesDir)
+        assertEquals("[]", restarted.adsFile.readText())
+        repeat(3) { assertTrue(restarted.manager.getNextMessage() is Message.Starfield, "the defaults do not come back") }
+
+        // and a message that arrives is shown
+        restarted.manager.processNewUserMessage("HELLO")
+        ownerRuns()
+        assertTrue((1..3).map { restarted.manager.getNextMessage() }.any { it.str == "HELLO" })
+    }
+
+    @Test
+    fun `an ad file that cannot be read gives the default ads and is left as it is`() {
+        val filesDir = newFilesDir()
+        val broken = "[{\"str\":\"CUT OFF\",\"ty"
+        File(filesDir, "ads.json").writeText(broken)
+
+        val app = App(filesDir)
+
+        assertTrue(app.manager.getNextMessage() is Message.ColorMessage.IconInvaders.Enemy1)
+        assertEquals(broken, app.adsFile.readText())
+        assertEquals(emptyList(), app.unsaved)
+    }
+
+    private fun adEveryFlash(app: App): String? =
+        app.repo.oneTimeMessages.filterIsInstance<Message.FlashingAnnouncement>().singleOrNull()?.str
+
+    @Test
+    fun `the ad period is set by the owner, written by the saver and there again after a restart`() {
+        val filesDir = newFilesDir()
+        val app = App(filesDir)
+
+        app.phone("!A3")
+        assertNull(adEveryFlash(app))
+        ownerRuns()
+
+        assertEquals("AD EVERY=3", adEveryFlash(app))
+        assertTrue(!app.periodFile.exists(), "nothing on disk before the saver runs")
+        app.saverRuns()
+        assertEquals("3", app.periodFile.readText())
+
+        // a restart: a refused period shows the value that stays, which is the restored one
+        val restarted = App(filesDir)
+        restarted.phone("!A0")
+        ownerRuns()
+        assertEquals("AD EVERY=3", adEveryFlash(restarted))
+    }
+
+    @Test
+    fun `a period of zero or less is refused, nothing is saved and the next messages are still served`() {
+        val app = App(newFilesDir())
+        app.repo.marqueeMessages.addAll((1..3).map { Message.Marquee.User("MESSAGE $it") })
+
+        app.phone("!A0")
+        ownerRuns()
+        assertEquals("AD EVERY=8", adEveryFlash(app))
+        app.repo.oneTimeMessages.clear()
+        app.phone("!A-2")
+        ownerRuns()
+        assertEquals("AD EVERY=8", adEveryFlash(app))
+        app.repo.oneTimeMessages.clear()
+
+        assertEquals(emptyList(), app.unsaved)
+        // with a period of 0 the first stored message threw (a division by zero)
+        assertEquals(
+            listOf("MESSAGE 1", "MESSAGE 2", "MESSAGE 3", "MESSAGE 1"),
+            (1..4).map { app.manager.getNextMessage().str }
+        )
+    }
 }

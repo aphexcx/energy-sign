@@ -49,6 +49,16 @@ class AdStoreTest {
     }
 
     @Test
+    fun `a list saved as the text the codec made of it comes back the same`() {
+        AdStore(dir).saveEncodedAds(AdCodec.encode(someAds))
+
+        val saved = assertIs<AdStore.SavedAds.Ads>(AdStore(dir).loadAds())
+
+        assertEquals(wire(someAds), wire(saved.ads))
+        assertEquals(listOf("ads.json"), dir.list()!!.toList())
+    }
+
+    @Test
     fun `an ad list emptied on purpose stays empty after a restart`() {
         AdStore(dir).saveAds(someAds)
         AdStore(dir).saveAds(emptyList())
