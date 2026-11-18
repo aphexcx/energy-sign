@@ -289,6 +289,12 @@ class MessageManager(
             return it
         }
 
+        // Nothing at all to show: no user message, and the ad list was emptied on purpose (it now
+        // stays empty across a restart). The sign still gets an answer, not an exception.
+        if (msgRepo.marqueeMessages.isEmpty()) {
+            return Message.Starfield()
+        }
+
         // Fallthrough to regular marquee mode; display next user message
         val idx = getIdxAndAdvance()
         val currentMsg: Message.Marquee = msgRepo.marqueeMessages[idx]
