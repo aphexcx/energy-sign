@@ -13,7 +13,8 @@ import java.time.format.DateTimeFormatter
  * Android 8.1 gives an app no sign that network time has arrived. But every response of the API
  * carries the server's time in its `Date` header, over TLS. That time is taken here, and from
  * then on the time is "what the server said, plus what has passed since", whatever the device's
- * own clock does.
+ * own clock does. The time is true or absent: a response that is not the API's, or not fresh,
+ * tells it nothing (see [syncFromHeaders]).
  */
 class ServerClock(
     /** A clock that only counts (milliseconds since some start), untouched by the wall clock. */
@@ -24,14 +25,30 @@ class ServerClock(
     @Volatile
     private var anchor: Anchor? = null
 
-    /** A response arrived just now and its `Date` header said [serverTime]. */
-    fun sync(serverTime: Instant) {
-        anchor = Anchor(serverTime, monotonicMs())
+    /**
+     * This moment, on the clock that only counts: taken when a response ARRIVES, and handed to
+     * [syncFromHeaders] once the response has been read and recognised. Reading it can take
+     * seconds (the first one after a start), and the time must not run behind by that.
+     */
+    fun arrival(): Long = monotonicMs()
+
+    /** A response arrived at [arrivedAtMs] (by [arrival]; now when not given) and its `Date` header said [serverTime]. */
+    fun sync(serverTime: Instant, arrivedAtMs: Long? = null) {
+        anchor = Anchor(serverTime, arrivedAtMs ?: monotonicMs())
     }
 
-    /** Takes the time from the `Date` header of a response, when there is one that can be read. */
-    fun syncFromDateHeader(value: String?) {
-        parseHttpDate(value)?.let(::sync)
+    /**
+     * Takes the time from the headers of a response, when it tells the time of NOW: a `Date`
+     * that can be read, and no `Age` that says the response has been kept somewhere (a cache
+     * hands out the `Date` of the moment it stored the response). An `Age` of 0 is fresh; one
+     * that cannot be read counts as old.
+     *
+     * The caller answers for the rest: it calls this only for a response it has read and
+     * recognised as the API's own.
+     */
+    fun syncFromHeaders(date: String?, age: String?, arrivedAtMs: Long? = null) {
+        if (age != null && age.trim().toLongOrNull() != 0L) return
+        parseHttpDate(date)?.let { sync(it, arrivedAtMs) }
     }
 
     /** The time now, or null as long as no server has told it. */

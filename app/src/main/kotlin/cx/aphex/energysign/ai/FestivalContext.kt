@@ -47,11 +47,7 @@ object FestivalContext {
 
         val lines = mutableListOf("Current local time: ${now.dayAndDate(zone)}, ${now.clock(zone)} (${zone.id}).")
         if (table != null) {
-            val sets = table.sets.mapNotNull { set ->
-                val start = resolve(set.start, zone, after = null)
-                val end = resolve(set.end, zone, after = start)
-                if (end.isAfter(start)) Timed(set, start, end) else null
-            }
+            val sets = table.sets.mapNotNull { set -> set.interval(zone)?.let { (start, end) -> Timed(set, start, end) } }
             if (sets.isNotEmpty()) lines += festivalLines(now, zone, table, sets)
         }
         return lines.joinToString("\n")
@@ -138,7 +134,9 @@ object FestivalContext {
 
     /**
      * One line a stage, in the order the stages come in the table: every stage that has a set
-     * on now or a set in today's schedule. Who is on and who is next are looked up in ALL sets.
+     * on now, a set in today's schedule, or a set still to come (a stage that only opens
+     * tomorrow is named with what comes next on it). Who is on and who is next are looked up in
+     * ALL sets.
      */
     private fun nowAndNext(
         now: Instant,
@@ -148,8 +146,8 @@ object FestivalContext {
         todays: List<Timed>,
         onNow: List<Timed>,
     ): List<String> {
-        val stagesToday = (todays + onNow).map { it.set.stage }.toSet()
-        return sets.map { it.set.stage }.distinct().filter { it in stagesToday }.map { stage ->
+        val stagesToName = (todays + onNow + sets.filter { it.start.isAfter(now) }).map { it.set.stage }.toSet()
+        return sets.map { it.set.stage }.distinct().filter { it in stagesToName }.map { stage ->
             val on = onNow.filter { it.set.stage == stage }.sortedBy { it.start }
             val later = sets.filter { it.set.stage == stage && it.start.isAfter(now) }
             val nextStart = later.minOfOrNull { it.start }

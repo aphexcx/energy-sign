@@ -7,13 +7,25 @@ import com.google.gson.JsonParser
 import java.io.File
 import java.io.IOException
 import java.time.DateTimeException
+import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeParseException
 
 /** One set. [start] and [end] are wall-clock times in the table's zone, with the real calendar date. */
-data class FestivalSet(val stage: String, val artist: String, val start: LocalDateTime, val end: LocalDateTime)
+data class FestivalSet(val stage: String, val artist: String, val start: LocalDateTime, val end: LocalDateTime) {
+    /**
+     * When the set really starts and ends in [zone], or null when it does not end after it
+     * starts. The one place where a set's wall-clock times become instants: the loader and the
+     * prompt both ask here (see [FestivalContext.resolve] for the hours that happen twice or not at all).
+     */
+    fun interval(zone: ZoneId): Pair<Instant, Instant>? {
+        val from = FestivalContext.resolve(start, zone, after = null)
+        val to = FestivalContext.resolve(end, zone, after = from)
+        return if (to.isAfter(from)) from to to else null
+    }
+}
 
 data class SetTimesTable(
     val event: String,
@@ -102,7 +114,7 @@ object SetTimes {
 
         val setsJson = root.get("sets")?.takeIf { it.isJsonArray }?.asJsonArray
             ?: return SetTimesLoad.Unusable("$source has no list of sets")
-        val sets = setsJson.mapNotNull { it.toSetOrNull() }
+        val sets = setsJson.mapNotNull { it.toSetOrNull(zone) }
         if (sets.isEmpty()) return SetTimesLoad.Unusable("$source has no set that can be read")
 
         return SetTimesLoad.Loaded(
@@ -117,14 +129,19 @@ object SetTimes {
         )
     }
 
-    private fun JsonElement.toSetOrNull(): FestivalSet? {
+    /**
+     * A set that ends after it starts, in real time: the two wall-clock times are compared as
+     * the instants they mean in [zone] ([FestivalSet.interval]), not as they are written. In the
+     * hour the clocks go back, a set from the first 1:45 to the second 1:15 is half an hour
+     * long; in the hour they go forward, 2:45 to 3:15 is no time at all.
+     */
+    private fun JsonElement.toSetOrNull(zone: ZoneId): FestivalSet? {
         val set = takeIf { it.isJsonObject }?.asJsonObject ?: return null
         val stage = set.string("stage")?.takeIf { it.isNotBlank() } ?: return null
         val artist = set.string("artist")?.takeIf { it.isNotBlank() } ?: return null
         val start = set.string("start")?.let { parseOrNull { LocalDateTime.parse(it) } } ?: return null
         val end = set.string("end")?.let { parseOrNull { LocalDateTime.parse(it) } } ?: return null
-        if (!end.isAfter(start)) return null
-        return FestivalSet(stage.trim(), artist.trim(), start, end)
+        return FestivalSet(stage.trim(), artist.trim(), start, end).takeIf { it.interval(zone) != null }
     }
 
     /** The string under [name], or null when it is absent or not a string. */

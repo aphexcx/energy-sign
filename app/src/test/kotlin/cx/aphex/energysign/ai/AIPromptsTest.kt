@@ -64,7 +64,20 @@ Here are some rules that are very important to follow:
     fun `with no context block, when the clock cannot be believed, the prompt names no date and no time`() {
         val prompt = AIPrompts.directAnswerSystemPrompt("")
 
-        assertTrue(prompt.trimEnd().endsWith(AIPrompts.SET_TIMES_RULE), prompt)
+        assertTrue(prompt.trimEnd().endsWith(AIPrompts.NO_TIME_RULE), prompt)
         assertFalse(prompt.contains("Current"), prompt)
+    }
+
+    // ---- found by the review of round 3
+
+    @Test
+    fun `with no context block the prompt does not invite the model to say who is playing - it says the time is not known`() {
+        val without = AIPrompts.directAnswerSystemPrompt("")
+        val with = AIPrompts.directAnswerSystemPrompt("Current local time: Friday 2026-11-20, 9:30 pm (America/Los_Angeles).")
+
+        assertFalse(without.contains(AIPrompts.SET_TIMES_RULE), without)
+        assertTrue(without.contains("- You do not know what time it is or who is playing. Do not state a time or a set time."), without)
+        assertTrue(with.contains(AIPrompts.SET_TIMES_RULE), with)
+        assertFalse(with.contains(AIPrompts.NO_TIME_RULE), with)
     }
 }

@@ -370,4 +370,25 @@ class FestivalContextTest {
         assertEquals("- The Dream: ARTBAT until 1:00 am. Next: Das Pharaoh on Saturday at 4:00 pm.", block.lineFor("The Dream"))
         assertFalse(block.contains("Nothing after that") && block.lineFor("The Dream").contains("Nothing after that"), block)
     }
+
+    // ---- every stage that has something to say (a minor of the deep gate)
+
+    @Test
+    fun `a stage that only opens tomorrow is named with what comes next on it, while other stages are on today`() {
+        val withLateStage = table.copy(sets = sets + set("Sunrise Deck", "Tomorrow Only", "2026-11-21T18:00", "2026-11-21T19:00"))
+
+        val block = describe("2026-11-20T21:30", SetTimesLoad.Loaded(withLateStage, "test"))
+
+        assertTrue(block.contains("- Sunrise Deck: nobody right now. Next: Tomorrow Only on Saturday at 6:00 pm."), block)
+        assertTrue(block.contains("- The Dream: Early until 10:00 pm."), block)
+    }
+
+    @Test
+    fun `a stage with nothing on, nothing today and nothing to come is not named`() {
+        val withOldStage = table.copy(sets = sets + set("Preview Tent", "Thursday Only", "2026-11-19T18:00", "2026-11-19T19:00"))
+
+        val block = describe("2026-11-20T21:30", SetTimesLoad.Loaded(withOldStage, "test"))
+
+        assertFalse(block.contains("- Preview Tent"), block)
+    }
 }

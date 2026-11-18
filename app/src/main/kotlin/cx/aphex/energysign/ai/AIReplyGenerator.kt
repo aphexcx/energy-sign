@@ -2,9 +2,38 @@ package cx.aphex.energysign.ai
 
 import java.io.File
 import java.io.IOException
+import java.time.Duration
 
-/** What a generator is asked: the system prompt and the text the person typed. */
-data class AIReplyRequest(val systemPrompt: String, val userText: String)
+/**
+ * The ONE time limit of the work for one query. It is set when the work starts and handed down
+ * to every step: reading the set times, asking for the time, building the client, the request.
+ * No step has a clock of its own that could disagree with it, and nothing stands behind it that
+ * could end a request the provider is still answering.
+ */
+class Deadline private constructor(private val endNanos: Long, private val nanoTime: () -> Long) {
+    /** What is left, in milliseconds; never below zero. */
+    fun remainingMs(): Long = ((endNanos - nanoTime()) / 1_000_000).coerceAtLeast(0)
+
+    /** [limit], or what is left when that is less. */
+    fun atMost(limit: Duration): Duration = Duration.ofMillis(minOf(limit.toMillis(), remainingMs()))
+
+    companion object {
+        fun after(budget: Duration, nanoTime: () -> Long = System::nanoTime): Deadline =
+            Deadline(nanoTime() + budget.toNanos(), nanoTime)
+    }
+}
+
+/**
+ * What a generator is asked: the system prompt and the text the person typed, the [deadline] of
+ * the query it is for, and [stillWanted], which the generator asks as the last thing before the
+ * request goes out: false when the query was deleted in the meantime, and then nothing is sent.
+ */
+data class AIReplyRequest(
+    val systemPrompt: String,
+    val userText: String,
+    val deadline: Deadline = Deadline.after(AIReplyRunner.QUERY_BUDGET),
+    val stillWanted: () -> Boolean = { true },
+)
 
 /** What a generator answers: the reply text, or why there is none. */
 sealed class AIReplyResult {
@@ -29,6 +58,12 @@ enum class NoReplyReason(val askAgain: Boolean, val backOff: Boolean) {
 
     /** There is nothing to ask: the text is blank once it is what the sign can show. Nothing was sent. */
     NOTHING_TO_ASK(askAgain = false, backOff = false),
+
+    /**
+     * The query was not confirmed as still wanted right before the request: it was deleted, or
+     * the owner of the messages did not answer. Nothing was sent.
+     */
+    WITHDRAWN(askAgain = true, backOff = false),
 
     /** The provider declined (stop reason "refusal"), and so did the fallback model. */
     REFUSED(askAgain = false, backOff = false),
@@ -69,14 +104,35 @@ enum class NoReplyReason(val askAgain: Boolean, val backOff: Boolean) {
     /** HTTP 401 or 403: the key is wrong, revoked, or may not use this model. */
     KEY_REJECTED(askAgain = false, backOff = true),
 
-    /** HTTP 400, 404 or 422: the request itself is wrong (a bug here, or a model id that is gone). */
+    /** HTTP 400, 404, 413 or 422: the request itself is wrong (a bug here, or a model id that is gone). */
     REQUEST_REJECTED(askAgain = false, backOff = true),
 
     /** Any other failure the provider's client reports. */
     PROVIDER_ERROR(askAgain = true, backOff = true),
 
     /** Something no generator is expected to throw. Caught at the edge so the app keeps running. */
-    UNEXPECTED_FAILURE(askAgain = true, backOff = true),
+    UNEXPECTED_FAILURE(askAgain = true, backOff = true);
+
+    /**
+     * Whether a request went out at all. When none did, the provider has neither answered nor
+     * failed: such a result says nothing about how the provider is doing.
+     */
+    val nothingWasSent: Boolean get() = this == MISSING_KEY || this == NOTHING_TO_ASK || this == WITHDRAWN
+
+    companion object {
+        /**
+         * What an HTTP status that is not a success means, for both providers. Decided from the
+         * number alone: which exception a client library makes of a status, and what it reads
+         * from the body, change nothing here.
+         */
+        fun forHttpStatus(status: Int): NoReplyReason = when {
+            status == 401 || status == 403 -> KEY_REJECTED
+            status == 400 || status == 404 || status == 413 || status == 422 -> REQUEST_REJECTED
+            status == 429 -> RATE_LIMITED
+            status >= 500 -> SERVER_ERROR
+            else -> PROVIDER_ERROR
+        }
+    }
 }
 
 /**
@@ -88,8 +144,9 @@ interface AIReplyGenerator {
     val name: String
 
     /**
-     * One request to the provider, with its own time limit. It may be interrupted or cancelled
-     * from outside and then ends at once.
+     * One request to the provider, ended by [AIReplyRequest.deadline] at the latest. It returns
+     * when the request has really ended: a caller that stops waiting does not cut it short
+     * (see the generators for what can and cannot be cancelled).
      */
     suspend fun generateReply(request: AIReplyRequest): AIReplyResult
 
@@ -100,8 +157,11 @@ interface AIReplyGenerator {
      */
     fun warmUp() {}
 
-    /** Learns the time from the provider when it is not known yet. Free, quick, and never throws. */
-    fun syncClock() {}
+    /**
+     * Learns the time from a provider when it is not known yet. Free, never throws, and returns
+     * within [limit].
+     */
+    fun syncClock(limit: Duration) {}
 }
 
 /**
@@ -118,9 +178,10 @@ interface AIReplySource {
 
     /**
      * Asks for one reply to [text] and returns at once. [onResult] is called exactly once, on
-     * some other thread, whatever happens.
+     * some other thread, whatever happens. [stillWanted] is asked on that other thread, as the
+     * last thing before the request goes out; when it says no, nothing is sent.
      */
-    fun ask(text: String, onResult: (AIReplyResult) -> Unit)
+    fun ask(text: String, stillWanted: () -> Boolean = { true }, onResult: (AIReplyResult) -> Unit)
 }
 
 /** Which provider writes the replies. One setting: `AI_PROVIDER` in local.properties. */
@@ -149,7 +210,8 @@ enum class AIProvider(val setting: String) {
  *
  * One build setting, `AI_EFFORT` in local.properties, and one file on the device that overrides
  * it without a rebuild: [OVERRIDE_FILE_NAME] in the app's files directory, holding one of the
- * level names. The OpenAI generator does not use it.
+ * level names. The file is read once, when the app starts (see [ReadOnceAtStart]): a change to
+ * it takes effect at the next start. The OpenAI generator does not use it.
  */
 enum class AIEffort(val setting: String) {
     LOW("low"),
@@ -175,10 +237,11 @@ enum class AIEffort(val setting: String) {
         }
 
         /**
-         * The effort for the request being made now: the level [overrideFile] names, when the
-         * file is there and names one, otherwise [buildSetting].
+         * The effort for this run of the app: the level [overrideFile] names, when the file is
+         * there and names one, otherwise [buildSetting]. This reads storage: never on the path
+         * of a reply.
          */
-        fun forRequest(buildSetting: AIEffort, overrideFile: File, warn: (String) -> Unit): AIEffort {
+        fun fromOverrideFile(buildSetting: AIEffort, overrideFile: File, warn: (String) -> Unit): AIEffort {
             if (!overrideFile.isFile) return buildSetting
             // A level name is a few letters: a bigger file is not one, and is not read.
             if (overrideFile.length() > MAX_OVERRIDE_FILE_BYTES) {
@@ -221,6 +284,15 @@ object AIReplyGenerators {
             baseUrl = anthropicBaseUrl,
         )
 
-        AIProvider.OPENAI -> OpenAIReplyGenerator(apiKey = openAiApiKey, log = log, baseUrl = openAiBaseUrl)
+        AIProvider.OPENAI -> OpenAIReplyGenerator(
+            apiKey = openAiApiKey, log = log, baseUrl = openAiBaseUrl,
+            // The OpenAI client hands no response headers on, so it cannot tell the time. When
+            // this build has an Anthropic key too, the free request of that API tells it;
+            // otherwise (that generator asks nobody without a key) the time stays unknown and
+            // the prompt says nothing about time.
+            timeFrom = if (serverClock == null) null else AnthropicReplyGenerator(
+                apiKey = anthropicApiKey, log = log, info = info, serverClock = serverClock, baseUrl = anthropicBaseUrl,
+            ),
+        )
     }
 }

@@ -1,5 +1,6 @@
 package cx.aphex.energysign.ai
 
+import java.util.Collections
 import java.util.IdentityHashMap
 
 /**
@@ -8,7 +9,8 @@ import java.util.IdentityHashMap
  * It has no thread, no clock and no lock of its own. Every function here is called by the ONE
  * thread that owns the messages (see OwnerQueue); what comes from other threads (a call that
  * ended, the warm-up that ended) is posted to that thread first. [Q] is the query message; two
- * queries are the same only when they are the same object.
+ * queries are the same only when they are the same object. The time it is given must be one
+ * that also counts while the device sleeps.
  *
  * The rules:
  * - ONE call at a time. While a call is out, or the warm-up runs, a query that is shown waits
@@ -21,14 +23,25 @@ import java.util.IdentityHashMap
  *   again, and a query that got an answer of any kind ([NoReplyReason.askAgain] false) is retired.
  * - A failure that may pass leaves the query a query, [Limits.maxAttempts] calls at most.
  * - After a failure of the provider ([NoReplyReason.backOff]) nothing is asked for a while,
- *   longer after each failure in a row ([Limits.coolDownsMs]). That bounds the calls an hour
- *   whatever is wrong and however many queries there are.
+ *   longer after each failure in a row ([Limits.coolDownsMs]). An answer ends the row.
+ * - A BUDGET: [Limits.callsPerHour] calls in any hour, counted when a call goes out, and nothing
+ *   gives one back: not an answer, not a failure, not a query that was deleted. That is the
+ *   ceiling on what an hour can cost, whatever is wrong and however many queries there are; the
+ *   pauses after failures happen inside it. While the budget is spent a query is shown as the
+ *   plain message it is, with no notice, and is asked when it comes round and there is room.
+ *
+ * What this costs the owner: [shown] and [thinkingWanted] look at the line only
+ * ([Limits.maxWaiting] entries at most); [finished] and [warmedUp] make ONE pass over the list
+ * of messages ([listedAmong]), whatever the number of queries they know of.
  */
 class AIQueryDesk<Q : Any>(
     /** Sends [Q] to the provider. Returns at once; the result comes back through [finished]. */
     private val start: (Q) -> Unit,
-    /** Whether [Q] is still in the list. A query that was deleted is not sent. */
-    private val listed: (Q) -> Boolean,
+    /**
+     * Which of the given queries are still in the list: ONE pass over the list. What is given
+     * and what comes back compare by identity. A query that was deleted is not sent.
+     */
+    private val listedAmong: (Set<Q>) -> Set<Q>,
     private val log: (String) -> Unit = {},
     private val limits: Limits = Limits(),
     /** True while the warm-up runs: nothing is sent until [warmedUp]. */
@@ -43,6 +56,11 @@ class AIQueryDesk<Q : Any>(
         val coolDownsMs: List<Long> = listOf(30_000, 60_000, 120_000, 240_000, 300_000),
         /** How many queries may stand in line behind the call that is out. */
         val maxWaiting: Int = 4,
+        /**
+         * How many calls may go out in any hour: room for a reply every two minutes (30), and
+         * for the 15 calls the pauses allow when every call fails.
+         */
+        val callsPerHour: Int = 45,
     )
 
     /** What became of a call. */
@@ -81,19 +99,34 @@ class AIQueryDesk<Q : Any>(
     private var failuresInARow = 0
     private var noCallBefore = Long.MIN_VALUE
 
+    /** When the calls of the last hour went out, oldest first. Never more than [Limits.callsPerHour]. */
+    private val sentAt = ArrayDeque<Long>()
+    private var saidBudgetIsSpent = false
+
     /**
      * The sign is showing [query] now. True: put up the thinking notice; the query was sent, or
      * stands in line. False: show nothing; either it is being answered already or nothing may be
      * asked at the moment.
      */
     fun shown(query: Q, now: Long): Boolean {
+        // Whoever waited past their notice is not waiting any more: they hold no place in the
+        // line, and they are no reason to turn the same query away when it comes round again.
+        line.removeAll { now >= it.until }
+
         if (out === query || line.any { it.query === query }) return false
         if (now < noCallBefore) return false
+        if (!roomInBudget(now)) {
+            if (!saidBudgetIsSpent) {
+                saidBudgetIsSpent = true
+                say("${limits.callsPerHour} calls went out in the last hour: nothing is asked until the oldest of them is an hour old")
+            }
+            return false
+        }
         if (!free() && line.size >= limits.maxWaiting) return false
 
         noticeFor = query
         noticeUntil = now + limits.noticeMs
-        if (free()) send(query) else line.addLast(Waiting(query, noticeUntil))
+        if (free()) send(query, now) else line.addLast(Waiting(query, noticeUntil))
         return true
     }
 
@@ -103,7 +136,7 @@ class AIQueryDesk<Q : Any>(
         if (now < noticeUntil) return true
         noticeFor = null
         if (out === query) {
-            log("Still no reply after ${limits.noticeMs / 1000} s: the sign goes on, the call stays out and its reply is used when it comes")
+            say("Still no reply after ${limits.noticeMs / 1000} s: the sign goes on, the call stays out and its reply is used when it comes")
         }
         return false
     }
@@ -115,17 +148,22 @@ class AIQueryDesk<Q : Any>(
         val watched = noticeFor === query && now < noticeUntil
         if (noticeFor === query) noticeFor = null
 
+        // Everything is decided and changed first; what there is to say is said at the end. A
+        // log that fails cannot leave a result half dealt with.
+        var toSay: String? = null
         if (result is AIReplyResult.NoReply && result.reason.backOff) {
             failuresInARow++
             noCallBefore = now + limits.coolDownsMs[(failuresInARow - 1).coerceAtMost(limits.coolDownsMs.lastIndex)]
-            log("Failure ${failuresInARow} in a row (${result.reason}): nothing is asked for the next ${(noCallBefore - now) / 1000} s")
-        } else {
-            // The provider answered: the next failure is the first in a row again.
+            toSay = "Failure $failuresInARow in a row (${result.reason}): nothing is asked for the next ${(noCallBefore - now) / 1000} s"
+        } else if (result is AIReplyResult.Reply || !(result as AIReplyResult.NoReply).reason.nothingWasSent) {
+            // The provider answered: the next failure is the first in a row again. (A result
+            // for which nothing was sent is no answer of the provider: the row stands.)
             failuresInARow = 0
         }
 
+        val alive = stillListed(query)
         val outcome = when {
-            !listed(query) -> {
+            query !in alive -> {
                 attempts.remove(query)
                 Outcome.Gone
             }
@@ -143,38 +181,78 @@ class AIQueryDesk<Q : Any>(
                 Outcome.Retired((result as AIReplyResult.NoReply).reason)
             }
         }
-        sendNext(now)
+        sendNext(now, alive)
+        toSay?.let(::say)
         return outcome
     }
 
     /** The warm-up is over: whoever stands in line is sent now. */
     fun warmedUp(now: Long) {
         warming = false
-        sendNext(now)
+        sendNext(now, stillListed(null))
     }
 
     private fun free(): Boolean = out == null && !warming
 
-    private fun send(query: Q) {
+    private fun roomInBudget(now: Long): Boolean {
+        while (sentAt.isNotEmpty() && now - sentAt.first() >= HOUR_MS) sentAt.removeFirst()
+        if (sentAt.size < limits.callsPerHour) {
+            saidBudgetIsSpent = false
+            return true
+        }
+        return false
+    }
+
+    private fun send(query: Q, now: Long) {
         attempts[query] = (attempts[query] ?: 0) + 1
+        sentAt.addLast(now)
         out = query
         start(query)
     }
 
     /**
-     * Sends the first in line that is still worth sending. Whoever is not (its notice has come
-     * down, it was deleted, or nothing may be asked now) leaves the line unsent.
+     * Of [ended] (when there is one), the queries in line and the queries whose calls are being
+     * counted: those that are still in the list. One pass over the list.
      */
-    private fun sendNext(now: Long) {
+    private fun stillListed(ended: Q?): Set<Q> {
+        val known: MutableSet<Q> = Collections.newSetFromMap(IdentityHashMap())
+        ended?.let(known::add)
+        line.forEach { known.add(it.query) }
+        known.addAll(attempts.keys)
+        if (known.isEmpty()) return known
+        // By identity here too, whatever kind of set comes back.
+        val listed: MutableSet<Q> = Collections.newSetFromMap(IdentityHashMap())
+        listed.addAll(listedAmong(known))
+        return listed
+    }
+
+    /**
+     * Sends the first in line that is still worth sending. Whoever is not (its notice has come
+     * down, it was deleted, or nothing may be asked now) leaves the line unsent. Then forgets
+     * what is known about queries that are gone from the list.
+     */
+    private fun sendNext(now: Long, alive: Set<Q>) {
         while (free()) {
             val next = line.removeFirstOrNull() ?: break
-            if (now >= noCallBefore && now < next.until && listed(next.query)) {
-                send(next.query)
+            if (now >= noCallBefore && now < next.until && next.query in alive && roomInBudget(now)) {
+                send(next.query, now)
             } else if (noticeFor === next.query) {
                 noticeFor = null
             }
         }
-        // Forget what is known about queries that are gone from the list.
-        attempts.keys.retainAll { it === out || listed(it) }
+        attempts.keys.retainAll { it in alive }
+    }
+
+    /** A line for the log. The log failing changes nothing here. */
+    private fun say(text: String) {
+        try {
+            log(text)
+        } catch (e: Exception) {
+            // Nowhere to report it.
+        }
+    }
+
+    private companion object {
+        const val HOUR_MS = 3_600_000L
     }
 }

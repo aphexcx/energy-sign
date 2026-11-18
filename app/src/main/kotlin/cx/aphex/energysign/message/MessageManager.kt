@@ -15,6 +15,7 @@ import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
 import cx.aphex.energysign.ext.toNormalized
 import cx.aphex.energysign.ai.PostedAIAnswer
+import cx.aphex.energysign.ai.NoReplyReason
 import cx.aphex.energysign.keyboard.KeyboardManager
 import cx.aphex.energysign.message.Message.FlashingAnnouncement.NowPlayingAnnouncement
 import kotlinx.atomicfu.atomic
@@ -23,13 +24,18 @@ import kotlinx.atomicfu.update
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 import java.io.File
+import java.util.IdentityHashMap
 
 
 class MessageManager(
     private val context: Context,
     val msgRepo: MessageRepository,
     private val owner: OwnerQueue,
-    /** A clock that only counts, in milliseconds: for how long the sign has said "thinking". */
+    /**
+     * A clock that only counts, in milliseconds: for how long the sign has said "thinking", and
+     * for the pauses and the hourly budget of the queries. The app gives the one that also counts
+     * while the board sleeps (AppModule); this default is for tests on the JVM.
+     */
     private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 },
 ) :
     KoinComponent {
@@ -109,11 +115,45 @@ class MessageManager(
      * the warm-up. (Declared after [change]: the warm-up may end at any moment from here on.)
      */
     private val desk: AIQueryDesk<Message.Marquee.AIQuery> = AIQueryDesk(
-        start = { query -> replies.ask(query.str) { result -> change { replyArrived(query, result) } } },
-        listed = { query -> msgRepo.marqueeMessages.any { it === query } },
+        start = { query ->
+            replies.ask(query.str, stillWanted = { stillListed(query) }) { result ->
+                // On the call's thread: the reply is made into its message here, so that the
+                // owner has nothing to do with its text. Whatever happens in that, the end of
+                // the call is posted.
+                val (answered, reply) = MessageRepository.readyReply(result)
+                change { replyArrived(query, answered, reply) }
+            }
+        },
+        listedAmong = { known ->
+            // One pass, and by identity on both sides: two queries with the same text are two
+            // queries. Where each one stands is noted, for whoever changes it right after.
+            seenAt.clear()
+            msgRepo.marqueeMessages.forEachIndexed { index, message ->
+                if (message is Message.Marquee.AIQuery && message in known) seenAt[message] = index
+            }
+            seenAt.keys
+        },
         log = { logD(it) },
         warmingUp = replies.warmUp { change { warmUpEnded() } },
     )
+
+    /**
+     * Where the desk saw each query it asked about, in its last pass over the list. Good until
+     * the list is changed; whoever uses a place checks that the query still stands there.
+     */
+    private val seenAt = IdentityHashMap<Message.Marquee.AIQuery, Int>()
+
+    /**
+     * Whether [query] is still in the list. Asked by the call's thread as the last thing before
+     * the request goes out, and answered by the owner: a query that was deleted while its call
+     * was being prepared is not sent. When the owner does not answer, it is not sent either.
+     */
+    private fun stillListed(query: Message.Marquee.AIQuery): Boolean =
+        try {
+            owner.ask { msgRepo.marqueeMessages.any { it === query } }
+        } catch (e: Exception) {
+            false
+        }
 
     /** The thinking notice was asked for from outside (the HTTP route), not for a query of the app's own. */
     private var thinkingFromOutside: Boolean = false
@@ -242,6 +282,14 @@ class MessageManager(
             return it
         }
 
+        // A thinking notice whose time is up goes first of all, so that everything below sees
+        // the queue as it is: the heading of a reply and the advertisements for an empty list
+        // are both decided by whether anything is waiting to be shown. (The time limit is for
+        // the notice, not for the call: the reply is put in when it comes.)
+        if (msgRepo.oneTimeMessages.any { it is Message.ColorMessage.AIThinking } && !thinkingWanted()) {
+            msgRepo.oneTimeMessages.removeIf { it is Message.ColorMessage.AIThinking }
+        }
+
         if (msgRepo.oneTimeMessages.isEmpty()) {
             when (val curMsg = msgRepo.marqueeMessages.getOrNull(currentIdx.value)) {
 //                is Message.Marquee.AIQuery -> {
@@ -293,12 +341,8 @@ class MessageManager(
         }
 
         // Display one-time messages first
-        while (true) {
-            val oneTime = msgRepo.oneTimeMessages.removeFirstOrNull() ?: break
+        msgRepo.oneTimeMessages.removeFirstOrNull()?.let { oneTime ->
             if (oneTime is Message.ColorMessage.AIThinking) {
-                // The time limit is for this notice, not for the call: when it is up the sign
-                // goes on with its messages, and the reply is put in when it comes.
-                if (!thinkingWanted()) continue
                 logD("AI is still thinking, injecting another thinking notification")
                 msgRepo.pushOneTimeMessage(oneTime.thinkMore())
             }
@@ -713,41 +757,56 @@ class MessageManager(
     }
 
     /* For replies generated by externally running models e.g. Llama running on my laptop */
-    /** Returns whether the reply was stored: not when it is blank, and not when there is no message to reply to. */
-    fun onNewPostedAIReply(postedAIAnswer: PostedAIAnswer): Boolean =
-        changeAndWait { insertPostedAIReply(postedAIAnswer) }
+    /**
+     * Returns whether the reply was stored: not when it is blank, and not when there is no message to reply to.
+     *
+     * The reply is cleaned, fitted to the sign and made into its message HERE, on the caller's
+     * thread (the HTTP server's), however long it is. The owner gets a message that is ready and
+     * only puts it into the list.
+     */
+    fun onNewPostedAIReply(postedAIAnswer: PostedAIAnswer): Boolean {
+        val reply = MessageRepository.postedReplyMessage(postedAIAnswer.answer)
+        return changeAndWait { insertPostedAIReply(reply, postedAIAnswer.inReplyTo) }
+    }
 
-    private fun insertPostedAIReply(postedAIAnswer: PostedAIAnswer): Boolean {
-        logD("Processing Posted AI Answer")
+    private fun insertPostedAIReply(reply: Message.Marquee.AIReply?, inReplyTo: String): Boolean {
         thinkingFromOutside = false
         endThinkingUnlessWanted()
-        if (!msgRepo.insertAIReplyToUserMessage(postedAIAnswer)) {
+        if (reply == null || !msgRepo.insertPostedAIReply(reply, inReplyTo)) {
             logW("AI Answer is blank, or there is no message to reply to; not adding to messages.")
             return false
         }
         msgRepo.saveMarqueeMessages(filesDir)
+        logD("Inserted a posted AI reply")
         return true
     }
 
     /**
      * The call for [query] has ended. On the owner thread: the caller posted this. Every reply
      * is its own event, so two replies that end at the same moment are both dealt with.
+     * [reply] is the message for a result that is a reply, made by the call's thread.
+     *
+     * What this costs the owner, at most: ONE pass over the list, the desk's, which also notes
+     * where the query stands; then the insert (the messages behind it move up one place) and
+     * the copy of the list's references for the save, as for every save. Nothing here looks at
+     * the text of a reply.
      */
-    private fun replyArrived(query: Message.Marquee.AIQuery, result: AIReplyResult) {
+    private fun replyArrived(query: Message.Marquee.AIQuery, result: AIReplyResult, reply: Message.Marquee.AIReply?) {
         try {
-            // In every case: the change first, the log line after it. A log call that fails
-            // must not leave a result half dealt with.
+            // In every case: the change first, the save, and the log line after them. A log
+            // call that fails must not leave a result half dealt with or unsaved.
             when (val outcome = desk.finished(query, result, nowMs())) {
                 is AIQueryDesk.Outcome.Reply ->
-                    if (msgRepo.insertAIReply(query, outcome.text)) {
+                    if (reply != null && msgRepo.insertAIReply(query, reply, seenAt[query])) {
                         msgRepo.saveMarqueeMessages(filesDir)
+                        logD("Inserted the AI reply after its query")
                     } else {
                         logD("The query was deleted while its reply was on the way; the reply is dropped.")
                     }
 
                 is AIQueryDesk.Outcome.Retired -> {
                     // Asking again would change nothing: it stays on the sign as the message it was.
-                    if (msgRepo.retireQuery(query)) msgRepo.saveMarqueeMessages(filesDir)
+                    if (msgRepo.retireQuery(query, seenAt[query])) msgRepo.saveMarqueeMessages(filesDir)
                     logW("No AI reply (${outcome.why}); the message stays as a plain message and is not asked again.")
                 }
 
@@ -755,7 +814,7 @@ class MessageManager(
                     // Only when somebody is still looking at the dots; not out of nowhere, later.
                     if (outcome.whileWatched) {
                         msgRepo.oneTimeMessages.removeIf { it is Message.ColorMessage.AIThinking }
-                        msgRepo.pushOneTimeMessages(
+                        val slides = arrayOf(
                             Message.ColorMessage.ChonkySlide("NO", context.getColor(R.color.instahandle), delayMs = 650),
                             Message.ColorMessage.ChonkySlide("NO BARS", context.getColor(R.color.instahandle), delayMs = 650),
                             Message.ColorMessage.ChonkySlide("TRYING", context.getColor(R.color.instahandle), delayMs = 400),
@@ -763,6 +822,10 @@ class MessageManager(
                             Message.ColorMessage.ChonkySlide("LATER!", context.getColor(R.color.instahandle), delayMs = 400),
                             Message.Starfield()
                         )
+                        msgRepo.pushOneTimeMessages(*slides)
+                        // A notice that was asked for from outside is still wanted: it took the
+                        // place of the query's own, and comes back right behind the slides.
+                        if (thinkingFromOutside) msgRepo.oneTimeMessages.add(slides.size, thinkingNotice())
                     }
                     logW("AI Reply Error: ${outcome.why}")
                 }
@@ -803,11 +866,20 @@ class MessageManager(
 //            showCaretThink = true
 //            showCaretThinkDots = 0
 //            msgRepo.marqueeMessages.add(currentIdx.value +1, Message.Marquee.AIThinking())
-            msgRepo.pushOneTimeMessage(Message.ColorMessage.AIThinking(colorCycle = context.getColor(R.color.chonkyslide_defaultpink)))
+            msgRepo.pushOneTimeMessage(thinkingNotice())
         }
 //        isGeneratingThought = thinking
-        logD("Set generating thought to $thinking")
+        // Called in the middle of changes (before a reply is put in and saved): a log that
+        // fails must not leave one half made.
+        try {
+            logD("Set generating thought to $thinking")
+        } catch (e: Exception) {
+            // Nowhere to report it.
+        }
     }
+
+    private fun thinkingNotice(): Message.ColorMessage.AIThinking =
+        Message.ColorMessage.AIThinking(colorCycle = context.getColor(R.color.chonkyslide_defaultpink))
 
 //    fun processPartialThought(chunk: String) {
 //        if (partialThought == null) {

@@ -22,19 +22,35 @@ object AIReplyLimits {
     private val SPACES = Regex(" +")
 
     /**
+     * The most of a reply that is looked at. What can be shown of a reply is some hundred
+     * characters; this only keeps the work on a text of any length within bounds.
+     */
+    const val MAX_INPUT_CHARS = 8_192
+
+    /**
      * [reply] as it will be shown and stored, or "" when nothing whole can be.
      *
-     * 1. The clean-up every message gets (hearts, then ASCII only), so what is measured is what
+     * 1. ONE LINE, and words stay words: everything that parts words becomes a plain space
+     *    FIRST. That is a line end, a tab or a vertical tab (the saved list holds one message a
+     *    line and parts it at a vertical tab: either one inside a reply would cost the rest of
+     *    the reply at the next start), every other control character, and every space or
+     *    separator of Unicode (a no-break space, a line separator): the next step drops what is
+     *    not ASCII, and two words must not become one by it.
+     * 2. The clean-up every message gets (hearts, then ASCII only), so what is measured is what
      *    the sign gets.
-     * 2. ONE LINE. A line end, a tab or a vertical tab becomes a space. The saved list holds one
-     *    message a line and parts it at a vertical tab: either one inside a reply would cost the
-     *    rest of the reply at the next start.
      * 3. Too long: cut after the last whole word that fits. When not even the first word fits,
      *    the result is "": half a word is not a reply.
+     *
+     * The work grows with the length of [reply]. It is never done by the thread that answers
+     * the sign: see MessageRepository.replyMessage.
      */
     fun fitToSign(reply: String): String {
-        val text = reply.convertHeartEmojis().toNormalized()
-            .map { if (it.code < ' '.code) ' ' else it }.joinToString("")
+        val text = reply.take(MAX_INPUT_CHARS)
+            .map { if (it.isWhitespace() || it.isISOControl()) ' ' else it }.joinToString("")
+            // A text that was longer than what is looked at may have been cut inside a word:
+            // the word at the cut goes. Half a word is not a reply.
+            .let { if (reply.length > MAX_INPUT_CHARS) it.substringBeforeLast(' ', "") else it }
+            .convertHeartEmojis().toNormalized()
             .replace(SPACES, " ")
             .trim()
         if (fits(text)) return text

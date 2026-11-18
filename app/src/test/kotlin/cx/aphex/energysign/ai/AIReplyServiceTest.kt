@@ -34,8 +34,11 @@ class AIReplyServiceTest {
             return answer(request)
         }
 
-        override fun syncClock() {
+        val timeCheckLimits = mutableListOf<java.time.Duration>()
+
+        override fun syncClock(limit: java.time.Duration) {
             timeChecks++
+            timeCheckLimits += limit
             onTimeCheck()
         }
     }
@@ -354,5 +357,78 @@ class AIReplyServiceTest {
 
         assertEquals(AIReplyResult.Reply("ok"), runBlocking { service.replyTo("hello") })
         assertTrue(generator.requests.single().systemPrompt.contains("Current local time: Friday 2026-11-20, 9:30 pm"))
+    }
+
+    // ---- one budget of time for a query, and one read of a file at most (class B)
+
+    @Test
+    fun `set times that hang are read by one thread however many queries come - the read is waited for again, not started again`() {
+        val generator = RecordingGenerator { AIReplyResult.Reply("ok") }
+        val reads = java.util.concurrent.atomic.AtomicInteger()
+        val threads = java.util.concurrent.atomic.AtomicInteger()
+        val stuck = java.util.concurrent.CountDownLatch(1)
+        val service = AIReplyService(
+            generator = generator, log = { log.add(it) }, now = { now }, deviceZone = { la },
+            setTimes = {
+                reads.incrementAndGet()
+                stuck.await() // storage that does not answer
+                SetTimesLoad.Loaded(table, "test")
+            },
+            buildDate = null,
+            setTimesLimit = Duration.ofMillis(100),
+            startReadThread = {
+                threads.incrementAndGet()
+                Thread(it, "test-set-times").apply { isDaemon = true }.start()
+            },
+        )
+
+        repeat(6) { assertEquals(AIReplyResult.Reply("ok"), runBlocking { service.replyTo("query $it") }) }
+
+        assertEquals(1, reads.get(), "every query started a read of its own")
+        assertEquals(1, threads.get(), "one thread hangs in the read, not one a query")
+        assertEquals(6, generator.requests.size)
+        stuck.countDown()
+    }
+
+    @Test
+    fun `the query's deadline is the one clock - a step is not waited for longer than the query has left`() {
+        val generator = RecordingGenerator { AIReplyResult.Reply("ok") }
+        val stuck = java.util.concurrent.CountDownLatch(1)
+        val service = AIReplyService(
+            generator = generator, log = { log.add(it) }, now = { now }, deviceZone = { la },
+            setTimes = {
+                stuck.await()
+                SetTimesLoad.Loaded(table, "test")
+            },
+            buildDate = null,
+            // The step's own limit is long; the query has much less left.
+            setTimesLimit = Duration.ofSeconds(20),
+        )
+        val deadline = Deadline.after(Duration.ofMillis(400))
+        val stillWanted = { true }
+
+        val startedAt = System.nanoTime()
+        runBlocking { service.replyTo("hello", deadline, stillWanted) }
+        val tookMs = (System.nanoTime() - startedAt) / 1_000_000
+        stuck.countDown()
+
+        assertTrue(tookMs in 300..3_000, "the set times were waited for $tookMs ms by a query with 400 ms left")
+        // The generator is handed the same deadline and the same question, not ones of its own.
+        val request = generator.requests.single()
+        assertTrue(request.deadline === deadline, "the request has another deadline than its query")
+        assertTrue(request.stillWanted === stillWanted)
+    }
+
+    @Test
+    fun `the time check is given what the query has left, five seconds at most`() {
+        val generator = RecordingGenerator { AIReplyResult.Reply("ok") }
+        now = null
+
+        runBlocking { service(generator).replyTo("hello", Deadline.after(Duration.ofSeconds(60))) }
+        runBlocking { service(generator).replyTo("hello", Deadline.after(Duration.ofMillis(1_500))) }
+
+        val (plenty, little) = generator.timeCheckLimits
+        assertEquals(Duration.ofSeconds(5), plenty)
+        assertTrue(little <= Duration.ofMillis(1_500) && little > Duration.ofMillis(500), "the time check was given $little")
     }
 }

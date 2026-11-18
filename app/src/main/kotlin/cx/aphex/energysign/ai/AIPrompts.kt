@@ -17,6 +17,10 @@ object AIPrompts {
     const val SET_TIMES_RULE =
         "- You may mention who is playing now or next when it fits. Never invent a set time."
 
+    /** In the place of [SET_TIMES_RULE] when the prompt has no context block: the time is not known. */
+    const val NO_TIME_RULE =
+        "- You do not know what time it is or who is playing. Do not state a time or a set time."
+
     private const val ROLE_PREFIX = """
 You are RaveGPT, an AI attending Dreamstate 2026, a music festival at the Queen Mary in Long Beach, CA. You are running on a big LED sign on my totem at the festival. I am Aphex, a trance DJ and engineer who built the totem you're running on. 
     Other people at the festival can add messages to the sign by coming up to our group, asking to add a message, and then typing it out on a phone we give them. When they send the message, it shows up on the sign immediately. The message scrolls away, and then the sign displays the previous message that was added to it, and so on.
@@ -51,9 +55,12 @@ Here are some rules that are very important to follow:
         append(task)
         append(RULES)
         append(LENGTH_RULE).append('\n')
-        append(SET_TIMES_RULE).append('\n')
         if (context.isNotBlank()) {
+            append(SET_TIMES_RULE).append('\n')
             append('\n').append(context)
+        } else {
+            // Nothing is known about the time: the model is not invited to speak of it.
+            append(NO_TIME_RULE).append('\n')
         }
     }
 }

@@ -6,27 +6,24 @@ import com.anthropic.core.LogLevel
 import com.anthropic.core.RequestOptions
 import com.anthropic.core.Timeout
 import com.anthropic.core.http.Headers
+import com.anthropic.core.jsonMapper
 import com.anthropic.errors.AnthropicException
 import com.anthropic.errors.AnthropicInvalidDataException
 import com.anthropic.errors.AnthropicIoException
 import com.anthropic.errors.AnthropicServiceException
-import com.anthropic.errors.BadRequestException
-import com.anthropic.errors.InternalServerException
-import com.anthropic.errors.NotFoundException
-import com.anthropic.errors.PermissionDeniedException
-import com.anthropic.errors.RateLimitException
-import com.anthropic.errors.UnauthorizedException
-import com.anthropic.errors.UnprocessableEntityException
+import com.anthropic.models.ErrorType
 import com.anthropic.models.beta.AnthropicBeta
 import com.anthropic.models.beta.messages.BetaFallbacksParam
 import com.anthropic.models.beta.messages.BetaMessage
 import com.anthropic.models.beta.messages.BetaOutputConfig
 import com.anthropic.models.beta.messages.BetaStopReason
 import com.anthropic.models.beta.messages.MessageCreateParams
+import com.fasterxml.jackson.databind.json.JsonMapper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import java.io.InterruptedIOException
+import java.net.Proxy
 import java.net.SocketTimeoutException
 import java.security.cert.CertPathValidatorException
 import java.security.cert.CertificateException
@@ -44,18 +41,29 @@ import javax.net.ssl.SSLPeerUnverifiedException
  * ONE ATTEMPT. The SDK's own retries are off ([MAX_RETRIES]): between attempts it waits as long
  * as a `Retry-After` header says, without a limit. Whether a query is asked again is decided in
  * one place, [AIQueryDesk]. Under the SDK, the HTTP client may still send the request a second
- * time by itself, inside the same time limit: once after a 503 that says `Retry-After: 0`, once
- * after a 408, and after a connection that died before anything came back.
+ * time by itself, inside the same time limit, in one case: after a 503 that says
+ * `Retry-After: 0`. (The SDK switches the HTTP client's other repeats off: after a 408, and
+ * after a connection that died.) It follows no redirect: a 3xx is a failure, and the request
+ * goes nowhere but where it was sent.
  *
- * ONE TIME LIMIT for the request, [requestTimeout], and it is the only thing that ends a call. The
- * call blocks its thread until the HTTP client lets go: a caller that stops waiting does not cut
- * it short (a thread that waits on a socket cannot be interrupted), and [generateReply] returns
- * only when the call has really ended. So nothing is ever left running behind a call that has
- * returned, and "one call at a time" means one request on the wire. (A DNS lookup that hangs is
- * the one thing the time limit cannot end; the system ends it.)
+ * ONE TIME LIMIT, the deadline of the query ([AIReplyRequest.deadline]). The request gets what is
+ * left of it when it goes out ([requestTimeout] at most), and that is the only thing that ends a
+ * call: nothing stands behind it that could throw an answer away which the provider is still
+ * writing. The call blocks its thread until the HTTP client lets go: a caller that stops waiting
+ * does not cut it short (a thread that waits on a socket cannot be interrupted), and
+ * [generateReply] returns only when the call has really ended. So nothing is ever left running
+ * behind a call that has returned, and "one call at a time" means one request on the wire. (A DNS
+ * lookup that hangs is the one thing the time limit cannot end; the system ends it.) When too
+ * little of the deadline is left to hope for an answer ([MIN_TIME_TO_SEND]), nothing is sent.
+ *
+ * THE KEY GOES TO THE API AND NOWHERE ELSE. The warm-up's request to the stand-in on this device
+ * is made by a second client that was never given the key (see [warmUp]).
  *
  * NOTHING OF THE PROVIDER'S IN THE LOG: a log line holds the HTTP status and words from the fixed
- * lists in this file, never text from a response, a header or an exception message.
+ * lists in this file, never text from a response, a header or an exception message. And what a
+ * response IS is decided from its status, its stop reason and its content alone: a field that is
+ * read only for the log (the refusal category, the token counts, the error type) is read best
+ * effort, and when it cannot be read the line goes without it.
  */
 class AnthropicReplyGenerator(
     apiKey: String,
@@ -63,32 +71,33 @@ class AnthropicReplyGenerator(
     private val log: (String) -> Unit,
     /** The line for a reply that came: not a warning. */
     private val info: (String) -> Unit = log,
-    /** Asked for every request, so the level can be changed while the app runs. */
+    /** Asked for every request. It must not read storage: see [ReadOnceAtStart]. */
     private val effort: () -> AIEffort = { AIEffort.DEFAULT },
-    /** Told the server's time from every response, when given. */
+    /** Told the server's time from the responses that are the API's, when given. */
     private val serverClock: ServerClock? = null,
     private val requestTimeout: Duration = REQUEST_TIMEOUT,
     /** Only tests set this, to a local fake of the API. */
     private val baseUrl: String? = null,
+    /** The stand-in for the local part of the warm-up. Only tests set this, to see what it is sent. */
+    private val standIn: (answer: String) -> LocalStandIn = { LocalStandIn(it) },
+    private val minTimeToSend: Duration = MIN_TIME_TO_SEND,
 ) : AIReplyGenerator {
 
     private val apiKey: String = apiKey.trim()
 
     override val name: String = "anthropic/$MODEL"
 
+    /** One for both clients: what the local part of the warm-up loads into it, the real client finds there. */
+    private val mapper: JsonMapper by lazy { jsonMapper() }
+
     private val client: AnthropicClient by lazy {
         AnthropicOkHttpClient.builder()
             .apiKey(this.apiKey)
+            .jsonMapper(mapper)
             .maxRetries(MAX_RETRIES)
             // The SDK can log requests, headers included, when an environment variable says so.
             .logLevel(LogLevel.OFF)
-            .timeout(
-                Timeout.builder()
-                    .connect(minOf(CONNECT_TIMEOUT, requestTimeout))
-                    // The whole request: DNS, connect, TLS, sending, the thinking and the answer.
-                    .request(requestTimeout)
-                    .build()
-            )
+            .timeout(timeouts(requestTimeout))
             .apply { baseUrl?.let { baseUrl(it) } }
             .build()
     }
@@ -97,33 +106,38 @@ class AnthropicReplyGenerator(
         if (apiKey.isEmpty()) {
             return noReply(NoReplyReason.MISSING_KEY, "no ANTHROPIC_API_KEY in this build (local.properties)")
         }
-        return withContext(NonCancellable + Dispatchers.IO) { ask(client, request) }
+        return withContext(NonCancellable + Dispatchers.IO) { ask(request) }
     }
 
-    private fun ask(client: AnthropicClient, request: AIReplyRequest): AIReplyResult =
+    private fun ask(request: AIReplyRequest): AIReplyResult =
         try {
+            // Everything that can take time before the request is done first (the client is built
+            // by its first use); then the two questions that decide whether it goes out at all.
+            val client = client
             val effortNow = effort()
-            client.beta().messages().withRawResponse().create(params(request, effortNow)).use { response ->
-                serverClock?.syncFromDateHeader(response.headers().date())
-                read(response.parse(), effortNow)
+            val params = params(request, effortNow)
+            if (!request.stillWanted()) {
+                noReply(NoReplyReason.WITHDRAWN, "not sent: the query is not wanted any more")
+            } else {
+                val leftMs = request.deadline.remainingMs()
+                if (leftMs < minTimeToSend.toMillis()) {
+                    noReply(NoReplyReason.TIMEOUT, "not sent: ${leftMs / 1000} s of the query's time were left")
+                } else {
+                    val limit = minOf(requestTimeout, Duration.ofMillis(leftMs))
+                    client.beta().messages().withRawResponse().create(params, options(limit)).use { response ->
+                        // The response has arrived; its body is read below, and that can take a while.
+                        val arrivedAt = serverClock?.arrival()
+                        read(response.parse(), effortNow).also { result ->
+                            // The time is taken from this response only now that it has been read as a message of the API.
+                            if ((result as? AIReplyResult.NoReply)?.reason != NoReplyReason.NOT_A_MESSAGE) {
+                                tellClock(response.headers(), arrivedAt)
+                            }
+                        }
+                    }
+                }
             }
-        } catch (e: UnauthorizedException) {
-            failed(NoReplyReason.KEY_REJECTED, e)
-        } catch (e: PermissionDeniedException) {
-            failed(NoReplyReason.KEY_REJECTED, e)
-        } catch (e: NotFoundException) {
-            failed(NoReplyReason.REQUEST_REJECTED, e)
-        } catch (e: BadRequestException) {
-            failed(NoReplyReason.REQUEST_REJECTED, e)
-        } catch (e: UnprocessableEntityException) {
-            failed(NoReplyReason.REQUEST_REJECTED, e)
-        } catch (e: RateLimitException) {
-            failed(NoReplyReason.RATE_LIMITED, e)
-        } catch (e: InternalServerException) {
-            failed(NoReplyReason.SERVER_ERROR, e)
         } catch (e: AnthropicServiceException) {
-            // Any other HTTP status.
-            failed(NoReplyReason.PROVIDER_ERROR, e)
+            failed(e)
         } catch (e: AnthropicIoException) {
             // No response at all: a timeout, the network, or TLS. Only the kinds of the
             // exceptions are logged, never their messages.
@@ -151,12 +165,16 @@ class AnthropicReplyGenerator(
             .addUserMessage(request.userText)
             .build()
 
-    /** The stop reason is checked before the content: a refusal comes as HTTP 200, with or without content. */
+    /**
+     * What [message] is. The stop reason is checked before the content: a refusal comes as HTTP
+     * 200, with or without content. Only the stop reason and the content decide; what is read for
+     * the log line is read best effort.
+     */
     private fun read(message: BetaMessage, effortNow: AIEffort): AIReplyResult {
         val stopReason = message.stopReason().orElse(null)
         return when (stopReason) {
             BetaStopReason.REFUSAL -> {
-                val category = message.stopDetails().flatMap { it.category() }.map { it.asString() }.orElse(null)
+                val category = forLog { message.stopDetails().flatMap { it.category() }.map { it.asString() }.orElse(null) }
                 noReply(NoReplyReason.REFUSED, "category ${category?.takeIf { it in REFUSAL_CATEGORIES } ?: "not given or not known"}")
             }
 
@@ -165,15 +183,17 @@ class AnthropicReplyGenerator(
 
             BetaStopReason.END_TURN, BetaStopReason.STOP_SEQUENCE -> {
                 val text = message.content().mapNotNull { block -> block.text().orElse(null)?.text() }.joinToString("")
-                val usage = message.usage()
                 if (text.isBlank()) {
                     noReply(NoReplyReason.EMPTY, "no text in the answer")
                 } else {
-                    val servedBy = if (message.model().asString() == MODEL) MODEL else "another model (the fallback)"
-                    info(
-                        "$name: reply from $servedBy at ${effortNow.setting} effort, " +
-                            "${usage.inputTokens()} tokens in, ${usage.outputTokens()} out"
-                    )
+                    forLog {
+                        val servedBy = if (message.model().asString() == MODEL) MODEL else "another model (the fallback)"
+                        val usage = message.usage()
+                        info(
+                            "$name: reply from $servedBy at ${effortNow.setting} effort, " +
+                                "${usage.inputTokens()} tokens in, ${usage.outputTokens()} out"
+                        )
+                    }
                     AIReplyResult.Reply(text)
                 }
             }
@@ -189,65 +209,121 @@ class AnthropicReplyGenerator(
     /**
      * Before a person waits for it: everything a first reply has to load, run once.
      *
-     * 1. One whole request and answer against a stand-in on this device (127.0.0.1, no network):
-     *    the client is built, a request like a real one is made into JSON and sent, a message
-     *    comes back and is read by the same code as a real reply. That loads the SDK's classes
-     *    and its JSON machinery, which is what takes a minute on the sign's board.
+     * 1. One whole request and answer against a stand-in on this device (127.0.0.1, no network,
+     *    no proxy): a request like a real one is made into JSON and sent, a message comes back
+     *    and is read by the same code as a real reply. That loads the SDK's classes and its JSON
+     *    machinery, which is what takes a minute on the sign's board. It is made by a SECOND
+     *    client, built here with a made-up key: the key of this build is never in a request that
+     *    goes anywhere but to the API. The two clients share the JSON mapper, so what this step
+     *    loads into it is there for the real client. What this step does not exercise is the real
+     *    client's own HTTP connection; step 2 does.
      * 2. One real request that costs nothing: the description of the model (`GET /v1/models/...`,
-     *    no tokens, no charge). That does the DNS lookup and the TLS handshake, leaves the
-     *    connection open for the first query, tells [serverClock] the time, and says in the log
-     *    whether the key and the model are accepted.
+     *    no tokens, no charge). That builds the real client, does the DNS lookup and the TLS
+     *    handshake, leaves the connection open for the first query, tells [serverClock] the
+     *    time, and says in the log whether the key and the model are accepted.
      *
      * Blocks until both are done. Never throws.
      */
     override fun warmUp() {
         if (apiKey.isEmpty()) return
         try {
-            LocalStandIn(WARM_UP_ANSWER).use { standIn ->
-                val local = client.withOptions { it.baseUrl(standIn.url) }
-                val effortNow = effort()
-                val answer = local.beta().messages().withRawResponse()
-                    .create(params(AIReplyRequest("warm-up", "warm-up"), effortNow), WARM_UP_LIMIT)
-                    .use { read(it.parse(), effortNow) }
-                if (answer !is AIReplyResult.Reply) log("$name: the warm-up answer was not read as a reply")
+            standIn(WARM_UP_ANSWER).use { standIn ->
+                val local = AnthropicOkHttpClient.builder()
+                    .apiKey(WARM_UP_KEY)
+                    .baseUrl(standIn.url)
+                    // Straight to this device, whatever proxy the system has been given.
+                    .proxy(Proxy.NO_PROXY)
+                    .jsonMapper(mapper)
+                    .maxRetries(MAX_RETRIES)
+                    .logLevel(LogLevel.OFF)
+                    .timeout(timeouts(WARM_UP_TIME))
+                    .build()
+                try {
+                    val effortNow = effort()
+                    val answer = local.beta().messages().withRawResponse()
+                        .create(params(AIReplyRequest("warm-up", "warm-up"), effortNow), options(WARM_UP_TIME))
+                        .use { read(it.parse(), effortNow) }
+                    if (answer !is AIReplyResult.Reply) log("$name: the warm-up answer was not read as a reply")
+                } finally {
+                    local.close()
+                }
             }
         } catch (e: Exception) {
             log("$name: the local part of the warm-up failed (${kinds(e)})")
         }
-        askForModel("warm-up", WARM_UP_LIMIT)
+        askForModel("warm-up", WARM_UP_TIME)
     }
 
-    override fun syncClock() {
+    /** The caller says how long it may take: a query that waits gives it seconds, a warm-up more. */
+    override fun syncClock(limit: Duration) {
         if (apiKey.isEmpty() || serverClock == null || serverClock.now() != null) return
-        askForModel("time check", TIME_CHECK_LIMIT)
+        if (limit < MIN_TIME_CHECK) return
+        askForModel("time check", limit)
     }
 
-    /** The free request. Tells the clock the time, and the log what the API said. */
-    private fun askForModel(what: String, limit: RequestOptions) {
+    /**
+     * The free request. Tells the clock the time and the log that the key and the model are
+     * accepted, both only when what came back IS the description of the model: any page can
+     * answer a GET with HTTP 200.
+     */
+    private fun askForModel(what: String, limit: Duration) {
         try {
-            client.models().withRawResponse().retrieve(MODEL, limit).use { response ->
-                serverClock?.syncFromDateHeader(response.headers().date())
+            client.models().withRawResponse().retrieve(MODEL, options(limit)).use { response ->
+                val arrivedAt = serverClock?.arrival()
+                if (response.parse().id() == MODEL) {
+                    tellClock(response.headers(), arrivedAt)
+                    info("$name: $what: the API answers, and the key and the model are accepted")
+                } else {
+                    log("$name: $what: what came back does not describe the model")
+                }
             }
-            info("$name: $what: the API answers, and the key and the model are accepted")
         } catch (e: AnthropicServiceException) {
-            serverClock?.syncFromDateHeader(e.headers().date())
+            tellClockFromError(e)
             log("$name: $what: ${summary(e)}")
         } catch (e: AnthropicIoException) {
             log("$name: $what: ${describe(reasonForIoFailure(e))} [${kinds(e)}]")
+        } catch (e: AnthropicInvalidDataException) {
+            log("$name: $what: what came back is not from the API")
         } catch (e: Exception) {
             log("$name: $what failed (${e.javaClass.simpleName})")
         }
     }
 
-    private fun failed(reason: NoReplyReason, e: AnthropicServiceException): AIReplyResult.NoReply {
-        serverClock?.syncFromDateHeader(e.headers().date())
-        return noReply(reason, summary(e))
+    /** An error status. What it means is decided from the number; the rest is for the log. */
+    private fun failed(e: AnthropicServiceException): AIReplyResult.NoReply {
+        tellClockFromError(e)
+        return noReply(NoReplyReason.forHttpStatus(e.statusCode()), summary(e))
+    }
+
+    /** [arrivedAt]: the moment the response came, by [ServerClock.arrival]; null for "now". */
+    private fun tellClock(headers: Headers, arrivedAt: Long?) {
+        forLog {
+            serverClock?.syncFromHeaders(
+                date = headers.values("date").firstOrNull(), age = headers.values("age").firstOrNull(), arrivedAtMs = arrivedAt,
+            )
+        }
+    }
+
+    /**
+     * An error tells the time only when its body is an error of the API: it names one of the
+     * error types the API has. (Any string at that place makes an "error type" for the SDK; a
+     * page of something in between can have one too.) The SDK has read the small body of the
+     * error by the time it is thrown, so the moment taken is the moment it is caught.
+     */
+    private fun tellClockFromError(e: AnthropicServiceException) {
+        forLog {
+            val known = e.errorType().map { it.value() != ErrorType.Value._UNKNOWN }.orElse(false)
+            if (known) tellClock(e.headers(), arrivedAt = null)
+        }
     }
 
     private fun noReply(reason: NoReplyReason, detail: String): AIReplyResult.NoReply {
-        log("$name: no reply, ${describe(reason)} [$detail]")
+        forLog { log("$name: no reply, ${describe(reason)} [$detail]") }
         return AIReplyResult.NoReply(reason, detail)
     }
+
+    private fun options(limit: Duration): RequestOptions =
+        RequestOptions.builder().timeout(timeouts(limit)).followRedirects(false).build()
 
     companion object {
         /** The model Afik asked for by name. */
@@ -257,12 +333,18 @@ class AnthropicReplyGenerator(
         const val MAX_TOKENS = 16_000L
 
         /**
-         * The end of one request. Long, on purpose: the sign says "thinking" for 30 s only
-         * ([AIQueryDesk.Limits.noticeMs]), but a reply that comes after that is still used, and
-         * the first request after a start took about a minute on the sign's board.
+         * The longest one request may take. Long, on purpose: the sign says "thinking" for 30 s only
+         * ([AIQueryDesk.Limits.noticeMs]), but a reply that comes after that is still used. A
+         * request gets less when less of its query's deadline is left.
          */
         val REQUEST_TIMEOUT: Duration = Duration.ofSeconds(90)
         val CONNECT_TIMEOUT: Duration = Duration.ofSeconds(10)
+
+        /**
+         * With less than this left of the query's deadline the request is not sent: it would be
+         * paid for and, most likely, not waited for. (A reply takes about 4 s at high effort.)
+         */
+        val MIN_TIME_TO_SEND: Duration = Duration.ofSeconds(15)
 
         /** One attempt by the SDK. See the class comment. */
         const val MAX_RETRIES = 0
@@ -271,10 +353,13 @@ class AnthropicReplyGenerator(
         val FALLBACK_BETA: AnthropicBeta = AnthropicBeta.SERVER_SIDE_FALLBACK_2026_07_01
 
         /** The time limit for each of the two requests of the warm-up: the first connection of a cold start is slow. */
-        private val WARM_UP_LIMIT: RequestOptions = RequestOptions.builder().timeout(Duration.ofSeconds(30)).build()
+        private val WARM_UP_TIME: Duration = Duration.ofSeconds(30)
 
-        /** The time limit for the time check, which a person may be waiting behind. */
-        private val TIME_CHECK_LIMIT: RequestOptions = RequestOptions.builder().timeout(Duration.ofSeconds(5)).build()
+        /** With less than this to spend, the time is not asked for. */
+        private val MIN_TIME_CHECK: Duration = Duration.ofSeconds(1)
+
+        /** The key of the client that talks to the stand-in: made up, and worth nothing anywhere. */
+        internal const val WARM_UP_KEY = "warm-up-no-key"
 
         /** A message as the API sends it, for the local part of the warm-up. */
         private const val WARM_UP_ANSWER =
@@ -286,11 +371,24 @@ class AnthropicReplyGenerator(
         /** The refusal categories the log may name. Anything else is "not given or not known". */
         private val REFUSAL_CATEGORIES = setOf("cyber", "bio", "reasoning_extraction", "frontier_llm", "general_harms")
 
-        private fun Headers.date(): String? = values("date").firstOrNull()
+        /** The whole request within [limit], and the connection within its share of it. */
+        private fun timeouts(limit: Duration): Timeout =
+            Timeout.builder().connect(minOf(CONNECT_TIMEOUT, limit)).request(limit).build()
+
+        /**
+         * Runs [read], which is there for a log line or the clock only. Whatever it throws is
+         * dropped: it must never decide what an answer is.
+         */
+        private inline fun <T> forLog(read: () -> T): T? =
+            try {
+                read()
+            } catch (e: Exception) {
+                null
+            }
 
         /** "HTTP 429 RATE_LIMIT_ERROR": the status and the SDK's own name for the error type, nothing from the body. */
         private fun summary(e: AnthropicServiceException): String =
-            "HTTP ${e.statusCode()} ${e.errorType().map { it.value().name }.orElse("no error type")}"
+            "HTTP ${e.statusCode()} ${forLog { e.errorType().map { it.value().name }.orElse(null) } ?: "no error type"}"
 
         /** The kinds of the exceptions in the chain, outermost first. No messages. */
         private fun kinds(failure: Throwable): String =
@@ -323,6 +421,7 @@ class AnthropicReplyGenerator(
         fun describe(reason: NoReplyReason): String = when (reason) {
             NoReplyReason.MISSING_KEY -> "there is no API key"
             NoReplyReason.NOTHING_TO_ASK -> "there is nothing to ask"
+            NoReplyReason.WITHDRAWN -> "the query was withdrawn before anything was sent"
             NoReplyReason.REFUSED -> "the request was declined (refusal), fallback included"
             NoReplyReason.EMPTY -> "the answer was empty"
             NoReplyReason.TRUNCATED -> "the answer was cut off"

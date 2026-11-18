@@ -31,6 +31,8 @@ class FakeMessagesApi : AutoCloseable {
         val body: String,
         val delayMs: Long = 0,
         val headers: Map<String, String> = emptyMap(),
+        /** After [body] has been sent the response does not end: the connection stays open and silent. */
+        val thenStalls: Boolean = false,
     )
 
     val received: MutableList<Received> = CopyOnWriteArrayList()
@@ -50,7 +52,16 @@ class FakeMessagesApi : AutoCloseable {
                     .setResponseCode(reply.status)
                     .setHeader("content-type", "application/json")
                     .apply { reply.headers.forEach { (name, value) -> setHeader(name, value) } }
-                    .setBody(reply.body)
+                    .apply {
+                        if (reply.thenStalls) {
+                            // The body, then more that is held back for longer than the tests
+                            // wait for an answer (and no longer: the server has to shut down after them).
+                            setBody(reply.body + "x".repeat(4_096))
+                            throttleBody(reply.body.toByteArray().size.toLong(), 3, TimeUnit.SECONDS)
+                        } else {
+                            setBody(reply.body)
+                        }
+                    }
                     .setHeadersDelay(reply.delayMs, TimeUnit.MILLISECONDS)
             }
         }

@@ -155,4 +155,52 @@ class SetTimesTest {
         assertTrue(bundleThrows.why.isNotBlank())
         assertTrue(bundleBroken.why.isNotBlank())
     }
+
+    // ---- a set ends after it starts, in real time (minors of both gates)
+
+    private fun oneSet(start: String, end: String) = """
+        {"timezone": "America/Los_Angeles", "sets": [
+          {"stage": "The Dream", "artist": "Night Shift", "start": "$start", "end": "$end"},
+          {"stage": "The Dream", "artist": "Anchor", "start": "2026-11-20T16:00", "end": "2026-11-20T17:00"}
+        ]}
+    """.trimIndent()
+
+    @Test
+    fun `in the hour the clocks go back, a set from the first 1-45 to the second 1-15 is a set of half an hour`() {
+        // 2026-11-01, Los Angeles: 01:00 to 02:00 happens twice.
+        val table = assertIs<SetTimesLoad.Loaded>(SetTimes.parse(oneSet("2026-11-01T01:45", "2026-11-01T01:15"), "test")).table
+
+        val set = table.sets.single { it.artist == "Night Shift" }
+        val (from, to) = set.interval(table.zone)!!
+        assertEquals(java.time.Duration.ofMinutes(30), java.time.Duration.between(from, to))
+        assertEquals(java.time.Instant.parse("2026-11-01T08:45:00Z"), from, "the first 1:45, in daylight time")
+        assertEquals(java.time.Instant.parse("2026-11-01T09:15:00Z"), to, "the second 1:15, in standard time")
+    }
+
+    @Test
+    fun `in the hour the clocks go forward, a set that ends before it starts in real time is left out when the file is read`() {
+        // 2027-03-14, Los Angeles: 02:00 to 03:00 does not happen. 02:45 is read as 03:45, after the 03:15 it should end at.
+        val load = assertIs<SetTimesLoad.Loaded>(SetTimes.parse(oneSet("2027-03-14T02:45", "2027-03-14T03:15"), "test"))
+
+        assertEquals(listOf("Anchor"), load.table.sets.map { it.artist })
+        assertTrue(load.source.contains("1 unreadable"), "the reader says a set was left out: ${load.source}")
+    }
+
+    @Test
+    fun `a set that ends when it starts, or before, on an ordinary day is left out as before`() {
+        for ((start, end) in listOf("2026-11-20T22:00" to "2026-11-20T22:00", "2026-11-20T22:00" to "2026-11-20T21:00")) {
+            val load = assertIs<SetTimesLoad.Loaded>(SetTimes.parse(oneSet(start, end), "test"))
+            assertEquals(listOf("Anchor"), load.table.sets.map { it.artist }, "$start to $end")
+        }
+    }
+
+    @Test
+    fun `the loader and the prompt take a set's times from the same place`() {
+        val table = assertIs<SetTimesLoad.Loaded>(SetTimes.parse(oneSet("2026-11-01T01:45", "2026-11-01T01:15"), "test")).table
+        val during = java.time.Instant.parse("2026-11-01T09:00:00Z") // the second 1:00
+
+        val prompt = FestivalContext.describe(during, ZoneId.of("UTC"), SetTimesLoad.Loaded(table, "test"), buildDate = null)
+
+        assertTrue(prompt.contains("Night Shift until 1:15 am"), prompt)
+    }
 }

@@ -12,8 +12,7 @@ class Secrets(values: List<String>) {
 
     /**
      * A log function for the reply path: every line is redacted, and a failure of the log itself
-     * is dropped. A reply is worth more than its log line (the on-screen log shares one date
-     * formatter between threads).
+     * is dropped. A reply is worth more than its log line.
      */
     fun sink(log: (String) -> Unit): (String) -> Unit = { line ->
         try {

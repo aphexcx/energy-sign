@@ -4,7 +4,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import java.time.Duration
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -14,24 +13,36 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * - One call at a time, whatever the caller does: a second [ask] while a call is out, or while
  *   the warm-up runs, is answered at once with a failure and nothing is sent for it.
- * - Every call has an end. Each part of a call has its own time limit (the set times, the time
- *   check, the request: see [AIReplyService] and the generators), and [deadline] stands behind
- *   their sum: when it passes, whatever can be cancelled is cancelled and the result is a
- *   timeout. The slot is given back only when the call has REALLY ended, also then: a part that
- *   cannot be cancelled is waited for.
+ * - ONE time limit for a query, [budget], counted from the moment it is asked. It is handed down
+ *   as a [Deadline] to everything the reply does (see [AIReplyService] and the generators), and
+ *   each step takes what is left of it. There is no second clock here: nothing stands behind the
+ *   request that could end the wait while the provider is still writing an answer, so an answer
+ *   that was paid for is never thrown away and bought again. The slot is given back when the
+ *   call has REALLY ended.
  * - Nothing here throws to its caller, and nothing is lost: [ask] always ends in one call of
- *   `onResult`, also when the reply code, or the log, fails.
+ *   `onResult`, also when the reply code, or the log, fails. The warm-up always ends in one call
+ *   of `onDone`, whatever fails on its thread.
  */
 class AIReplyRunner(
     /** One whole reply: the prompt of this moment, the provider, the clean-up. See [AIReplyService.replyTo]. */
-    private val reply: suspend (String) -> AIReplyResult,
+    private val reply: suspend (text: String, deadline: Deadline, stillWanted: () -> Boolean) -> AIReplyResult,
     /** The warm-up, or null for none. Blocks until it is done. Runs on its own thread. */
     private val warmUp: (() -> Unit)? = null,
     private val log: (String) -> Unit = {},
-    private val deadline: Duration = CALL_DEADLINE,
+    private val budget: Duration = QUERY_BUDGET,
+    /**
+     * The clock the deadline of a query is counted on, in nanoseconds. The app gives the one
+     * that goes on while the board sleeps, the same that counts the notice and the pauses.
+     */
+    private val nanoTime: () -> Long = System::nanoTime,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
-    /** Starts the thread the warm-up runs on. The app gives it a low priority. */
-    private val startWarmUpThread: (Runnable) -> Unit = { Thread(it, "ai-warm-up").apply { isDaemon = true }.start() },
+    /** Makes the thread the warm-up runs on. */
+    private val warmUpThread: (Runnable) -> Thread = { Thread(it, "ai-warm-up").apply { isDaemon = true } },
+    /**
+     * Run on that thread before the warm-up; the app lowers the thread's priority here. Best
+     * effort: when it fails, the warm-up runs all the same.
+     */
+    private val onWarmUpThread: () -> Unit = {},
 ) : AIReplySource {
 
     /** True while the warm-up or a call is out. */
@@ -40,39 +51,53 @@ class AIReplyRunner(
     override fun warmUp(onDone: () -> Unit): Boolean {
         val warm = warmUp ?: return false
         if (!busy.compareAndSet(false, true)) return false
-        startWarmUpThread(
-            Runnable {
-                val startedAt = System.nanoTime()
-                val failure = quietly { warm() }
-                busy.set(false)
-                quietly {
-                    log(
-                        "Warm-up " + (if (failure == null) "done" else "failed (${failure.javaClass.simpleName})") +
-                            " after ${(System.nanoTime() - startedAt) / 1_000_000} ms"
-                    )
-                }
-                quietly(onDone)
+        // The whole body of the thread is guarded: whatever fails in it, the slot is given back
+        // and onDone is called.
+        val work = Runnable {
+            val startedAt = System.nanoTime()
+            quietly(onWarmUpThread)
+            val failure = quietly { warm() }
+            busy.set(false)
+            quietly {
+                log(
+                    "Warm-up " + (if (failure == null) "done" else "failed (${failure.javaClass.simpleName})") +
+                        " after ${(System.nanoTime() - startedAt) / 1_000_000} ms"
+                )
             }
-        )
-        return true
+            quietly(onDone)
+        }
+        return try {
+            warmUpThread(work).start()
+            true
+        } catch (e: Throwable) {
+            // No thread: there is no warm-up, and the first query pays for the slow first use.
+            busy.set(false)
+            quietly { log("The warm-up could not be started (${e.javaClass.simpleName})") }
+            false
+        }
     }
 
-    override fun ask(text: String, onResult: (AIReplyResult) -> Unit) {
+    override fun ask(text: String, stillWanted: () -> Boolean, onResult: (AIReplyResult) -> Unit) {
         if (!busy.compareAndSet(false, true)) {
             quietly { onResult(AIReplyResult.NoReply(NoReplyReason.UNEXPECTED_FAILURE, "another call is out")) }
             return
         }
-        scope.launch {
-            val result = try {
-                withTimeoutOrNull(deadline.toMillis()) { reply(text) }
-                    ?: AIReplyResult.NoReply(NoReplyReason.TIMEOUT, "no reply within ${deadline.seconds} s")
-            } catch (e: Throwable) {
-                // Whatever it is, the caller hears of it: a query whose result never comes would
-                // hold the one slot for ever.
-                AIReplyResult.NoReply(NoReplyReason.UNEXPECTED_FAILURE, e.javaClass.name)
+        val deadline = Deadline.after(budget, nanoTime)
+        try {
+            scope.launch {
+                val result = try {
+                    reply(text, deadline, stillWanted)
+                } catch (e: Throwable) {
+                    // Whatever it is, the caller hears of it: a query whose result never comes would
+                    // hold the one slot for ever.
+                    AIReplyResult.NoReply(NoReplyReason.UNEXPECTED_FAILURE, e.javaClass.name)
+                }
+                busy.set(false)
+                quietly { onResult(result) }
             }
+        } catch (e: Throwable) {
             busy.set(false)
-            quietly { onResult(result) }
+            quietly { onResult(AIReplyResult.NoReply(NoReplyReason.UNEXPECTED_FAILURE, e.javaClass.name)) }
         }
     }
 
@@ -87,11 +112,12 @@ class AIReplyRunner(
 
     companion object {
         /**
-         * The end of every call: behind the limits of its parts, which add up to 100 s (5 s for
-         * the set times, 5 s for the time check, 90 s for the request). Much longer than the
-         * 30 s the sign says "thinking": the first call after the app starts took about a
-         * minute on the sign's board, and a reply that comes late is still used.
+         * All the time one query gets, from the moment it is asked: 5 s for the set times, 5 s
+         * for the time check, 90 s for the request. When the steps before the request take
+         * longer (the first use of the provider's client took about a minute on the sign's
+         * board, which is what the warm-up is for), the request gets what is left. Much longer
+         * than the 30 s the sign says "thinking": a reply that comes late is still used.
          */
-        val CALL_DEADLINE: Duration = Duration.ofSeconds(110)
+        val QUERY_BUDGET: Duration = Duration.ofSeconds(100)
     }
 }

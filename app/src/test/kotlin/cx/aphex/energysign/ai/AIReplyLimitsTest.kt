@@ -135,4 +135,60 @@ class AIReplyLimitsTest {
         assertEquals("Hydrate.", AIReplyLimits.fitToSign("  \n Hydrate. \n"))
         assertEquals("", AIReplyLimits.fitToSign(" \n "))
     }
+
+    // ---- words stay words (a minor of the deep gate)
+
+    @Test
+    fun `a reply in another language - the literal text the sign gets`() {
+        // Spelled out here, not taken from the code under test.
+        assertEquals("Qu pasa, Espaa! Ms bajo?", AIReplyLimits.fitToSign("¡Qué pasa, España! ¿Más bajo?"))
+    }
+
+    @Test
+    fun `what parts two words in Unicode parts them on the sign - a separator is a space before anything is dropped`() {
+        assertEquals("one two", AIReplyLimits.fitToSign("one two"), "a line separator")
+        assertEquals("one two", AIReplyLimits.fitToSign("one two"), "a paragraph separator")
+        assertEquals("one two", AIReplyLimits.fitToSign("one two"), "a no-break space")
+        assertEquals("one two", AIReplyLimits.fitToSign("one two"), "a narrow no-break space")
+        assertEquals("one two", AIReplyLimits.fitToSign("one　two"), "an ideographic space")
+        assertEquals("one two", AIReplyLimits.fitToSign("one\u0085two"), "a next-line control")
+    }
+
+    @Test
+    fun `two hundred words parted by no-break spaces are words - the reply is cut after a whole one, not thrown away`() {
+        val fitted = AIReplyLimits.fitToSign((1..200).joinToString(" ") { "beat" })
+
+        assertTrue(fitted.startsWith("beat beat beat"), fitted.take(30))
+        assertTrue(fitted.endsWith("beat"), fitted.takeLast(10))
+        assertTrue(fitted.split(" ").all { it == "beat" }, "a word was cut or two were joined")
+        assertTrue(fitted.length > 400, "most of what fits is kept: ${fitted.length} characters")
+    }
+
+    @Test
+    fun `a text of any length is looked at up to a fixed number of characters`() {
+        assertEquals(8_192, AIReplyLimits.MAX_INPUT_CHARS)
+        // What the sign cannot show, 20 000 times, and then a word: the word is beyond what is looked at.
+        assertEquals("", AIReplyLimits.fitToSign("☃".repeat(20_000) + " late"))
+        // Within it, it is found.
+        assertEquals("early", AIReplyLimits.fitToSign("☃".repeat(8_000) + " early"))
+
+        val startedAt = System.nanoTime()
+        val fitted = AIReplyLimits.fitToSign("word ".repeat(2_000_000))
+        val tookMs = (System.nanoTime() - startedAt) / 1_000_000
+        assertTrue(fitted.endsWith("word"))
+        assertTrue(tookMs < 2_000, "ten megabytes took $tookMs ms: the work grew with the text")
+    }
+
+    // ---- found by the review of round 3
+
+    @Test
+    fun `a text that is cut where it stops being looked at loses the word at the cut - half a word is not a reply`() {
+        // The cut falls inside "hello": what the sign cannot show, and then "he".
+        assertEquals("", AIReplyLimits.fitToSign("\u2603".repeat(8_190) + "hello world"))
+        // With words before the cut, the whole ones stay and the half one goes.
+        val fitted = AIReplyLimits.fitToSign("\u2603".repeat(8_180) + " ok then hello world")
+        assertEquals("ok then", fitted)
+        // A text that is not cut keeps its last word.
+        assertEquals("ok then hello", AIReplyLimits.fitToSign("\u2603".repeat(100) + " ok then hello"))
+    }
 }

@@ -24,8 +24,22 @@ class AIQueryDeskTest {
 
     private fun query(text: String) = Query(text).also { list.add(it) }
 
+    /** How often the desk went through the list of messages. */
+    private var passes = 0
+    private val said = mutableListOf<String>()
+    private var logFails = false
+
     private fun desk(warmingUp: Boolean = false, limits: AIQueryDesk.Limits = AIQueryDesk.Limits()) =
-        AIQueryDesk<Query>(start = { sent.add(it) }, listed = { q -> list.any { it === q } }, limits = limits, warmingUp = warmingUp)
+        AIQueryDesk<Query>(
+            start = { sent.add(it) },
+            listedAmong = { known ->
+                passes++
+                list.filter { it in known }.toSet()
+            },
+            log = { if (logFails) throw IllegalStateException("the log failed") else said.add(it) },
+            limits = limits,
+            warmingUp = warmingUp,
+        )
 
     private val reply = AIReplyResult.Reply("HYDRATE.")
     private fun noReply(reason: NoReplyReason) = AIReplyResult.NoReply(reason)
@@ -302,7 +316,7 @@ class AIQueryDeskTest {
     }
 
     @Test
-    fun `whatever is wrong and however many queries there are, at most 15 calls are made in an hour`() {
+    fun `when every call fails, the pauses alone allow at most 15 calls in an hour, however many queries there are`() {
         for (reason in listOf(NoReplyReason.NETWORK, NoReplyReason.RATE_LIMITED, NoReplyReason.SERVER_ERROR, NoReplyReason.KEY_REJECTED)) {
             sent.clear()
             list.clear()
@@ -355,12 +369,278 @@ class AIQueryDeskTest {
         assertFalse(desk.thinkingWanted(now + 2_000))
     }
 
+    // ---- a budget of calls an hour that nothing gives back (class C)
+
+    @Test
+    fun `the limits the rules were agreed with are the defaults`() {
+        val limits = AIQueryDesk.Limits()
+
+        assertEquals(30_000L, limits.noticeMs)
+        assertEquals(3, limits.maxAttempts)
+        assertEquals(4, limits.maxWaiting)
+        assertEquals(45, limits.callsPerHour)
+        assertEquals(listOf(30_000L, 60_000L, 120_000L, 240_000L, 300_000L), limits.coolDownsMs)
+    }
+
+    @Test
+    fun `failure and answer in turn buy no more than the budget in any hour - an answer gives nothing back`() {
+        // Every second call fails and every other one is answered, so the pause after a failure
+        // is always the shortest one: by the pauses alone this is a call every 31 s, 116 an hour.
+        val desk = desk()
+        val start = now
+        var turn = 0
+        while (now < start + 3_600_000) {
+            val q = query("q")
+            if (desk.shown(q, now)) desk.finished(q, if (turn++ % 2 == 0) noReply(NoReplyReason.SERVER_ERROR) else reply, now)
+            now += 31_000
+        }
+
+        assertEquals(45, sent.size, "calls in the first hour")
+
+        // The hour moves on: each call that becomes an hour old makes room for one more, and no more.
+        val secondHourStart = now
+        while (now < secondHourStart + 3_600_000) {
+            val q = query("q")
+            if (desk.shown(q, now)) desk.finished(q, if (turn++ % 2 == 0) noReply(NoReplyReason.SERVER_ERROR) else reply, now)
+            now += 31_000
+        }
+        assertEquals(90, sent.size, "calls in two hours")
+    }
+
+    @Test
+    fun `no hour, wherever it starts, holds more calls than the budget`() {
+        val desk = desk(limits = AIQueryDesk.Limits(callsPerHour = 5))
+        val sentAt = mutableListOf<Long>()
+        val start = now
+        // Answers only, as fast as queries come: nothing but the budget holds these back.
+        while (now < start + 3 * 3_600_000) {
+            val q = query("q")
+            if (desk.shown(q, now)) {
+                sentAt += now
+                desk.finished(q, reply, now)
+            }
+            now += 7_000
+        }
+
+        assertTrue(sentAt.size >= 15, "the budget must come back: ${sentAt.size} calls in three hours")
+        for (from in sentAt) {
+            val inThatHour = sentAt.count { it >= from && it < from + 3_600_000 }
+            assertTrue(inThatHour <= 5, "$inThatHour calls in the hour from $from")
+        }
+    }
+
+    @Test
+    fun `while the budget is spent a query gets no notice and no call, and the log says so once`() {
+        val desk = desk(limits = AIQueryDesk.Limits(callsPerHour = 2))
+        val first = now
+        for (text in listOf("a", "b")) {
+            val q = query(text)
+            assertTrue(desk.shown(q, now))
+            desk.finished(q, reply, now)
+            now += 1_000
+        }
+
+        val late = query("c")
+        repeat(3) {
+            assertFalse(desk.shown(late, now), "the budget is spent")
+            assertFalse(desk.thinkingWanted(now), "no notice for a query that is not asked")
+            now += 60_000
+        }
+        assertEquals(2, sent.size)
+        assertEquals(1, said.count { it.contains("in the last hour") }, "$said")
+
+        now = first + 3_600_000 - 1
+        assertFalse(desk.shown(late, now), "the first call is not an hour old yet")
+        now = first + 3_600_000
+        assertTrue(desk.shown(late, now), "the first call is an hour old: there is room for one")
+        assertEquals(3, sent.size)
+    }
+
+    @Test
+    fun `a query in line is not sent when the budget is spent by the time its turn comes`() {
+        val desk = desk(warmingUp = true, limits = AIQueryDesk.Limits(callsPerHour = 1))
+        val a = query("a")
+        val b = query("b")
+        assertTrue(desk.shown(a, now))
+        assertTrue(desk.shown(b, now + 1))
+
+        desk.warmedUp(now + 2)
+        assertEquals(listOf(a), sent)
+        desk.finished(a, reply, now + 3)
+
+        assertEquals(listOf(a), sent, "b would be the second call of the hour")
+        assertFalse(desk.thinkingWanted(now + 4), "b left the line: its notice comes down")
+    }
+
+    @Test
+    fun `a call counts against the budget whatever becomes of it - deleted, failed or never answered by a model`() {
+        val desk = desk(limits = AIQueryDesk.Limits(callsPerHour = 3, coolDownsMs = listOf(0)))
+        val gone = query("gone")
+        desk.shown(gone, now)
+        list.remove(gone)
+        assertEquals(AIQueryDesk.Outcome.Gone, desk.finished(gone, reply, now))
+
+        val failed = query("failed")
+        desk.shown(failed, now + 1)
+        desk.finished(failed, noReply(NoReplyReason.NETWORK), now + 2)
+
+        val noKey = query("no key")
+        desk.shown(noKey, now + 3)
+        desk.finished(noKey, noReply(NoReplyReason.MISSING_KEY), now + 4)
+
+        assertFalse(desk.shown(query("fourth"), now + 5))
+        assertEquals(3, sent.size)
+    }
+
+    // ---- the log is not part of the rules (class C, a minor of the deep gate)
+
+    @Test
+    fun `a log that fails leaves nothing half done - the result is dealt with and whoever waits is seen to`() {
+        val desk = desk()
+        val a = query("a")
+        val b = query("b")
+        desk.shown(a, now)
+        desk.shown(b, now + 1)
+        logFails = true
+
+        val outcome = desk.finished(a, noReply(NoReplyReason.KEY_REJECTED), now + 2)
+
+        assertEquals(AIQueryDesk.Outcome.Retired(NoReplyReason.KEY_REJECTED), outcome)
+        // b was in line behind a failure: it left the line unsent, and is free to be asked after the pause.
+        assertEquals(listOf(a), sent)
+        now += 30_002
+        assertTrue(desk.shown(b, now), "b is not stuck in a line nobody drains")
+        assertEquals(listOf(a, b), sent)
+
+        // The other two lines the desk writes: the notice that came down, and the budget.
+        now += 30_000
+        assertFalse(desk.thinkingWanted(now))
+        val small = desk(limits = AIQueryDesk.Limits(callsPerHour = 0))
+        assertFalse(small.shown(query("c"), now))
+    }
+
+    // ---- a query that waited too long is not in the way (minors of both gates)
+
+    @Test
+    fun `a query whose wait ran out is put in line again when it comes round, and is sent when the warm-up ends`() {
+        val desk = desk(warmingUp = true)
+        val q = query("asked at the start")
+        assertTrue(desk.shown(q, now))
+
+        now += 59_000 // its 30 s are long over; the warm-up still runs
+        assertTrue(desk.shown(q, now), "the old place in line must not turn it away")
+
+        now += 6_000
+        desk.warmedUp(now)
+        assertEquals(listOf(q), sent)
+    }
+
+    @Test
+    fun `those who waited too long hold no place in the line`() {
+        val desk = desk(warmingUp = true)
+        repeat(4) { assertTrue(desk.shown(query("early $it"), now + it)) }
+        assertFalse(desk.shown(query("one too many"), now + 10), "the line has four places")
+
+        now += 31_000
+        val fresh = query("fresh")
+        assertTrue(desk.shown(fresh, now), "the four have waited out their time")
+
+        desk.warmedUp(now + 1)
+        assertEquals(listOf(fresh), sent)
+    }
+
+    // ---- what a result costs the owner of the messages (class D)
+
+    @Test
+    fun `the end of a call is one pass over the list, however many queries the desk keeps count of and however many wait`() {
+        val desk = desk(limits = AIQueryDesk.Limits(callsPerHour = 1_000, coolDownsMs = listOf(0)))
+        // A hundred queries that failed once: each stays a query, and the desk counts its calls.
+        repeat(100) {
+            val q = query("failed once $it")
+            desk.shown(q, now)
+            desk.finished(q, noReply(NoReplyReason.NETWORK), now)
+            now += 1
+        }
+        // And a full line behind the call that is out.
+        val out = query("out")
+        desk.shown(out, now)
+        repeat(4) { desk.shown(query("waiting $it"), now) }
+
+        passes = 0
+        desk.finished(out, reply, now + 1)
+
+        assertEquals(1, passes, "passes over the list for one result")
+    }
+
+    @Test
+    fun `showing a query and asking about the notice cost no pass over the list, and the end of the warm-up costs one`() {
+        val desk = desk(warmingUp = true)
+        repeat(3) { desk.shown(query("waiting $it"), now) }
+        desk.thinkingWanted(now + 1)
+        assertEquals(0, passes)
+
+        desk.warmedUp(now + 2)
+
+        assertEquals(1, passes)
+    }
+
+    @Test
+    fun `what the desk knows of a query is forgotten when the query is gone from the list`() {
+        val desk = desk(limits = AIQueryDesk.Limits(coolDownsMs = listOf(0)))
+        val q = query("fails")
+        repeat(2) {
+            desk.shown(q, now)
+            desk.finished(q, noReply(NoReplyReason.NETWORK), now)
+        }
+        // Deleted; another result comes in, and with it the look at the list.
+        list.remove(q)
+        val other = query("other")
+        desk.shown(other, now)
+        desk.finished(other, reply, now)
+
+        // The same message object is in the list again (nothing in the app does this; it shows what was kept).
+        list.add(q)
+        repeat(2) {
+            desk.shown(q, now)
+            assertIs<AIQueryDesk.Outcome.Failed>(desk.finished(q, noReply(NoReplyReason.NETWORK), now), "its count started afresh")
+        }
+    }
+
+    @Test
+    fun `a result for which nothing was sent says nothing about the provider - the row of failures stands`() {
+        for (notSent in listOf(NoReplyReason.WITHDRAWN, NoReplyReason.MISSING_KEY, NoReplyReason.NOTHING_TO_ASK)) {
+            sent.clear()
+            val desk = desk()
+            val a = query("a")
+            desk.shown(a, now)
+            desk.finished(a, noReply(NoReplyReason.NETWORK), now) // the first failure: a pause of 30 s
+            now += 30_000
+            val b = query("b")
+            assertTrue(desk.shown(b, now))
+            desk.finished(b, noReply(notSent), now) // no request went out: no answer of the provider
+            val c = query("c")
+            assertTrue(desk.shown(c, now), "$notSent is no failure of the provider: no pause")
+            desk.finished(c, noReply(NoReplyReason.NETWORK), now) // the SECOND failure in a row: 60 s
+
+            now += 59_000
+            assertFalse(desk.shown(query("d"), now), "$notSent put the pause back to 30 s")
+            now += 1_000
+            assertTrue(desk.shown(query("e"), now))
+            now += 1_000_000
+        }
+        assertEquals(
+            setOf(NoReplyReason.WITHDRAWN, NoReplyReason.MISSING_KEY, NoReplyReason.NOTHING_TO_ASK),
+            NoReplyReason.values().filter { it.nothingWasSent }.toSet(),
+        )
+    }
+
     @Test
     fun `every reason says whether asking again can help and whether the provider failed`() {
         // The table the rules are built on, spelled out: a change to it must be made on purpose.
         val expected = mapOf(
             NoReplyReason.MISSING_KEY to (false to false),
             NoReplyReason.NOTHING_TO_ASK to (false to false),
+            NoReplyReason.WITHDRAWN to (true to false),
             NoReplyReason.REFUSED to (false to false),
             NoReplyReason.EMPTY to (false to false),
             NoReplyReason.TRUNCATED to (false to false),

@@ -67,7 +67,7 @@ class AIProviderTest {
     fun `without an override file the build setting is the effort`(@TempDir dir: File) {
         val warnings = mutableListOf<String>()
 
-        assertEquals(AIEffort.MEDIUM, AIEffort.forRequest(AIEffort.MEDIUM, File(dir, "ai_effort.txt")) { warnings.add(it) })
+        assertEquals(AIEffort.MEDIUM, AIEffort.fromOverrideFile(AIEffort.MEDIUM, File(dir, "ai_effort.txt")) { warnings.add(it) })
         assertTrue(warnings.isEmpty())
     }
 
@@ -76,11 +76,11 @@ class AIProviderTest {
         val file = File(dir, "ai_effort.txt")
 
         file.writeText("low\n")
-        assertEquals(AIEffort.LOW, AIEffort.forRequest(AIEffort.HIGH, file) {})
+        assertEquals(AIEffort.LOW, AIEffort.fromOverrideFile(AIEffort.HIGH, file) {})
         file.writeText("  MAX  ")
-        assertEquals(AIEffort.MAX, AIEffort.forRequest(AIEffort.HIGH, file) {})
+        assertEquals(AIEffort.MAX, AIEffort.fromOverrideFile(AIEffort.HIGH, file) {})
         file.delete()
-        assertEquals(AIEffort.HIGH, AIEffort.forRequest(AIEffort.HIGH, file) {})
+        assertEquals(AIEffort.HIGH, AIEffort.fromOverrideFile(AIEffort.HIGH, file) {})
     }
 
     @Test
@@ -89,11 +89,11 @@ class AIProviderTest {
         val warnings = mutableListOf<String>()
 
         file.writeText("banana")
-        assertEquals(AIEffort.MEDIUM, AIEffort.forRequest(AIEffort.MEDIUM, file) { warnings.add(it) })
+        assertEquals(AIEffort.MEDIUM, AIEffort.fromOverrideFile(AIEffort.MEDIUM, file) { warnings.add(it) })
         assertEquals(1, warnings.size)
 
         file.writeText("")
-        assertEquals(AIEffort.MEDIUM, AIEffort.forRequest(AIEffort.MEDIUM, file) { warnings.add(it) })
+        assertEquals(AIEffort.MEDIUM, AIEffort.fromOverrideFile(AIEffort.MEDIUM, file) { warnings.add(it) })
         assertEquals(1, warnings.size)
     }
 
@@ -106,6 +106,39 @@ class AIProviderTest {
         assertIs<OpenAIReplyGenerator>(openAi)
         assertEquals("anthropic/claude-fable-5-2", anthropic.name)
         assertEquals("openai/gpt-5.1", openAi.name)
+    }
+
+    @Test
+    fun `on the OpenAI path the time comes from the Anthropic API when this build has its key, and from nowhere when it has not`() {
+        FakeMessagesApi().use { anthropicApi ->
+            anthropicApi.answer = FakeMessagesApi.Answer(
+                200,
+                """{"id":"claude-fable-5-2","type":"model","display_name":"Claude Fable 5.2","created_at":"2026-01-01T00:00:00Z"}""",
+                headers = mapOf("date" to "Sat, 21 Nov 2026 05:30:00 GMT"),
+            )
+            fun openAi(anthropicKey: String, clock: ServerClock) = AIReplyGenerators.forProvider(
+                provider = AIProvider.OPENAI,
+                anthropicApiKey = anthropicKey,
+                openAiApiKey = "openai-key-made-up",
+                effort = { AIEffort.DEFAULT },
+                log = {},
+                serverClock = clock,
+                anthropicBaseUrl = anthropicApi.baseUrl,
+                openAiBaseUrl = "http://127.0.0.1:9/v1/",
+            )
+
+            val withoutKey = ServerClock { 0L }
+            openAi(anthropicKey = "  ", clock = withoutKey).syncClock(java.time.Duration.ofSeconds(5))
+            assertEquals(null, withoutKey.now(), "with no Anthropic key the time stays unknown")
+            assertTrue(anthropicApi.received.isEmpty())
+
+            val withKey = ServerClock { 0L }
+            openAi(anthropicKey = "anthropic-key-made-up", clock = withKey).syncClock(java.time.Duration.ofSeconds(5))
+            assertEquals(java.time.Instant.parse("2026-11-21T05:30:00Z"), withKey.now())
+            val request = anthropicApi.received.single()
+            assertTrue(request.path.startsWith("/v1/models/"), "the free request, not a reply: ${request.path}")
+            assertEquals(emptyList(), request.headersContaining("openai-key-made-up"))
+        }
     }
 
     @Test
@@ -158,7 +191,7 @@ class AIProviderTest {
         val file = File(dir, "ai_effort.txt").apply { writeText(key) }
         val warnings = mutableListOf<String>()
 
-        assertEquals(AIEffort.MEDIUM, AIEffort.forRequest(AIEffort.MEDIUM, file) { warnings.add(it) })
+        assertEquals(AIEffort.MEDIUM, AIEffort.fromOverrideFile(AIEffort.MEDIUM, file) { warnings.add(it) })
 
         assertEquals(1, warnings.size)
         assertFalse(warnings.single().contains("made-up") || warnings.single().contains(key.take(6)), warnings.single())
@@ -169,7 +202,7 @@ class AIProviderTest {
         val file = File(dir, "ai_effort.txt").apply { writeText("low" + " ".repeat(10_000)) }
         val warnings = mutableListOf<String>()
 
-        assertEquals(AIEffort.HIGH, AIEffort.forRequest(AIEffort.HIGH, file) { warnings.add(it) })
+        assertEquals(AIEffort.HIGH, AIEffort.fromOverrideFile(AIEffort.HIGH, file) { warnings.add(it) })
         assertEquals(1, warnings.size)
     }
 }

@@ -16,7 +16,10 @@ import org.koin.core.context.stopKoin
 import org.koin.dsl.module
 import java.io.File
 import java.nio.file.Files
+import java.util.concurrent.Callable
 import java.util.concurrent.Executor
+import java.util.concurrent.FutureTask
+import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
@@ -159,19 +162,32 @@ class MessageManagerRepliesTest {
     }
 
     @Test
-    fun `a reply of the app's own and a reply posted from outside, both before the owner runs, are both there`() {
+    fun `a reply of the app's own and a reply posted from outside, both queued by other threads before the owner runs, are carried out in the order they came`() {
         val query = ask()
         untilStored()
 
-        // Two results from two threads before the owner gets to either: one event each.
-        replies.asked.single().answer(AIReplyResult.Reply("Loud enough."))
-        manager.onNewPostedAIReply(PostedAIAnswer("An answer from the laptop.", inReplyTo = "MIDDLE"))
+        // Two results from two threads that are not the owner, before the owner gets to either:
+        // each is one event in its queue. (The owner here is the test's thread; neither result
+        // may be handed over by it, or it would be carried out on the spot.) Both are for the
+        // same query, so the order shows: the app's own reply first, and the posted one is put
+        // in right behind the query, before it. The other way round the posted reply would have
+        // made the query a plain message, and the app's own would have found no query to answer.
+        Thread({ replies.asked.single().answer(AIReplyResult.Reply("Loud enough.")) }, "the call").apply { start(); join() }
+        val posted = FutureTask(Callable { manager.onNewPostedAIReply(PostedAIAnswer("An answer from the laptop.", inReplyTo = query.str)) })
+        val http = Thread(posted, "the HTTP server").apply { start() }
+        // The posted reply is queued when its thread waits for the owner.
+        val waitUntil = System.nanoTime() + 10_000_000_000L
+        while (http.state != Thread.State.TIMED_WAITING && System.nanoTime() < waitUntil) Thread.sleep(5)
+        assertEquals(Thread.State.TIMED_WAITING, http.state, "the posted reply is waiting for the owner")
+        assertEquals("AIQuery:${query.str}", stored().first(), "neither has been carried out yet")
+
         ownerRuns()
 
+        assertTrue(posted.get(5, TimeUnit.SECONDS))
         assertEquals(
             listOf(
-                "User:${query.str}", "AIReply:LOUD ENOUGH.", "User:NEWEST",
-                "User:MIDDLE", "AIReply:AN ANSWER FROM THE LAPTOP.", "User:OLDEST",
+                "User:${query.str}", "AIReply:AN ANSWER FROM THE LAPTOP.", "AIReply:LOUD ENOUGH.",
+                "User:NEWEST", "User:MIDDLE", "User:OLDEST",
             ),
             stored(),
         )
@@ -426,5 +442,118 @@ class MessageManagerRepliesTest {
         manager.togglePersistentThinkingMessage(false)
         ownerRuns()
         assertFalse(next() is Message.ColorMessage.AIThinking)
+    }
+
+    // ---- no call for a query that is gone (class C)
+
+    /** Runs [call] on another thread, as the call's thread would, while this thread (the owner) does its work. */
+    private fun <T> onAnotherThread(call: () -> T): T {
+        val result = FutureTask(Callable(call))
+        Thread(result, "the call").start()
+        while (!result.isDone) {
+            ownerRuns()
+            Thread.sleep(1)
+        }
+        return result.get()
+    }
+
+    @Test
+    fun `the call's thread asks the owner whether the query is still in the list, right before it sends`() {
+        val query = ask()
+        untilStored()
+        val call = replies.asked.single()
+
+        assertTrue(onAnotherThread { call.stillWanted() }, "the query is in the list")
+
+        repo.marqueeMessages.remove(query) // deleted while the call is being prepared
+        assertFalse(onAnotherThread { call.stillWanted() }, "a deleted query must not be sent")
+    }
+
+    @Test
+    fun `a query with the same text as the one that was deleted does not stand in for it`() {
+        val query = ask("hey ravegpt same words")
+        untilStored()
+        val call = replies.asked.single()
+
+        repo.marqueeMessages.remove(query)
+        repo.marqueeMessages.add(0, Message.Marquee.AIQuery(query.str))
+
+        assertFalse(onAnotherThread { call.stillWanted() })
+    }
+
+    @Test
+    fun `when the owner does not answer, the query is not sent`() {
+        ask()
+        untilStored()
+        val call = replies.asked.single()
+
+        // Nobody runs the owner's queue: the sign link is not running.
+        val answer = FutureTask(Callable { call.stillWanted() })
+        Thread(answer, "the call").start()
+
+        assertFalse(answer.get(10, TimeUnit.SECONDS))
+        ownerRuns() // what was withdrawn is not carried out now
+    }
+
+    // ---- minors of the gates
+
+    @Test
+    fun `when the only query is deleted and its notice runs out, the sign gets the advertisements - it is not left without an answer`() {
+        repo.marqueeMessages.clear()
+        val query = ask()
+        untilStored() // shown: the notice is up and the call is out
+        assertTrue(thinkingQueued())
+
+        repo.marqueeMessages.remove(query)
+        nowMs += 31_000
+
+        val shown = next() // an exception here is a request of the sign that got no answer
+        assertFalse(shown is Message.ColorMessage.AIThinking, "the notice's time is up")
+        assertIs<Message.ColorMessage.IconInvaders>(shown, "an empty list shows the advertisements")
+    }
+
+    @Test
+    fun `a reply that stands next is shown under its heading, also when a notice whose time is up was still queued`() {
+        val query = ask()
+        untilStored() // the query was shown; the reply will stand at the next place
+        manager.onNewPostedAIReply(PostedAIAnswer("An answer from the laptop.", inReplyTo = query.str))
+        ownerRuns()
+        assertTrue(thinkingQueued(), "the query's own call is still out, and its notice still up")
+
+        nowMs += 31_000
+
+        assertEquals("RAVEGPT", next().str, "the heading comes before the reply")
+    }
+
+    @Test
+    fun `a notice that was asked for over HTTP outlives a failed call of the app's own - the failure is shown, then the notice again`() {
+        ask()
+        untilStored()
+        manager.togglePersistentThinkingMessage(true)
+        ownerRuns()
+
+        replies.asked.single().answer(AIReplyResult.NoReply(NoReplyReason.NETWORK))
+        ownerRuns()
+
+        assertEquals("NO", next().str, "the person at the sign is told the call failed")
+        repeat(5) { assertFalse(next() is Message.ColorMessage.AIThinking, "the failure slides are shown in one piece") }
+        nowMs += 120_000
+        repeat(4) { assertIs<Message.ColorMessage.AIThinking>(next(), "the notice the HTTP client asked for is still wanted") }
+
+        manager.togglePersistentThinkingMessage(false)
+        ownerRuns()
+        assertFalse(next() is Message.ColorMessage.AIThinking)
+    }
+
+    @Test
+    fun `without a notice from outside a failed call shows the failure and no notice after it`() {
+        ask()
+        untilStored()
+
+        replies.asked.single().answer(AIReplyResult.NoReply(NoReplyReason.NETWORK))
+        ownerRuns()
+
+        assertEquals("NO", next().str)
+        assertFalse(thinkingQueued())
     }
 }

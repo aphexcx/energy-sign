@@ -7,7 +7,6 @@ import cx.aphex.energysign.BuildConfig
 import cx.aphex.energysign.ext.logI
 import cx.aphex.energysign.ext.logW
 import java.io.File
-import java.time.Instant
 import java.time.LocalDate
 import java.time.format.DateTimeParseException
 
@@ -15,8 +14,9 @@ import java.time.format.DateTimeParseException
  * The replies of this app: [AIReplyRunner] with what the build and the device say. Which provider
  * answers is one build setting (AI_PROVIDER), how hard it thinks another (AI_EFFORT).
  *
- * Making this object costs nothing: the provider's client and everything behind it are built on
- * first use, by the warm-up or by the first call, and both run on background threads.
+ * Making this object costs next to nothing: it starts the one thread that reads the effort
+ * file. The provider's client and everything behind it are built on first use, by the warm-up
+ * or by the first call, and both run on background threads.
  *
  * Switch: `adb shell setprop debug.energysign.ai.warmup off` before the app starts leaves the
  * warm-up out, so the first query pays for the slow first use (for a comparison on the sign).
@@ -33,28 +33,42 @@ class AIReplies(private val context: Context) : AIReplySource {
     /** The time as the API's server told it. The board's own clock is not believed (see [ServerClock]). */
     private val serverClock = ServerClock { SystemClock.elapsedRealtime() }
 
+    /**
+     * How hard the model thinks, for this run of the app: the build's setting, or what the file
+     * on the device says. The file is read once, now, by a thread of its own; no reply reads it
+     * or waits for it.
+     */
+    private val effort: ReadOnceAtStart<AIEffort> = run {
+        val overrideFile = File(context.filesDir, AIEffort.OVERRIDE_FILE_NAME)
+        ReadOnceAtStart(
+            untilRead = AIEffort.fromSetting(BuildConfig.AI_EFFORT),
+            read = {
+                AIEffort.fromOverrideFile(AIEffort.fromSetting(BuildConfig.AI_EFFORT, warn), overrideFile, warn)
+                    .also { info("AI effort for this run: ${it.setting}") }
+            },
+        )
+    }
+
     private class Parts(val generator: AIReplyGenerator, val service: AIReplyService)
 
     private val parts: Parts by lazy {
         val provider = AIProvider.fromSetting(BuildConfig.AI_PROVIDER, warn)
-        val builtWithEffort = AIEffort.fromSetting(BuildConfig.AI_EFFORT, warn)
-        val effortOverride = File(context.filesDir, AIEffort.OVERRIDE_FILE_NAME)
         val generator = AIReplyGenerators.forProvider(
             provider = provider,
             anthropicApiKey = BuildConfig.ANTHROPIC_API_KEY,
             openAiApiKey = BuildConfig.OPENAI_API_KEY,
-            effort = { AIEffort.forRequest(builtWithEffort, effortOverride, warn) },
+            effort = effort::get,
             log = warn,
             info = info,
             serverClock = serverClock,
         )
-        info("Replies are written by ${generator.name}, effort ${builtWithEffort.setting} unless ${effortOverride.name} says otherwise")
+        info("Replies are written by ${generator.name}")
         val service = AIReplyService(
             generator = generator,
             log = warn,
-            // Anthropic tells the time with every response. The OpenAI client does not hand its
-            // headers on, so on that path the board's clock has to do (with its lower bounds).
-            now = if (provider == AIProvider.ANTHROPIC) ({ serverClock.now() }) else ({ serverClock.now() ?: Instant.now() }),
+            // Whoever the provider is: the time is what a server told, or it is not known, and
+            // then the prompt says nothing about time. The board's own clock is never used.
+            now = { serverClock.now() },
             setTimes = {
                 SetTimes.load(File(context.filesDir, SetTimes.FILE_NAME)) {
                     context.assets.open(SetTimes.FILE_NAME).use { it.readBytes().toString(Charsets.UTF_8) }
@@ -71,24 +85,26 @@ class AIReplies(private val context: Context) : AIReplySource {
     }
 
     private val runner = AIReplyRunner(
-        reply = { text -> parts.service.replyTo(text) },
+        reply = { text, deadline, stillWanted -> parts.service.replyTo(text, deadline, stillWanted) },
         warmUp = if (warmUpWanted()) ({ parts.generator.warmUp() }) else null,
         log = info,
-        startWarmUpThread = { work ->
-            Thread({
-                // Behind everything else: the sign link is slow enough in the first minute.
-                Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
-                work.run()
-            }, "ai-warm-up").apply {
+        // The same clock as the desk's (AppModule): it goes on while the board sleeps.
+        nanoTime = { SystemClock.elapsedRealtimeNanos() },
+        warmUpThread = { work ->
+            Thread(work, "ai-warm-up").apply {
                 isDaemon = true
                 priority = Thread.MIN_PRIORITY
-            }.start()
+            }
         },
+        // Behind everything else: the sign link is slow enough in the first minute. The runner
+        // calls this on the warm-up thread and goes on when Android refuses it.
+        onWarmUpThread = { Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND) },
     )
 
     override fun warmUp(onDone: () -> Unit): Boolean = runner.warmUp(onDone)
 
-    override fun ask(text: String, onResult: (AIReplyResult) -> Unit) = runner.ask(text, onResult)
+    override fun ask(text: String, stillWanted: () -> Boolean, onResult: (AIReplyResult) -> Unit) =
+        runner.ask(text, stillWanted, onResult)
 
     private fun warmUpWanted(): Boolean {
         val off = systemProperty(WARM_UP_PROPERTY)?.trim()?.lowercase() in setOf("off", "0", "false", "no")

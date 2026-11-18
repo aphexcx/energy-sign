@@ -2,6 +2,8 @@ package cx.aphex.energysign.message
 
 import android.content.Context
 import cx.aphex.energysign.ai.AIReplyLimits
+import cx.aphex.energysign.ai.NoReplyReason
+import cx.aphex.energysign.ai.AIReplyResult
 import cx.aphex.energysign.ext.convertHeartEmojis
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logE
@@ -52,25 +54,35 @@ class MessageRepository(
     }
 
     /**
-     * Puts the AI reply [answer] after [query] and makes the query a plain message. False, and
-     * nothing is changed, when the query is not in the list any more (it was deleted while its
-     * reply was on the way).
+     * Puts [reply] after [query] and makes the query a plain message. False, and nothing is
+     * changed, when the query is not in the list any more (it was deleted while its reply was
+     * on the way).
+     *
+     * [reply] comes ready ([replyMessage]): this runs on the thread that answers the sign, and
+     * nothing here looks at the text. One pass over the list to find the query.
      */
-    fun insertAIReply(query: Message.Marquee.AIQuery, answer: String): Boolean {
-        val queryMsgIdx = marqueeMessages.indexOfFirst { it === query }
+    fun insertAIReply(query: Message.Marquee.AIQuery, reply: Message.Marquee.AIReply, seenAt: Int? = null): Boolean {
+        val queryMsgIdx = indexOf(query, seenAt)
         if (queryMsgIdx < 0) return false
         marqueeMessages[queryMsgIdx] = query.toUserMessage()
-        marqueeMessages.add(queryMsgIdx + 1, replyMessage(answer))
-        logD("Inserted AI reply after messages[${queryMsgIdx}]")
+        marqueeMessages.add(queryMsgIdx + 1, reply)
         return true
     }
+
+    /**
+     * Where [query] stands, or -1. [seenAt] is where the caller saw it in a pass it has just
+     * made over the list: when the query still stands there, no second pass is made.
+     */
+    private fun indexOf(query: Message.Marquee.AIQuery, seenAt: Int?): Int =
+        if (seenAt != null && marqueeMessages.getOrNull(seenAt) === query) seenAt
+        else marqueeMessages.indexOfFirst { it === query }
 
     /**
      * [query] will get no reply: it stays where it is, as the plain message it was, and is not a
      * query any more. False when it is not in the list.
      */
-    fun retireQuery(query: Message.Marquee.AIQuery): Boolean {
-        val queryMsgIdx = marqueeMessages.indexOfFirst { it === query }
+    fun retireQuery(query: Message.Marquee.AIQuery, seenAt: Int? = null): Boolean {
+        val queryMsgIdx = indexOf(query, seenAt)
         if (queryMsgIdx < 0) return false
         marqueeMessages[queryMsgIdx] = query.toUserMessage()
         return true
@@ -78,31 +90,22 @@ class MessageRepository(
 
     /**
      * A reply that was written elsewhere and posted to the app: it goes after the message with
-     * the text it replies to, or after the newest message when there is none. It gets the same
-     * clean-up and the same size limit as a reply of the app's own. False, and nothing is
-     * changed, when there is nothing left of it after that or the list is empty.
+     * the text [inReplyTo], or after the newest message when there is none. False, and nothing
+     * is changed, when the list is empty.
+     *
+     * [reply] comes ready ([postedReplyMessage]), as for [insertAIReply]. One pass over the list.
      */
-    fun insertAIReplyToUserMessage(postedAIAnswer: PostedAIAnswer): Boolean {
-        val answer = AIReplyLimits.fitToSign(postedAIAnswer.answer)
-        if (answer.isBlank() || marqueeMessages.isEmpty()) return false
-        val found = marqueeMessages.indexOfFirst { it.str == postedAIAnswer.inReplyTo }
+    fun insertPostedAIReply(reply: Message.Marquee.AIReply, inReplyTo: String): Boolean {
+        if (marqueeMessages.isEmpty()) return false
+        val found = marqueeMessages.indexOfFirst { it.str == inReplyTo }
         val queryMsgIdx = if (found >= 0) found else 0
         // Convert the AIQuery message to a user message
         (marqueeMessages[queryMsgIdx] as? Message.Marquee.AIQuery)?.let {
             marqueeMessages[queryMsgIdx] = it.toUserMessage()
         }
-        marqueeMessages.add(queryMsgIdx + 1, replyMessage(answer))
-        logD("Inserted AI reply after messages[${queryMsgIdx}]")
+        marqueeMessages.add(queryMsgIdx + 1, reply)
         return true
     }
-
-    private fun replyMessage(answer: String): Message.Marquee.AIReply =
-        Message.Marquee.AIReply(
-            answer
-                .convertHeartEmojis()
-                .toNormalized()
-                .toUpperCasePreservingASCIIRules()
-        )
 
     /**
      * Write out the list of strings to the files in [dir].
@@ -193,6 +196,42 @@ class MessageRepository(
     }
 
     companion object {
+        /**
+         * The message for a reply of the app's own. [fittedAnswer] has been through
+         * [AIReplyLimits.fitToSign]. Everything that grows with the text of a reply is done in
+         * here and in [postedReplyMessage], and neither is called by the thread that answers the
+         * sign: the call's thread makes the one, the HTTP server's thread the other.
+         */
+        fun replyMessage(fittedAnswer: String): Message.Marquee.AIReply =
+            Message.Marquee.AIReply(
+                fittedAnswer
+                    .convertHeartEmojis()
+                    .toNormalized()
+                    .toUpperCasePreservingASCIIRules()
+            )
+
+        /**
+         * The message for a reply that was posted to the app, with the same clean-up and the
+         * same size limit as a reply of the app's own; null when nothing is left of it.
+         */
+        fun postedReplyMessage(answer: String): Message.Marquee.AIReply? =
+            AIReplyLimits.fitToSign(answer).takeIf { it.isNotBlank() }?.let(::replyMessage)
+
+        /**
+         * [result] with the message for it when it is a reply, for the call's thread to hand to
+         * the owner. It never throws, an Error of [make] included: whatever happens here, the
+         * owner must be told that the call has ended, or its query would be "out" for ever.
+         */
+        fun readyReply(
+            result: AIReplyResult,
+            make: (String) -> Message.Marquee.AIReply = ::replyMessage,
+        ): Pair<AIReplyResult, Message.Marquee.AIReply?> =
+            try {
+                result to (result as? AIReplyResult.Reply)?.let { make(it.text) }
+            } catch (e: Throwable) {
+                AIReplyResult.NoReply(NoReplyReason.UNEXPECTED_FAILURE, e.javaClass.name) to null
+            }
+
         private const val SIGN_STRINGS_FILE_NAME = "signstrings.txt"
         private const val SIGN_DB_FILE_NAME = "signstrings.bin"
         private const val MAX_SIGN_STRINGS: Int = 1000
