@@ -3,9 +3,10 @@ package cx.aphex.energysign.uart
 import cx.aphex.energysign.message.ChooserProtocol
 import cx.aphex.energysign.message.Reply
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.LockSupport
 
-/** The serial line to the sign: the two calls of the UART that [SignLink] uses, and its close. */
+/** The serial line to the sign: the three calls of the UART that [SignLink] uses, and its close. */
 interface SignWire {
     /** Reads what the sign has sent into [buffer], at most [length] bytes, without waiting. 0 when there is nothing. */
     @Throws(IOException::class)
@@ -15,8 +16,50 @@ interface SignWire {
     @Throws(IOException::class)
     fun write(buffer: ByteArray, length: Int): Int
 
+    /** Asks for the line to be held LOW for [millis] ms. Returns when it likes: at once, or when the line is HIGH again. */
+    @Throws(IOException::class)
+    fun sendBreak(millis: Int)
+
     @Throws(IOException::class)
     fun close()
+}
+
+/** How a push gets the sign's attention. The words of the switch ([AttentionSwitch]). */
+enum class Attention {
+    /** No pushes at all: the app behaves as chooser contract 2.1. The default. */
+    OFF,
+
+    /** What gets this sign's attention: the run of 0x00 bytes (see [ZEROS]). */
+    AUTO,
+
+    /** `sendBreak`. On the sign's board it does not hold the line LOW; kept for measuring. */
+    BREAK,
+
+    /** A run of 0x00 bytes: LOW nine tenths of the time. */
+    ZEROS;
+
+    companion object {
+        /** One of the four words `off`, `auto`, `break`, `zeros`; null for anything else. */
+        fun parse(word: String?): Attention? = when (word?.trim()) {
+            "off" -> OFF
+            "auto" -> AUTO
+            "break" -> BREAK
+            "zeros" -> ZEROS
+            else -> null
+        }
+    }
+}
+
+/** WHEN THE TRANSMIT LINE IS FREE. (Skeleton: books nothing yet.) */
+class LineClock(private val baud: Int, startNs: Long) {
+    var freeAtNs: Long = startNs
+        private set
+
+    fun wrote(returnedNs: Long, count: Int) {}
+
+    fun low(returnedNs: Long, millis: Int) {}
+
+    fun quiet(millis: Int) {}
 }
 
 /**
@@ -65,6 +108,12 @@ class SignLink(
     private val events: () -> Unit,
     /** Answers one request, the first [count] bytes of [buffer], by calling [send] once. The buffer is reused. */
     private val answer: (buffer: ByteArray, count: Int) -> Unit,
+    /** The chooser message as it is now, as one frame; null outside chooser mode. Must not change anything. */
+    private val chooserFrame: () -> String? = { null },
+    /** The frame [chooserFrame] last gave is on the wire in full. Not called for a push that failed, or had no frame. */
+    private val pushed: () -> Unit = {},
+    /** Whether and how the chooser is pushed. Read when a push is about to start. Off unless this says otherwise. */
+    private val attention: () -> Attention = { Attention.OFF },
     private val timing: UartTimingLog,
     private val nanoTime: () -> Long = System::nanoTime,
     /** Sleeps about this long; may return early. */
@@ -102,6 +151,14 @@ class SignLink(
 
     private var lastWarning = ""
     private var lastWarningNs = takenUpToNs
+
+    private val pushWanted = AtomicBoolean(false)
+
+    /** Asks for the chooser to be pushed to the sign. From any thread; returns at once. */
+    fun requestPush() {
+        pushWanted.set(true)
+        wake()
+    }
 
     /** Gets the loop out of its sleep: there are events to run. From any thread. */
     fun wake() {
@@ -324,6 +381,13 @@ class SignLink(
         const val ERROR_PAUSE_MS: Int = 100
 
         const val WARN_EVERY_MS: Int = 5_000
+
+        // ---- The push (chooser contract VERSION 3.1)
+        const val ATTN_BREAK_MS: Int = 50
+        const val ATTN_GUARD_MS: Int = 20
+        const val PUSH_FIRST_BYTE_MS: Int = 100
+        const val PUSH_SPACING_MS: Int = 250
+        const val SIGN_QUIET_BEFORE_REQUEST_MS: Int = 10
 
         private val POLL: Byte = ChooserProtocol.POLL_REQUEST.code.toByte()
         private val NEXT: Byte = ChooserProtocol.NEXT_REQUEST.code.toByte()

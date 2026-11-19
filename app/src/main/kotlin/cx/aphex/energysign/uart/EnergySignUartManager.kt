@@ -45,6 +45,7 @@ class EnergySignUartManager(private val viewModel: MainViewModel, private val ow
     private val wire = object : SignWire {
         override fun read(buffer: ByteArray, length: Int): Int = uartDevice.read(buffer, length)
         override fun write(buffer: ByteArray, length: Int): Int = uartDevice.write(buffer, length)
+        override fun sendBreak(millis: Int) = uartDevice.sendBreak(millis)
         override fun close() = uartDevice.close()
     }
 
