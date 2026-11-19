@@ -6,6 +6,7 @@ import cx.aphex.energysign.MainViewModel
 import cx.aphex.energysign.OptionalStart
 import cx.aphex.energysign.StartWorker
 import cx.aphex.energysign.optional
+import cx.aphex.energysign.signClockMs
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
 import java.util.*
@@ -25,7 +26,8 @@ internal class EnergySignBluetoothGattServer(
     val bluetoothManager: BluetoothManager,
     val viewModel: MainViewModel,
     private val worker: StartWorker,
-    private val takeWrite: (ByteArray, Boolean) -> Boolean,
+    /** The bytes of a write, whether its receipt is asked for, and when it arrived ([signClockMs]). */
+    private val takeWrite: (ByteArray, Boolean, Long) -> Boolean,
     private val serviceAdded: (Int) -> Unit = {},
 ) : BluetoothGattServerCallback() {
 
@@ -157,11 +159,12 @@ internal class EnergySignBluetoothGattServer(
         offset: Int,
         value: ByteArray
     ) {
+        val arrived = signClockMs() // first of all: the write arrived now, whatever is logged before it is handed on
         if (closed) return
         val server = gattServer
         val status = if (characteristic.uuid == NordicUartServiceProfile.NORDIC_UART_TX_UUID) {
             logD("Uart TX characteristic write: [${String(value)}]")
-            uartWriteStatus(value, preparedWrite, offset, responseNeeded)
+            uartWriteStatus(value, preparedWrite, offset, responseNeeded, arrived)
         } else {
             logW("Invalid Characteristic Write: " + characteristic.uuid)
             BluetoothGatt.GATT_FAILURE
@@ -179,10 +182,11 @@ internal class EnergySignBluetoothGattServer(
 
     internal fun uartWriteStatus(
         value: ByteArray, preparedWrite: Boolean = false, offset: Int = 0, responseNeeded: Boolean = true,
+        arrivedAt: Long = signClockMs(),
     ): Int {
         if (preparedWrite) return BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED
         if (offset != 0) return BluetoothGatt.GATT_INVALID_OFFSET
-        return if (!closed && takeWrite(value, responseNeeded)) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE
+        return if (!closed && takeWrite(value, responseNeeded, arrivedAt)) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE
     }
 
     override fun onCharacteristicReadRequest(

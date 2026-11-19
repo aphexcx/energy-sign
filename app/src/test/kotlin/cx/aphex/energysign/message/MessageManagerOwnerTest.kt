@@ -4,11 +4,15 @@ import android.content.Context
 import android.content.ContextWrapper
 import androidx.arch.core.executor.ArchTaskExecutor
 import androidx.arch.core.executor.TaskExecutor
+import com.google.gson.JsonParser
 import cx.aphex.energysign.beatlinkdata.BeatLinkTrack
 import cx.aphex.energysign.ai.AIReplySource
 import cx.aphex.energysign.ai.PostedAIAnswer
 import cx.aphex.energysign.beatlinkdata.currentTrack
+import cx.aphex.energysign.bluetooth.takeWrite
 import cx.aphex.energysign.keyboard.KeyboardManager
+import cx.aphex.energysign.uart.Attention
+import cx.aphex.energysign.uart.AttentionSwitch
 import cx.aphex.energysign.uart.SignLink
 import cx.aphex.energysign.uart.SignWire
 import cx.aphex.energysign.uart.UartTimingLog
@@ -30,6 +34,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.FutureTask
 import java.util.concurrent.Executor
+import kotlin.random.Random
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
@@ -63,6 +68,13 @@ class MessageManagerOwnerTest {
     private val owner = OwnerQueue()
     private lateinit var manager: MessageManager
 
+    /** How often the manager said that what the chooser shows has changed (each is a push, when pushes are on). */
+    private var pushes = 0
+
+    /** The words of the `!attn` commands the manager handed on. */
+    private val attnWords = mutableListOf<String>()
+    private val countPushes: () -> Unit = { pushes++ }
+
     private val immediateTasks = object : TaskExecutor() {
         override fun executeOnDiskIO(runnable: Runnable) = runnable.run()
         override fun postToMainThread(runnable: Runnable) = runnable.run()
@@ -80,6 +92,8 @@ class MessageManagerOwnerTest {
             })
         }
         manager = MessageManager(context, repo, owner)
+        manager.onChooserChanged = countPushes
+        manager.onAttentionCommand = { attnWords += it }
     }
 
     @AfterAll
@@ -102,6 +116,8 @@ class MessageManagerOwnerTest {
         repo.oneTimeMessages.clear()
         unsaved.forEach { it.run() } // the saver gets through what the test before left it
         unsaved.clear()
+        pushes = 0
+        attnWords.clear()
     }
 
     /** Escape twice, as at the sign: the first press turns the echo into the warning, the second ends the input. */
@@ -475,6 +491,7 @@ class MessageManagerOwnerTest {
                 writeAt = System.nanoTime()
                 return length
             }
+            override fun sendBreak(millis: Int) = error("no push is asked for here")
             override fun close() {}
         }
         val manager = startWithTwoStoredMessages().manager
@@ -656,6 +673,346 @@ class MessageManagerOwnerTest {
             Thread.sleep(1)
         }
         assertEquals("1/5 MESSAGE 1", shown())
+        assertEquals(1, pushes)
+    }
+
+    // ---- the push (contract 3.1): when the manager asks for one, and that it takes nothing
+
+    @Test
+    fun `every command that changes what the chooser shows asks for exactly one push`() {
+        val expected = listOf(
+            "!choose" to "1/5 MESSAGE 1",
+            "!next" to "2/5 MESSAGE 2",
+            "!last" to "5/5 MESSAGE 5",
+            "!prev" to "4/5 MESSAGE 4",
+            "!first" to "1/5 MESSAGE 1",
+            "!s message 3" to "3/5 MESSAGE 3",
+            "!delete" to "3/4 MESSAGE 4",
+            "HELLO" to "1/5 HELLO",
+            "!endchoose" to null,
+        )
+        for ((i, step) in expected.withIndex()) {
+            phone(step.first)
+            ownerRuns()
+            assertEquals(i + 1, pushes, "after ${step.first}")
+            assertEquals(step.second, manager.chooserShown()?.let { "${it.flashy} ${it.str}" }, "after ${step.first}")
+        }
+    }
+
+    @Test
+    fun `a command that changes nothing on the sign asks for no push, and nothing is asked for outside chooser mode`() {
+        phone("!next")
+        phone("!delete")
+        phone("FRESH")
+        phone("!endchoose") // was not choosing
+        ownerRuns()
+        assertEquals(0, pushes)
+
+        phone("!choose")
+        ownerRuns()
+        assertEquals(1, pushes)
+        phone("!choose") // already choosing
+        phone("!first") // already at the first
+        phone("!prev")
+        phone("!pause")
+        phone("!unpause")
+        phone("!micOn")
+        phone("!B 3")
+        phone("!\uD83C\uDD70\n\uD83D\uDC7E") // an ad command
+        ownerRuns()
+        fromServer { manager.togglePersistentThinkingMessage(true) }
+        fromServer { manager.togglePersistentThinkingMessage(false) }
+        fromServer { manager.processNowPlayingTrack(BeatLinkTrack(id = 7, title = "Title", artist = "Artist"), manager.acceptTrackUpdate()) }
+        fromServer { manager.storedMessages() }
+        assertEquals(1, pushes)
+    }
+
+    @Test
+    fun `several commands the owner runs in one turn are one change each, the link makes one push of them`() {
+        phone("!choose")
+        phone("!next")
+        phone("!next")
+        ownerRuns()
+        assertEquals(3, pushes) // each asks; SignLink makes one push of what is pending
+    }
+
+    @Test
+    fun `a change from the server's threads asks for a push too, a new message and a reply that lengthens the list`() {
+        phone("!choose")
+        ownerRuns()
+        fromServer { manager.processNewUserMessage("FRESH") }
+        assertEquals(2, pushes)
+        assertEquals("1/6 FRESH", manager.chooserShown()?.let { "${it.flashy} ${it.str}" })
+        fromServer { manager.onNewPostedAIReply(PostedAIAnswer(answer = "an answer", inReplyTo = "MESSAGE 2")) }
+        assertEquals(3, pushes)
+        assertEquals("1/7", manager.chooserShown()?.flashy)
+        // a reply that was refused changed nothing
+        fromServer { manager.onNewPostedAIReply(PostedAIAnswer(answer = " ", inReplyTo = "MESSAGE 2")) }
+        assertEquals(3, pushes)
+    }
+
+    @Test
+    fun `a message typed at the sign in chooser mode asks for a push when Enter stores it, not while it is typed`() {
+        phone("!choose")
+        ownerRuns()
+        "hello".forEach(KeyboardManager::processNewKeyboardKey)
+        ownerRuns()
+        assertEquals(1, pushes)
+        typingStarted(6_000)
+        KeyboardManager.submitKeyboardInput()
+        ownerRuns()
+        assertEquals(2, pushes)
+        assertEquals("1/6 hello", manager.chooserShown()?.let { "${it.flashy} ${it.str}" })
+    }
+
+    @Test
+    fun `what a push sends takes nothing, a one-time command queued before leaving goes to the first real request`() {
+        // the gate's case: !micOff, then !endchoose, on a sign that is not listening for the push
+        phone("!choose")
+        phone("!micOff")
+        ownerRuns()
+        val queued = repo.oneTimeMessages.toList()
+        assertSame(Message.UtilityMessage.DisableMic, queued.single())
+
+        repeat(20) { assertEquals("1/5", manager.chooserShown()?.flashy) } // any number of pushes in chooser mode
+        phone("!endchoose")
+        ownerRuns()
+        repeat(20) { assertNull(manager.chooserShown()) } // and of the push on leaving: no frame at all
+
+        assertEquals(queued, repo.oneTimeMessages.toList())
+        assertEquals(5, repo.marqueeMessages.size)
+        assertEquals(emptyList(), unsaved)
+        // the sign asks: now, and only now, it is taken
+        assertSame(Message.UtilityMessage.DisableMic, manager.getNextMessage())
+        assertEquals("MESSAGE 1", manager.getNextMessage().str)
+    }
+
+    @Test
+    fun `a stored message whose answer failed and a push that failed do not hand that message out twice`() {
+        // Two things can now be "still owed" about one stored message: its answer that was not
+        // written is tried again at its place, and a push of the chooser that stands on it is
+        // tried again too. The push only ever reads; it must leave the retry as it is.
+        val app = startWithTwoStoredMessages()
+        var asked = 0
+        app.manager.onChooserChanged = { asked++ }
+        val first = app.manager.getNextMessage()
+        assertEquals("MESSAGE 1", first.str)
+        app.manager.returnUnsent(first) // its write failed: it is the next message again
+
+        app.phone("!choose")
+        ownerRuns()
+        assertEquals(1, asked)
+        // the push is made, fails and is made again, any number of times: each reads the chooser, and no more
+        repeat(5) { assertEquals("1/2 MESSAGE 1", app.manager.chooserShown()?.let { "${it.flashy} ${it.str}" }) }
+        app.phone("!endchoose")
+        ownerRuns()
+        assertEquals(2, asked)
+        repeat(5) { assertNull(app.manager.chooserShown()) } // the attention alone, failing or not
+
+        // the sign asks: the message once (the retry of its answer), then the one after it
+        assertSame(first, app.manager.getNextMessage())
+        assertEquals("MESSAGE 2", app.manager.getNextMessage().str)
+        assertEquals("MESSAGE 1", app.manager.getNextMessage().str) // the next round
+        assertEquals(2, app.repo.marqueeMessages.size)
+        assertTrue(app.repo.oneTimeMessages.isEmpty())
+    }
+
+    @Test
+    fun `outside chooser mode what a push would send is nothing, whatever is stored or queued`() {
+        assertNull(manager.chooserShown())
+        repo.marqueeMessages.clear()
+        assertNull(manager.chooserShown())
+        phone("!choose")
+        ownerRuns()
+        assertEquals("1/0 <empty>", manager.chooserShown()?.let { "${it.flashy} ${it.str}" })
+    }
+
+    // ---- the push switch command
+
+    @Test
+    fun `the attn command hands its word on, in any case, and is not taken for the ad period command`() {
+        phone("!attn zeros")
+        phone("!attn")
+        phone("!attn  off ")
+        phone("!ATTN Auto")
+        phone("!attn 5")
+        ownerRuns()
+        assertEquals(listOf("zeros", "", "off", "auto", "5"), attnWords)
+        assertEquals(0, repo.oneTimeMessages.size) // an ad period command would have announced itself
+        assertEquals(emptyList(), unsaved) // and saved the period
+        assertEquals(0, pushes)
+    }
+
+    @Test
+    fun `the attn command changes nothing until the owner runs it`() {
+        phone("!attn zeros")
+        assertEquals(emptyList(), attnWords)
+        ownerRuns()
+        assertEquals(listOf("zeros"), attnWords)
+    }
+
+    // ---- the whole push: the real manager, the real frame maker and the real link, on a fake line
+
+    @Test
+    fun `from the phone's command to the line, entering is pushed once and published by the sign's own request, a step is zeros and its frame and is published, leaving is zeros alone, and nothing is taken`() {
+        var now = 0L
+        val written = mutableListOf<ByteArray>()
+        val arrivals = ArrayDeque<Byte>()
+        val wire = object : SignWire {
+            override fun read(buffer: ByteArray, length: Int): Int {
+                var n = 0
+                while (n < length && arrivals.isNotEmpty()) buffer[n++] = arrivals.removeFirst()
+                return n
+            }
+
+            override fun write(buffer: ByteArray, length: Int): Int = length.also { written += buffer.copyOf(length) }
+            override fun sendBreak(millis: Int) = error("the break is not the attention")
+            override fun close() {}
+        }
+        // wired as MainViewModel and EnergySignUartManager wire them
+        val current = mutableListOf<String>()
+        lateinit var link: SignLink
+        val responder = SignResponder(
+            nextMessage = { manager.getNextMessage() },
+            write = { frame, reply -> link.send(frame, reply) },
+            unsent = { manager.returnUnsent(it) },
+        )
+        val push = ChooserPush(shown = { manager.chooserShown() }, sent = { current += it.str })
+        link = SignLink(
+            wire = wire, baud = 14400, name = "UART",
+            events = { owner.drain(onError = { throw it }) },
+            answer = { buffer, count -> responder.onRequest(buffer, count)?.let { current += it.str } },
+            chooserFrame = push::frame,
+            pushed = push::written,
+            attention = { Attention.AUTO },
+            timing = UartTimingLog(isEnabled = { false }, emit = {}),
+            nanoTime = { now },
+            sleepNanos = { now += it },
+        )
+        manager.onChooserChanged = link::requestPush
+        try {
+            phone("!choose")
+            phone("!next")
+            link.step()
+            // one push for both commands: the run of zeros, then the frame of the newest state
+            assertEquals(2, written.size)
+            assertEquals(72, written[0].size)
+            assertTrue(written[0].all { it == 0.toByte() })
+            val frame = JsonParser.parseString(String(written[1])).asJsonObject
+            assertEquals("H", frame["type"].asString)
+            assertEquals("MESSAGE 2", frame["str"].asString)
+            assertEquals("2/5", frame["flashy"].asString)
+            // the very bytes a request would have got, and nothing behind the closing brace
+            assertEquals(SignResponder.GSON.toJson(manager.chooserShown()), String(written[1]))
+            assertEquals('}'.code.toByte(), written[1].last())
+            // ENTERING is never taken from a push: the sign listens for one only in its chooser display, and it
+            // was not there. The screen and Bluetooth are told nothing yet
+            assertEquals(emptyList(), current)
+
+            // the sign asks at the end of what it was showing: that answer is the selection, and it is published
+            written.clear()
+            repeat(300) { link.step() }
+            assertEquals(emptyList(), written.map { it.size }) // once: nothing more unasked
+            arrivals += '~'.code.toByte()
+            link.step()
+            assertEquals(SignResponder.GSON.toJson(manager.chooserShown()), String(written.single()))
+            assertEquals(listOf("MESSAGE 2"), current)
+
+            // a step in the chooser, to a sign that is in its chooser display: pushed, and the pushed text is the current text
+            written.clear()
+            phone("!next")
+            repeat(300) { link.step() }
+            assertEquals(2, written.size)
+            assertTrue(written[0].all { it == 0.toByte() })
+            assertEquals("MESSAGE 3", JsonParser.parseString(String(written[1])).asJsonObject["str"].asString)
+            assertEquals(listOf("MESSAGE 2", "MESSAGE 3"), current)
+
+            written.clear()
+            phone("!micOff")
+            phone("!endchoose")
+            repeat(300) { link.step() } // more than the distance two pushes keep
+            assertEquals(1, written.size)
+            assertEquals(72, written[0].size)
+            assertTrue(written[0].all { it == 0.toByte() })
+            assertSame(Message.UtilityMessage.DisableMic, repo.oneTimeMessages.single()) // not taken by the push
+            assertEquals(listOf("MESSAGE 2", "MESSAGE 3"), current)
+
+            // the sign found nothing behind the attention and asks: that request takes the command
+            written.clear()
+            arrivals += '~'.code.toByte()
+            link.step()
+            assertEquals(SignResponder.GSON.toJson(Message.UtilityMessage.DisableMic), String(written.single()))
+            assertTrue(repo.oneTimeMessages.isEmpty())
+            assertEquals(3, current.size)
+        } finally {
+            manager.onChooserChanged = countPushes
+        }
+    }
+
+    /**
+     * The real manager, the real switch (on a file of its own, off) and the real link on a line
+     * that takes everything: [commands] are sent by the phone and run by ONE turn of the link,
+     * then the link runs on for more than the distance two pushes keep. What was written.
+     */
+    private fun writtenAfterOneTurnOf(vararg commands: String): List<ByteArray> {
+        var now = 0L
+        val written = mutableListOf<ByteArray>()
+        val wire = object : SignWire {
+            override fun read(buffer: ByteArray, length: Int): Int = 0
+            override fun write(buffer: ByteArray, length: Int): Int = length.also { written += buffer.copyOf(length) }
+            override fun sendBreak(millis: Int) = error("the break is not the attention")
+            override fun close() {}
+        }
+        val switch = AttentionSwitch(
+            file = File(newFilesDir(), AttentionSwitch.FILE_NAME),
+            property = { null },
+            saveLater = {},
+            log = {},
+        )
+        assertEquals(Attention.OFF, switch.inForce())
+        val push = ChooserPush(shown = { manager.chooserShown() }, sent = {})
+        val link = SignLink(
+            wire = wire, baud = 14400, name = "UART",
+            events = { owner.drain(onError = { throw it }) },
+            answer = { _, _ -> },
+            chooserFrame = push::frame,
+            pushed = push::written,
+            attention = switch::inForce,
+            timing = UartTimingLog(isEnabled = { false }, emit = {}),
+            nanoTime = { now },
+            sleepNanos = { now += it },
+        )
+        manager.onChooserChanged = link::requestPush
+        manager.onAttentionCommand = { switch.set(it) }
+        try {
+            commands.forEach(::phone)
+            repeat(300) { link.step() }
+            return written
+        } finally {
+            manager.onChooserChanged = countPushes
+            manager.onAttentionCommand = { attnWords += it }
+        }
+    }
+
+    @Test
+    fun `the gate's case, choose and then attn auto in one turn of the owner, the change made while pushes were off is not pushed`() {
+        assertEquals(emptyList(), writtenAfterOneTurnOf("!choose", "!attn auto"))
+        assertEquals("1/5", manager.chooserShown()?.flashy) // the command was carried out; the sign's next request gets it
+    }
+
+    @Test
+    fun `attn auto and then choose in one turn of the owner, the change is pushed, zeros and its frame`() {
+        val written = writtenAfterOneTurnOf("!attn auto", "!choose")
+        assertEquals(2, written.size)
+        assertEquals(72, written[0].size)
+        assertTrue(written[0].all { it == 0.toByte() })
+        assertEquals(SignResponder.GSON.toJson(manager.chooserShown()), String(written[1]))
+    }
+
+    @Test
+    fun `choose and then attn off in one turn of the owner, nothing is pushed`() {
+        assertEquals(2, writtenAfterOneTurnOf("!attn auto", "!choose").size)
+        assertEquals(emptyList(), writtenAfterOneTurnOf("!attn auto", "!next", "!attn off"))
     }
 
     // ---- ads: the command, the restart, the period (PR 5)
@@ -671,7 +1028,12 @@ class MessageManagerOwnerTest {
         typedAt: Boolean = false,
         /** Track updates come on the owner's own thread, which is answered at once: for the tables of many cells. */
         private val fromTheOwner: Boolean = false,
+        /** The app's clock is [now], which the test moves: for the game. */
+        clocked: Boolean = false,
+        /** The game of the app, when the test has to know its obstacles. */
+        game: JumpGame = JumpGame(),
     ) {
+        var now = 1_000L
         val unsaved = mutableListOf<Runnable>()
         val repo = if (typedAt) this@MessageManagerOwnerTest.repo else MessageRepository(saver = Executor { unsaved += it })
         val manager: MessageManager
@@ -679,14 +1041,18 @@ class MessageManagerOwnerTest {
         init {
             // (a MessageManager takes the keyboard's Enter for itself; the one of this test keeps it)
             val submitted = KeyboardManager.onSubmitted
-            manager = MessageManager(
-                object : ContextWrapper(null) {
-                    override fun getFilesDir(): File = home
-                },
-                repo,
-                owner,
-            )
+            val clock = KeyboardManager.clock
+            val taken = KeyboardManager.takenByTheGame
+            val files = object : ContextWrapper(null) {
+                override fun getFilesDir(): File = home
+            }
+            manager = if (clocked) MessageManager(files, repo, owner, nowMs = { now }, jumpGame = game) else MessageManager(files, repo, owner)
             KeyboardManager.onSubmitted = submitted
+            // (and the keys of the game are those of the app the keyboard types at)
+            if (!typedAt) {
+                KeyboardManager.clock = clock
+                KeyboardManager.takenByTheGame = taken
+            }
         }
 
         fun phone(command: String) = manager.processNewBytes(command.toByteArray())
@@ -2138,6 +2504,8 @@ class MessageManagerOwnerTest {
                 })
                 val home = newFilesDir()
                 val submitted = KeyboardManager.onSubmitted
+                val clock = KeyboardManager.clock
+                val taken = KeyboardManager.takenByTheGame
                 val manager = MessageManager(
                     object : ContextWrapper(null) {
                         override fun getFilesDir(): File = home
@@ -2145,6 +2513,8 @@ class MessageManagerOwnerTest {
                     lists, owner, nowMs = { if (clockFails) throw second else 0L },
                 )
                 KeyboardManager.onSubmitted = submitted
+                KeyboardManager.clock = clock
+                KeyboardManager.takenByTheGame = taken
                 val replies = org.koin.core.context.GlobalContext.get().get<AIReplySource>() as FakeReplies
                 val askedBefore = replies.asked.size
                 lists.marqueeMessages.add(Message.Marquee.AIQuery("A QUESTION"))
@@ -2196,6 +2566,422 @@ class MessageManagerOwnerTest {
             running.post(stopOfTheTrack)
             assertEquals(listOf("SECOND", "FIRST", "SECOND"), running.repo.oneTimeMessages.map { it.str })
         }
+    }
+
+    // ---- THE JUMP GAME ON THE SIGN (es-1jr): the game answers the sign's requests itself and
+    // never takes from the queue, so what arrives during a game waits and is shown once.
+
+    private val INTRO = listOf("D", "READY?", "JUMP!")
+    private val GAME_OVER = listOf("X", "GAME${Message.VT}OVER", "SCORE 0", "BEST 0", "")
+    private val STORED = "(a stored message)"
+
+    /** An app the test's keyboard types at, with the test's clock, one stored message and nothing queued. */
+    private fun gameApp(home: File = newFilesDir(), game: JumpGame = JumpGame()): App {
+        repo.marqueeMessages.clear()
+        repo.marqueeMessages.add(Message.Marquee.User("A MESSAGE"))
+        repo.oneTimeMessages.clear()
+        return App(home, typedAt = true, clocked = true, game = game)
+    }
+
+    /** One request of the sign, [ms] after the last: what it gets, in a word. */
+    private fun asks(app: App, ms: Long = 50): String {
+        app.now += ms
+        return when (val answer = app.manager.getNextMessage()) {
+            is Message.GameFrame -> if (answer.str[0] != '0') "frame, in the air" else "frame"
+            is Message.KeyboardEcho -> "echo ${answer.str}"
+            is Message.Chooser -> "chooser"
+            is Message.Marquee -> STORED
+            else -> answer.str
+        }
+    }
+
+    /** The sign goes on asking, nobody plays: everything it gets up to the next stored message, frames that follow each other as one word. */
+    private fun untilStored(app: App): List<String> {
+        val got = mutableListOf<String>()
+        repeat(80) {
+            val answer = asks(app, 400).removeSuffix(", in the air")
+            if (answer != "frame" || got.lastOrNull() != "frame") got += answer
+            if (answer == STORED) return got
+        }
+        return got + "(and no end)"
+    }
+
+    private fun command(app: App, text: String) {
+        app.phone(text)
+        ownerRuns()
+    }
+
+    /** !game, the intro's three messages, the runner running in, and the first frame of the game itself. */
+    private fun intoPlay(app: App) {
+        command(app, "!game")
+        check((1..3).map { asks(app) } == INTRO)
+        check(asks(app) == "frame") // the runner runs in
+        check(asks(app, 600) == "frame") // and the game is on
+    }
+
+    /** The states a game can be in when something happens, and how to get an app there. */
+    private val gameStates: Map<String, (App) -> Unit> = linkedMapOf(
+        "no game" to { _ -> },
+        "the intro" to { app -> command(app, "!game"); check(asks(app) == "D") },
+        "a game, on the ground" to { app -> intoPlay(app) },
+        "a game, in the air" to { app -> intoPlay(app); command(app, "!jump"); check(asks(app, 100) == "frame, in the air") },
+        // nobody plays: the hit, its picture for a moment, then the show's first message
+        "the closing show" to { app -> intoPlay(app); check(asks(app, 10_000) == "frame"); check(asks(app, 800) == "X") },
+        "the game switched off" to { app -> command(app, "!game off") },
+        "the chooser" to { app -> command(app, "!choose") },
+        "somebody typing" to { _ -> KeyboardManager.processNewKeyboardKey('x'); ownerRuns() },
+    )
+
+    private fun afterAGameCell() {
+        typingOver()
+        ownerRuns()
+    }
+
+    @Test
+    fun `the button and the start, in every state of the game`() {
+        val presses: Map<String, (App) -> Unit> = linkedMapOf(
+            "!game" to { app -> command(app, "!game") },
+            "!jump" to { app -> command(app, "!jump") },
+            "!j" to { app -> command(app, "!j") },
+            "the up arrow" to { _ -> KeyboardManager.upArrow(); ownerRuns() },
+            "the space bar" to { _ -> KeyboardManager.processNewKeyboardKey(' '); ownerRuns() },
+            // A HELD KEY IS ONE PRESS for the game: its repeats are nothing. Typing keeps its repeats.
+            "the up arrow, held down (a repeat)" to { _ -> KeyboardManager.upArrow(repeated = true); ownerRuns() },
+            "the space bar, held down (a repeat)" to { _ -> KeyboardManager.processNewKeyboardKey(' ', repeated = true); ownerRuns() },
+        )
+        // what the sign's next request gets, for !game, !jump, !j, the up arrow, the space bar, and the repeats of the two keys
+        val jumps = "frame, in the air"
+        val expected = mapOf(
+            // !game and the up arrow start a game; a jump without a game is nothing; a space is typed
+            "no game" to listOf("D", STORED, STORED, "D", "echo  _", STORED, "echo  _"),
+            // nothing starts twice and nobody jumps before the game: the intro goes on, whatever is pressed
+            "the intro" to List(7) { "READY?" },
+            // a second !game is nothing; the space bar is the button while a game is on, and types nothing
+            "a game, on the ground" to listOf("frame", jumps, jumps, jumps, jumps, "frame", "frame"),
+            "a game, in the air" to List(7) { jumps },
+            // !game is the next game at once; a jump that comes a moment after the hit is nothing, on any key
+            "the closing show" to listOf("D") + List(6) { GAME_OVER[1] },
+            "the game switched off" to listOf(STORED, STORED, STORED, STORED, "echo  _", STORED, "echo  _"),
+            // the sign is somebody else's: no game begins behind it, not later either
+            "the chooser" to listOf(STORED, STORED, STORED, STORED, "echo  _", STORED, "echo  _"),
+            "somebody typing" to listOf("", "", "", "", "echo x _", "", "echo x _"),
+        )
+        val wrong = mutableListOf<String>()
+        for ((state, reach) in gameStates) presses.entries.forEachIndexed { i, (press, pressed) ->
+            val app = gameApp()
+            try {
+                reach(app)
+                pressed(app)
+                // what was taken by somebody else is given back first: was a game started behind it?
+                if (state == "the chooser") command(app, "!endchoose")
+                if (state == "somebody typing" && !press.startsWith("the space bar")) endTyping()
+                val got = asks(app)
+                if (got != expected.getValue(state)[i]) wrong += "$state, $press: the sign gets '$got', not '${expected.getValue(state)[i]}'"
+            } finally {
+                afterAGameCell()
+            }
+        }
+        // A KEY THE GAME TOOK IS THE GAME'S UNTIL IT IS PRESSED ANEW, whatever the game has become meanwhile: held
+        // from a game into the messages, its repeats type nothing and the queue is as it was.
+        val waited = "NEW${Message.VT}MSG${Message.VT}"
+        val keys: Map<String, (Boolean) -> Unit> = linkedMapOf(
+            "the up arrow" to { repeated -> KeyboardManager.upArrow(repeated); ownerRuns() },
+            "the space bar" to { repeated -> KeyboardManager.processNewKeyboardKey(' ', repeated); ownerRuns() },
+        )
+        for ((key, press) in keys) for (state in listOf("the intro", "a game, on the ground", "the closing show")) {
+            val app = gameApp()
+            try {
+                gameStates.getValue(state)(app)
+                press(false) // the key goes down, and stays down
+                untilStored(app) // the game and its show end, the messages are back
+                command(app, "HELLO") // and one waits in the queue
+                press(true)
+                val got = asks(app)
+                if (got != waited) wrong += "$key, held down from $state into the messages: the sign gets '$got', not the message that waited"
+                // let go and pressed anew it is an ordinary key again: the up arrow starts a game, a space is typed
+                press(false)
+                val anew = asks(app)
+                val ordinary = if (key == "the up arrow") "D" else "echo  _"
+                if (anew != ordinary) wrong += "$key, let go and pressed anew after $state: the sign gets '$anew', not '$ordinary'"
+            } finally {
+                afterAGameCell()
+            }
+        }
+
+        assertEquals(emptyList(), wrong)
+    }
+
+    @Test
+    fun `what arrives during a game either takes the sign and ends the game, or waits and is shown once after it`() {
+        class Arrives(
+            val what: String,
+            /** Null: the game goes on, and [then] is shown after it. Otherwise what the next request gets in place of the game. */
+            val takesTheSign: String? = null,
+            /** What the sign gets after the game (or after the sign was given back), before the next stored message. */
+            val then: List<String> = emptyList(),
+            /** For what took the sign: it is given back. */
+            val givenBack: (App) -> Unit = {},
+            val happens: (App) -> Unit,
+        )
+        val newMessage = "NEW${Message.VT}MSG${Message.VT}"
+        val arrivals = listOf(
+            Arrives("the chooser", takesTheSign = "chooser", givenBack = { command(it, "!endchoose") }) { command(it, "!choose") },
+            // (the stars are the keyboard's own, at the end of typing)
+            Arrives("a typed key", takesTheSign = "echo x_", then = listOf(""), givenBack = { endTyping() }) { KeyboardManager.processNewKeyboardKey('x'); ownerRuns() },
+            Arrives("!game off", takesTheSign = STORED) { command(it, "!game off") },
+            Arrives("an ad command", then = listOf("AD")) { command(it, "!$A\n${O}AD") },
+            Arrives("!pause") { command(it, "!pause") },
+            Arrives("a new message", then = listOf(newMessage)) { command(it, "HELLO") },
+            Arrives("a new message, then the space bar", then = listOf(newMessage)) { command(it, "HELLO"); KeyboardManager.processNewKeyboardKey(' '); ownerRuns() },
+            Arrives("a message that is a query for the AI", then = listOf(newMessage)) { command(it, "ravegpt are you there") },
+            Arrives("a track", then = listOf("NOW${Message.VT}PLAYING", "DJ - Song", "")) { it.post(song) },
+            Arrives("an answer to the sign that could not be written") { app -> failedWrite(app) },
+        )
+        // in each state: what the next request gets when the game goes on, and what follows it to the end of the game
+        val goesOn = mapOf(
+            "the intro" to (listOf("READY?", "JUMP!", "frame") + GAME_OVER),
+            "a game, on the ground" to (listOf("frame", "frame") + GAME_OVER),
+            "the closing show" to GAME_OVER.drop(1),
+        )
+        val wrong = mutableListOf<String>()
+        for ((state, rest) in goesOn) for (arrival in arrivals) {
+            val app = gameApp()
+            try {
+                gameStates.getValue(state)(app)
+                arrival.happens(app)
+                val first = asks(app).removeSuffix(", in the air")
+                if (arrival.takesTheSign != null) arrival.givenBack(app)
+                val got = listOf(first) + (if (first == STORED) emptyList() else untilStored(app))
+                val expected = when (arrival.takesTheSign) {
+                    null -> rest + arrival.then + STORED
+                    STORED -> listOf(STORED)
+                    else -> listOf(arrival.takesTheSign) + arrival.then + STORED
+                }
+                if (got != expected) wrong += "$state, ${arrival.what}: the sign gets $got, not $expected"
+            } finally {
+                afterAGameCell()
+            }
+        }
+
+        assertEquals(emptyList(), wrong)
+    }
+
+    @Test
+    fun `every event counts from the moment it arrived, however late the owner carries it out`() {
+        // A game whose every obstacle is a post. Nobody presses: the first one hits 2,140 ms into the game.
+        // A press at 2,110 ms clears it (the gate's case), and the second post ends the game with a score of 1.
+        fun inPlay(): Pair<App, Long> {
+            val app = gameApp(game = JumpGame(JumpGame.Rules(obstacles = listOf(JumpGame.Rules().obstacles[1])), Random(7)))
+            intoPlay(app)
+            return app to app.now
+        }
+        /** The score and the best as the sign is shown them, from here to the next stored message. */
+        fun shown(app: App): List<String> = untilStored(app).zipWithNext().mapNotNull { (before, it) ->
+            if (before == "NEW${Message.VT}BEST!") "a new best of ${it.trim()}" else it.takeIf { it.startsWith("SCORE") || it.startsWith("BEST") }
+        }
+        val presses: Map<String, (App) -> Unit> = linkedMapOf(
+            "!jump from the phone" to { app -> app.phone("!jump") },
+            "the up arrow" to { _ -> KeyboardManager.upArrow() },
+            "the space bar" to { _ -> KeyboardManager.processNewKeyboardKey(' ') },
+        )
+        val wrong = mutableListOf<String>()
+        fun cell(name: String, expected: Any, got: () -> Any) {
+            try {
+                val outcome = got()
+                if (outcome != expected) wrong += "$name: $outcome, not $expected"
+            } finally {
+                afterAGameCell()
+            }
+        }
+        // how late the press is carried out, and whether the sign's requests of the meantime were answered before it
+        for ((press, arrives) in presses) for ((late, signAsksMeanwhile) in listOf(0L to false, 50L to false, 50L to true, 80L to false, 80L to true, 3_000L to false)) {
+            cell("$press at 2,110 ms, carried out $late ms later${if (signAsksMeanwhile) ", the sign's requests of the meantime answered first" else ""}", listOf("a new best of 1")) {
+                val (app, began) = inPlay()
+                while (app.now + 40 <= began + 2_110) asks(app, 40)
+                app.now = began + 2_110
+                arrives(app)
+                if (signAsksMeanwhile) (began + 2_120..began + 2_110 + late step 40).forEach { app.now = it; app.manager.getNextMessage() }
+                app.now = began + 2_110 + late
+                ownerRuns()
+                shown(app)
+            }
+        }
+        // THE STAMP IS TAKEN WHERE THE EVENT ENTERS THE APP, one definition a source. The event is of 2,110 ms; what the
+        // app does before it hands it on (the dispatch, the log lines) takes 40 ms, which is past the hit at 2,140 ms.
+        val jump = "!jump".toByteArray()
+        val sources: Map<String, (App, Long) -> Unit> = linkedMapOf(
+            // a key: its event's own time, on the app's clock (the event is 40 ms old when it is dispatched)
+            "the up arrow" to { _, _ -> KeyboardManager.upArrow(arrivedAt = KeyboardManager.arrivedAt(eventTimeMs = 70_000, uptimeMs = 70_040)) },
+            "the space bar" to { _, _ -> KeyboardManager.processNewKeyboardKey(' ', arrivedAt = KeyboardManager.arrivedAt(eventTimeMs = 70_000, uptimeMs = 70_040)) },
+            // the phone: the clock as the first statement of the Bluetooth write callback read it
+            "!jump from the phone" to { app, entered -> app.manager.takeWrite(jump, responseNeeded = false, arrivedAt = entered) },
+            "!jump from the phone, its receipt asked for" to { app, entered -> waitingCall("bluetooth") { app.manager.takeWrite(jump, responseNeeded = true, arrivedAt = entered) } },
+            // the adb hook: the clock as the first statement of its receive read it
+            "!jump from the adb hook" to { app, entered -> waitingCall("hook") { app.manager.processNewBytesAndTell(jump, entered) } },
+        )
+        for ((source, handsOn) in sources) cell("$source, an event of 2,110 ms that the app hands on 40 ms later", listOf("a new best of 1")) {
+            val (app, began) = inPlay()
+            while (app.now + 40 <= began + 2_110) asks(app, 40)
+            app.now = began + 2_150
+            handsOn(app, began + 2_110)
+            app.now = began + 2_190
+            ownerRuns()
+            shown(app)
+        }
+        cell("a key's event of 40 ms ago; and one that says it is of a time still to come arrived now", listOf(960L, 1_000L)) {
+            gameApp() // (its clock, which the keyboard reads, is at 1,000)
+            listOf(KeyboardManager.arrivedAt(eventTimeMs = 70_000, uptimeMs = 70_040), KeyboardManager.arrivedAt(eventTimeMs = 70_500, uptimeMs = 70_000))
+        }
+        for (late in listOf(0L, 80L, 3_000L)) {
+            // the sign stopped asking; the game ended by the clock, unseen; then:
+            cell("!game five seconds into a game the sign stopped asking for, carried out $late ms later: the sign's next request gets", "D") {
+                val (app, began) = inPlay()
+                app.now = began + 5_000
+                app.phone("!game")
+                app.now += late
+                ownerRuns()
+                asks(app)
+            }
+            cell("a game with a score of 1 ended unseen, then the chooser, carried out $late ms later: the best the next game shows", listOf("SCORE 0", "BEST 1")) {
+                val (app, began) = inPlay()
+                app.now = began + 2_110
+                command(app, "!jump")
+                app.now = began + 8_000
+                app.phone("!choose")
+                app.now += late
+                ownerRuns()
+                command(app, "!endchoose")
+                command(app, "!game")
+                shown(app)
+            }
+        }
+        // (the post is this game's only shape, so its letter on the wire is the first, a)
+        // THE SIGN WAS ANSWERED PAST THE HIT before an event that had arrived before the hit is carried out.
+        // The game: a press at 2,110 ms clears the first post, the second ends it with a score of 1, a new best.
+        val posts = JumpGame.Rules(obstacles = listOf(JumpGame.Rules().obstacles[1]))
+        fun endOf(vararg presses: Long): Pair<Long, Int> {
+            val twin = JumpGame(posts, Random(7)).also { it.start(0) }
+            presses.forEach { twin.jump(it) }
+            twin.frame(60_000)
+            return twin.endedAt to twin.score
+        }
+        val hit = endOf(2_110).first
+        /** [arrives] 20 ms before that hit; the sign is answered 10 ms after the hit, the game is closed there; then the event is carried out. */
+        fun overtaken(arrives: (App) -> Unit): App {
+            val (app, began) = inPlay()
+            app.now = began + 2_110
+            command(app, "!jump")
+            app.now = began + hit - 20
+            arrives(app)
+            app.now = began + hit + 10
+            app.manager.getNextMessage()
+            ownerRuns()
+            return app
+        }
+        cell("a second press 20 ms before the hit, carried out after the sign was answered past it: the game is closed once, with what that press made of it",
+            listOf("a new best of ${endOf(2_110, hit - 20).second}")) {
+            shown(overtaken { it.phone("!jump") })
+        }
+        cell("!game reset 20 ms before the hit, carried out after it: the reset came first, the new best after it", listOf("SCORE 0", "BEST 1")) {
+            val app = overtaken { it.phone("!game reset") }
+            untilStored(app)
+            command(app, "!game")
+            shown(app)
+        }
+        cell("the chooser 20 ms before the hit, carried out after it: the game was ended by the chooser, it has no score", listOf("SCORE 0", "BEST 0")) {
+            val app = overtaken { it.phone("!choose") }
+            command(app, "!endchoose")
+            command(app, "!game")
+            shown(app)
+        }
+        cell("!game 20 ms before the hit, carried out after it: a game was being played, nothing starts; the closing show goes on", false) {
+            val app = overtaken { it.phone("!game") }
+            "D" in untilStored(app)
+        }
+        cell("a press that arrived in the intro and is carried out when the game has begun is no jump", "frame") {
+            val app = gameApp()
+            command(app, "!game")
+            check((1..3).map { asks(app) } == INTRO)
+            check(asks(app) == "frame") // the runner runs in
+            app.now += 590
+            app.phone("!jump")
+            app.now += 10
+            app.manager.getNextMessage() // the game begins with this request
+            ownerRuns()
+            asks(app, 100)
+        }
+        cell("the sign asks again three seconds into a game: the picture of the hit is the one of the hit (the post at column 12), not the last it asked for", "00a12p22e2") {
+            val (app, began) = inPlay()
+            app.now = began + 3_000
+            app.manager.getNextMessage().str
+        }
+
+        assertEquals(emptyList(), wrong)
+    }
+
+    @Test
+    fun `the game's switch and its best are there again after a restart, and a game is not`() {
+        val home = newFilesDir()
+        /** A game from !game to the next stored message, nobody playing: its score and its best as the sign showed them. */
+        fun scoreAndBest(app: App): List<String> {
+            command(app, "!game")
+            return untilStored(app).filter { it.startsWith("SCORE") || it.startsWith("BEST") }
+        }
+        val rows = mutableListOf<Pair<String, Any?>>()
+        var app = gameApp(home)
+        intoPlay(app)
+        app = gameApp(home) // a restart in the middle of a game
+        rows += "after a restart in the middle of a game the sign gets" to asks(app)
+        // a game with a score: the player clears the first obstacle and no more
+        intoPlay(app)
+        var jumped = false
+        var shown = false // the show is over at the first stored message after it
+        val show = mutableListOf<String>()
+        repeat(900) { // nine seconds: the first obstacle is cleared, the second ends the game, the show follows
+            val answer = app.manager.getNextMessage().also { app.now += 10 }
+            if (answer is Message.GameFrame) {
+                val column = Regex("[abc](-?\\d+)").find(answer.str)?.groupValues?.get(1)?.toInt()
+                if (!jumped && column != null && column <= 23) {
+                    command(app, "!jump")
+                    jumped = true
+                }
+            } else if (answer is Message.Marquee) shown = show.isNotEmpty() else if (!shown) show += answer.str
+        }
+        rows += "a first score of 1 is a new best, with its own show" to show
+        saveAll()
+        command(app, "!game off")
+        saveAll()
+        app = gameApp(home)
+        command(app, "!game")
+        rows += "switched off before the restart, !game after it" to asks(app)
+        command(app, "!game on")
+        saveAll()
+        app = gameApp(home)
+        rows += "switched on again, a game without a score after the restart" to scoreAndBest(app)
+        command(app, "!game reset")
+        rows += "!game reset, and a game without a score" to scoreAndBest(app)
+        saveAll()
+        app = gameApp(home)
+        rows += "and after a restart" to scoreAndBest(app)
+
+        assertEquals(
+            listOf<Pair<String, Any?>>(
+                "after a restart in the middle of a game the sign gets" to STORED,
+                "a first score of 1 is a new best, with its own show" to listOf("X", "NEW${Message.VT}BEST!", "  1   ", ""),
+                "switched off before the restart, !game after it" to STORED,
+                "switched on again, a game without a score after the restart" to listOf("SCORE 0", "BEST 1"),
+                "!game reset, and a game without a score" to listOf("SCORE 0", "BEST 0"),
+                "and after a restart" to listOf("SCORE 0", "BEST 0"),
+            ),
+            rows,
+        )
+        afterAGameCell()
+    }
+
+    /** The saver of the test's own repository gets through what it was given. */
+    private fun saveAll() {
+        unsaved.toList().forEach { it.run() }
+        unsaved.clear()
     }
 
     /** The real route on a real server (Netty, a free port) for the time of [block], which gets the port. */
