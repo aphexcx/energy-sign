@@ -24,25 +24,16 @@ import java.util.IdentityHashMap
  * - A call is never bought twice for an answer: a query that is out or waiting is not asked
  *   again, and a query that got an answer of any kind ([NoReplyReason.askAgain] false) is retired.
  * - A failure that may pass leaves the query a query, [Limits.maxAttempts] attempts at most.
- *   Only our own withdrawal ([NoReplyReason.WITHDRAWN]) and our own lateness
- *   ([NoReplyReason.TOO_LATE_TO_SEND]) are not an attempt. A network or TLS failure before bytes
- *   leave (no route, handshake failure, connection shut down before the write) returns its hourly
- *   budget place while still counting as one of the query's attempts, so a query does not loop
- *   through an outage all evening.
+ *   Only [NoReplyReason.WITHDRAWN] and [NoReplyReason.TOO_LATE_TO_SEND] are not an attempt;
+ *   pre-write network/TLS failures return their budget place while still counting as an attempt.
  * - After a failure of the provider ([NoReplyReason.backOff]) nothing is asked for a while,
  *   longer after each failure in a row ([Limits.coolDownsMs]). An answer ends the row.
  * - A BUDGET ([AIHourlyBudget]): [AIHourlyBudget.callsPerHour] paid HTTP requests leaving the app
- *   in any rolling hour (3,600,000 ms), shared with [WireBudgetInterceptor]. One-shot request
- *   bodies disable silent OkHttp replays, so one call puts at most one request on the wire and
- *   this desk is the sole retry owner. The desk RESERVES a place when it hands a call over
- *   (holding the ceiling during preparation); the wire interceptor stamps that place once the
- *   write outcome is known, and leaves it unstamped on confirmed pre-write failures. Every
- *   request that left stays counted for a full hour — nothing gives it back, not an answer, not
- *   a failure, not a deleted query. Any place never stamped (withdrawn, too late, missing key,
- *   or failed before writing) is given back when the call ends. The pauses after failures happen
- *   inside this ceiling. While the budget is spent a query is shown as the plain message it is,
- *   with no notice, and is asked when it comes round and there is room. Kept in memory only: a
- *   restart empties it.
+ *   in any rolling hour (3,600,000 ms), shared with [WireBudgetInterceptor]. One-shot bodies keep
+ *   one call to at most one wire request. The desk reserves a place at handover; the wire gate
+ *   stamps it once the write outcome is known (kept for a full hour — nothing gives it back) and
+ *   returns unstamped places when nothing left. Pauses happen inside this ceiling. While spent,
+ *   queries show as plain messages with no notice. Kept in memory only: a restart empties it.
  *
  * What this costs the owner: [shown] and [thinkingWanted] look at the line only
  * ([Limits.maxWaiting] entries at most); [finished] and [warmedUp] make ONE pass over the list

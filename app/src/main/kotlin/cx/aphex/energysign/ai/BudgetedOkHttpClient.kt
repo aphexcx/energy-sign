@@ -27,14 +27,9 @@ import java.time.Duration
 import java.util.concurrent.CompletableFuture
 
 /**
- * OkHttp transport implementing the Anthropic SDK's [HttpClient] so [WireBudgetInterceptor] runs
- * as a network interceptor below `ConnectInterceptor` and above `CallServerInterceptor`.
- *
- * Marks every request body one-shot (`isOneShot() = true`), so OkHttp never replays a POST after
- * `503 Retry-After: 0` or HTTP/2 `421` — one call is at most one request on the wire and
- * [AIQueryDesk] is the single retry owner. Prepares the URL and request body (which lazily runs
- * Jackson serialization in `contentLength()`) BEFORE reading [WireCallContext.deadline] to build
- * the per-call OkHttp timeout.
+ * OkHttp transport for the Anthropic SDK with [WireBudgetInterceptor] below `ConnectInterceptor`,
+ * one-shot request bodies (`isOneShot() = true`, disabling silent OkHttp replays), and per-call
+ * timeouts computed AFTER body serialization (`body.contentLength()`).
  */
 internal class BudgetedOkHttpClient(
     private val maxRequestTimeout: Duration,
@@ -63,8 +58,7 @@ internal class BudgetedOkHttpClient(
             throw AnthropicIoException("Request failed", e)
         }
         return try {
-            val response = call.execute()
-            prepareResponse(toHttpResponse(response, call))
+            prepareResponse(toHttpResponse(call.execute(), call))
         } catch (e: IOException) {
             throw AnthropicIoException("Request failed", e)
         } finally {
@@ -89,12 +83,7 @@ internal class BudgetedOkHttpClient(
     }
 
     private fun prepareResponse(response: HttpResponse): HttpResponse =
-        try {
-            backend.prepareResponse(response)
-        } catch (e: Exception) {
-            response.close()
-            throw e
-        }
+        try { backend.prepareResponse(response) } catch (e: Exception) { response.close(); throw e }
 
     private fun newCall(request: HttpRequest, context: WireCallContext): Call {
         // Materialize URL and body FIRST: body.contentLength() lazily serializes JSON in the SDK.
@@ -105,16 +94,11 @@ internal class BudgetedOkHttpClient(
         val leftMs = context.deadline.remainingMs()
         val limit = if (context.reservation != null) {
             if (leftMs < context.minTimeToSend.toMillis()) {
-                throw WireSendBlockedException(
-                    NoReplyReason.TOO_LATE_TO_SEND,
-                    "not sent: ${leftMs / 1000} s of the query's time were left",
-                )
+                throw WireSendBlockedException(NoReplyReason.TOO_LATE_TO_SEND, "not sent: ${leftMs / 1000} s of the query's time were left")
             }
             minOf(maxRequestTimeout, Duration.ofMillis(leftMs))
         } else {
-            if (leftMs <= 0L) {
-                throw WireSendBlockedException(NoReplyReason.TIMEOUT, "not sent: free request deadline passed")
-            }
+            if (leftMs <= 0L) throw WireSendBlockedException(NoReplyReason.TIMEOUT, "not sent: free request deadline passed")
             Duration.ofMillis(leftMs)
         }
 
@@ -125,10 +109,7 @@ internal class BudgetedOkHttpClient(
             .callTimeout(limit)
             .build()
 
-        val builder = Request.Builder()
-            .url(url)
-            .method(request.method.name, body)
-            .tag(WireCallContext::class.java, context)
+        val builder = Request.Builder().url(url).method(request.method.name, body).tag(WireCallContext::class.java, context)
         for (name in request.headers.names()) {
             for (value in request.headers.values(name)) builder.addHeader(name, value)
         }
@@ -168,18 +149,14 @@ internal class BudgetedOkHttpClient(
                 override fun read() = inner.read()
                 override fun read(b: ByteArray, off: Int, len: Int) = inner.read(b, off, len)
                 override fun available() = inner.available()
-                override fun close() {
-                    try { inner.close() } finally { body.close(); call.cancel() }
-                }
+                override fun close() { try { inner.close() } finally { body.close(); call.cancel() } }
             }
         } ?: ByteArrayInputStream(ByteArray(0))
         return object : HttpResponse {
             override fun statusCode() = response.code
             override fun headers() = headers
             override fun body() = stream
-            override fun close() {
-                try { stream.close() } finally { response.close() }
-            }
+            override fun close() { try { stream.close() } finally { response.close() } }
         }
     }
 

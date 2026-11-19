@@ -43,13 +43,10 @@ import javax.net.ssl.SSLPeerUnverifiedException
  *
  * ONE ATTEMPT. The SDK's own retries are off ([MAX_RETRIES]): between attempts it waits as long
  * as a `Retry-After` header says, without a limit. Whether a query is asked again is decided in
- * one place, [AIQueryDesk]. Under the SDK, our own OkHttp transport ([BudgetedOkHttpClient])
- * marks every request body one-shot (so OkHttp never replays after 503 `Retry-After: 0` or
- * HTTP/2 `421` — one call is at most one request on the wire) and runs [WireBudgetInterceptor]
- * as a network interceptor immediately before bytes leave on the wire to re-check
- * [MIN_TIME_TO_SEND] after TCP/TLS connect and stamp [AIHourlyBudget] once the write outcome is
- * known. It follows no redirect: a 3xx is a failure, and the request goes nowhere but where it
- * was sent.
+ * one place, [AIQueryDesk]. [BudgetedOkHttpClient] marks bodies one-shot (so OkHttp never replays
+ * 503 `Retry-After: 0` or HTTP/2 `421`) and runs [WireBudgetInterceptor] right before bytes leave
+ * to re-check [MIN_TIME_TO_SEND] after connect and stamp [AIHourlyBudget] once the write outcome
+ * is known. It follows no redirect: a 3xx is a failure, and the request goes nowhere else.
  *
  * ONE TIME LIMIT, the deadline of the query ([AIReplyRequest.deadline]). The request gets what is
  * left of it when it goes out ([requestTimeout] at most), and that is the only thing that ends a

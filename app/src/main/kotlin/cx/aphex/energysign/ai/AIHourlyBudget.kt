@@ -15,18 +15,7 @@ import java.time.Duration
  *
  * Invariant under [lock]: after head-pruning timestamps at least [HOUR_MS] old,
  * `sentAt.size + reserved <= callsPerHour`. The budget reads its own monotonic [nowMs] clock
- * under [lock] on every operation; no caller supplies a timestamp.
- *
- * Lifecycle of one place:
- * 1. [reserve] holds a place from handover (or generator entry) so the ceiling holds during prep.
- * 2. [WireBudgetInterceptor] stamps the place via [Reservation.stamp] only once the write outcome
- *    is known (after `chain.proceed` returns, or on a non-pre-write failure). Confirmed pre-write
- *    failures (`ConnectionShutdownException`, `StreamResetException(REFUSED_STREAM)`, or a call
- *    cancelled before writing) leave the place reserved so [Reservation.release] gives it back.
- * 3. [Reservation.release] returns an unstamped place and poisons it against late use; for a
- *    stamped place it is a no-op so the send stays counted for a full [HOUR_MS].
- *
- * Kept in memory only: restarting the process empties the window.
+ * under [lock] on every operation. Kept in memory only: a restart empties it.
  */
 class AIHourlyBudget(
     private val nowMs: () -> Long,
@@ -43,7 +32,7 @@ class AIHourlyBudget(
 
         internal fun isReserved(): Boolean = synchronized(lock) { state == State.RESERVED }
 
-        /** Converts this active reservation into a permanent send timestamp read under [lock]. */
+        /** Records a send using [nowMs] under [lock]. Returns false if already stamped or released. */
         fun stamp(): Boolean = synchronized(lock) {
             if (state != State.RESERVED) return false
             val now = nowMs()
@@ -54,10 +43,7 @@ class AIHourlyBudget(
             true
         }
 
-        /**
-         * Ends this reservation when the call finishes. Returns `true` if a request was stamped
-         * (kept for [HOUR_MS]) or `false` if nothing left (place returned and handle poisoned).
-         */
+        /** Ends this reservation. Returns true if stamped (kept for [HOUR_MS]), false if returned and poisoned. */
         fun release(): Boolean = synchronized(lock) {
             when (state) {
                 State.RESERVED -> {
@@ -99,20 +85,14 @@ class AIHourlyBudget(
     }
 }
 
-/**
- * Per-call context tagged onto an OkHttp request. A non-null [reservation] identifies a paid
- * reply call subject to [minTimeToSend]; `null` identifies a free `GET /v1/models/...` probe.
- */
+/** Per-call context tagged onto an OkHttp request; `reservation == null` marks a free model GET. */
 class WireCallContext(
     val deadline: Deadline,
     val minTimeToSend: Duration,
     val reservation: AIHourlyBudget.Reservation?,
 )
 
-/**
- * Thrown when a request is refused before bytes leave. Extends [ProtocolException] so OkHttp's
- * `RetryAndFollowUpInterceptor.isRecoverable` always treats it as non-recoverable.
- */
+/** Refusal thrown before bytes leave; extends [ProtocolException] so OkHttp never retries it. */
 class WireSendBlockedException(
     val reason: NoReplyReason,
     val detail: String,
@@ -124,8 +104,8 @@ class WireSendBlockedException(
 }
 
 /**
- * The ONE wire gate, installed as an OkHttp network interceptor directly below `ConnectInterceptor`
- * and directly above `CallServerInterceptor` for both providers.
+ * The ONE wire gate, installed as an OkHttp network interceptor below `ConnectInterceptor`
+ * and above `CallServerInterceptor` for both providers.
  */
 class WireBudgetInterceptor : Interceptor {
 
