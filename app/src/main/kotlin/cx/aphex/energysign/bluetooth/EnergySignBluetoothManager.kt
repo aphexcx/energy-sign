@@ -70,11 +70,11 @@ class EnergySignBluetoothManager(
             when (state) {
                 BluetoothAdapter.STATE_ON -> {
                     logD("bluetoothReceiver: STATE_ON")
-                    if (startup.optional("Bluetooth startup", ::startServices) == null) stop()
+                    session.adapterOn()
                 }
                 BluetoothAdapter.STATE_OFF -> {
                     logD("bluetoothReceiver: STATE_OFF")
-                    stopServices()
+                    session.adapterOff()
                 }
             }
         }
@@ -132,36 +132,24 @@ class EnergySignBluetoothManager(
         startServer()
     }
 
-    fun start() {
-        try {
-            registerAndStart()
-        } catch (failure: Throwable) {
-            stop()
-            throw failure
-        }
-    }
+    private val session: BluetoothSession = BluetoothSession(
+        startup = startup,
+        register = {
+            if (!context.checkBluetoothSupport(bluetoothAdapter)) {
+                throw UnsupportedOperationException("Bluetooth LE unavailable")
+            }
+            receivers.register(bluetoothReceiver, bondStateReceiver)
+        },
+        unregister = receivers::clear,
+        enabled = { bluetoothAdapter.isEnabled },
+        enable = { bluetoothAdapter.enable() },
+        openServices = ::startServices,
+        closeServices = ::stopServices,
+    )
 
-    private fun registerAndStart() {
-        // We can't continue without proper Bluetooth support
-        if (!context.checkBluetoothSupport(bluetoothAdapter)) {
-            throw UnsupportedOperationException("Bluetooth LE unavailable")
-        }
+    fun start() = session.start()
 
-        receivers.register(bluetoothReceiver, bondStateReceiver)
-
-        if (!bluetoothAdapter.isEnabled) {
-            logD("Bluetooth is currently disabled...enabling")
-            check(bluetoothAdapter.enable()) { "Bluetooth adapter refused to enable" }
-        } else {
-            logD("Bluetooth enabled...starting services")
-            startServices()
-        }
-    }
-
-    fun stop() {
-        startup.optional("Bluetooth receiver cleanup") { receivers.clear() }
-        stopServices()
-    }
+    fun stop() = session.stop()
 
     private fun stopServices() {
         startup.optional("Bluetooth GATT cleanup", ::stopServer)

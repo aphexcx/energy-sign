@@ -138,12 +138,11 @@ class EnergySignBluetoothGattServer(
 //                }
             NordicUartServiceProfile.NORDIC_UART_TX_UUID -> {
                 logD("Uart TX characteristic write: [${String(value)}]")
-                receivedBytes.accept(value)
-
+                val status = uartWriteStatus(value)
                 gattServer?.sendResponse(
                     device,
                     requestId,
-                    BluetoothGatt.GATT_SUCCESS,
+                    status,
                     0,
                     "Uart Write response".toByteArray()
                 )
@@ -161,6 +160,11 @@ class EnergySignBluetoothGattServer(
             }
         }
 
+    }
+
+    internal fun uartWriteStatus(value: ByteArray): Int {
+        receivedBytes.accept(value)
+        return BluetoothGatt.GATT_SUCCESS
     }
 
     override fun onCharacteristicReadRequest(
