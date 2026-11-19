@@ -181,6 +181,7 @@ class SignResponder(
          */
         fun warmUp(stopped: () -> Boolean = { false }): Int {
             var prepared = 0
+            var firstFailure: RuntimeException? = null
             fun visit(type: Class<*>): Boolean {
                 if (Message::class.java.isAssignableFrom(type) && !Modifier.isAbstract(type.modifiers)) {
                     if (stopped()) return false
@@ -188,7 +189,7 @@ class SignResponder(
                         GSON.getAdapter(type)
                         prepared++
                     } catch (e: RuntimeException) {
-                        // then it is built at its first use, as before
+                        if (firstFailure == null) firstFailure = e
                     }
                 }
                 return type.declaredClasses.all(::visit)
@@ -196,6 +197,7 @@ class SignResponder(
             if (visit(Message::class.java) && !stopped()) {
                 GSON.toJson(ChooserProtocol.chooserMessage(emptyList(), 0))
             }
+            firstFailure?.let { throw it }
             return prepared
         }
     }

@@ -8,8 +8,6 @@ import android.util.Log
 import com.google.android.things.pio.PeripheralManager
 import com.google.android.things.pio.UartDevice
 import cx.aphex.energysign.MainViewModel
-import cx.aphex.energysign.SignStartup
-import cx.aphex.energysign.message.SignResponder
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logE
 import cx.aphex.energysign.ext.logW
@@ -50,9 +48,7 @@ class EnergySignUartManager(private val viewModel: MainViewModel, private val ow
         override fun close() = uartDevice.close()
     }
 
-    private val writers = WriterPreparation(SignStartup { logW(it) }, { stopped -> SignResponder.warmUp(stopped) }, owner::post)
-
-    internal fun onForeground() = writers.onForeground()
+    internal fun onForeground() = link.prepareAgain()
 
     private val link = SignLink(
         wire = wire,
@@ -62,7 +58,6 @@ class EnergySignUartManager(private val viewModel: MainViewModel, private val ow
             owner.drain(stopped = stopped) { error -> logW("A change to the messages failed: $error", error) }
         },
         answer = ::answer,
-        prepareAnswers = writers::beforeFirstRead,
         timing = timing,
         log = { line -> logD(line) },
         warn = { line -> logW(line) },

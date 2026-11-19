@@ -822,12 +822,30 @@ class SignLinkTest {
 
     @Test
     fun `failure to prewarm a writer still lets the link answer requests`() {
-        verifyFailedPreparation(IllegalStateException("adapter unavailable"))
+        for (failure in listOf(IllegalStateException(), LinkageError())) verifyFailedPreparation(failure)
     }
 
     @Test
-    fun linkageErrorDuringPreparationLeavesThePortServingRequests() {
-        verifyFailedPreparation(LinkageError("adapter unavailable"))
+    fun expiredPreparationRetriesOnTheLinkOnceAndKeepsServingReads() {
+        var passes = 0
+        var turns = 0
+        lateinit var real: SignLink
+        val quiet = QuietWire()
+        real = SignLink(wire = quiet, baud = baud, name = "UART", answer = { _, _ -> },
+            events = {
+                if (++turns == 4) real.stop() else repeat(3) { real.prepareAgain() }
+            },
+            prepareAnswers = { stopped ->
+                if (++passes == 1) {
+                    now += 2_001 * ms
+                    assertTrue(stopped())
+                } else assertFalse(stopped())
+            },
+            timing = UartTimingLog(isEnabled = { false }, emit = {}), nanoTime = { now }, sleepNanos = {},
+        )
+        real.run()
+        assertEquals(2, passes)
+        assertEquals(3, quiet.reads.get())
     }
 
     private fun verifyFailedPreparation(failure: Throwable) {
@@ -851,7 +869,7 @@ class SignLinkTest {
         )
         real.run()
         assertTrue(wrote)
-        assertTrue(line.any { it.contains("adapter unavailable") })
+        assertTrue(line.any { it.contains(failure.javaClass.name) && it.contains("sign link continues") })
         assertEquals(1, quiet.closes.get())
     }
 
