@@ -4,6 +4,7 @@ import android.app.Application
 import android.os.Looper
 import cx.aphex.energysign.beatlinkdata.BeatLinkListener
 import androidx.lifecycle.AndroidViewModel
+import cx.aphex.energysign.bluetooth.takeWrite
 import cx.aphex.energysign.bluetooth.BluetoothStatusUpdate
 import cx.aphex.energysign.bluetooth.EnergySignBluetoothManager
 import cx.aphex.energysign.ext.NonNullMutableLiveData
@@ -34,10 +35,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
     private val messageManager: MessageManager by inject()
     private val startup = SignStartup { logW(it) }
     private val bluetooth = BluetoothStartup(startup,
-        create = { EnergySignBluetoothManager(application.applicationContext, this, worker) },
-        subscribe = { it.subscribeToWrites(messageManager) },
+        create = { EnergySignBluetoothManager(application.applicationContext, this, worker, messageManager::takeWrite) },
+        subscribe = {},
         startManager = EnergySignBluetoothManager::start,
-        stopManager = EnergySignBluetoothManager::stop,
+        stopManager = {},
     )
     private val worker by lazy { SignWorker { logW(it) } }
     private val beatLink = lazy { BeatLinkListener(application.applicationContext, worker) }
@@ -80,12 +81,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
 
     override fun onCleared() {
         super.onCleared()
-        // Who brings changes stops first, then who carries them out
-        try {
-            bluetooth.manager?.stop()
-        } finally {
-            energySignUartManager.stop()
-        }
+        energySignUartManager.stop()
     }
 
     /**

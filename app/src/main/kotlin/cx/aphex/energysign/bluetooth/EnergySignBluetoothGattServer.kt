@@ -2,7 +2,6 @@ package cx.aphex.energysign.bluetooth
 
 import android.bluetooth.*
 import android.content.Context
-import com.jakewharton.rxrelay3.PublishRelay
 import cx.aphex.energysign.MainViewModel
 import cx.aphex.energysign.OptionalStart
 import cx.aphex.energysign.StartWorker
@@ -26,7 +25,7 @@ internal class EnergySignBluetoothGattServer(
     val bluetoothManager: BluetoothManager,
     val viewModel: MainViewModel,
     private val worker: StartWorker,
-    internal val writes: PublishRelay<GattWrite> = PublishRelay.create(),
+    private val takeWrite: (ByteArray, Boolean) -> Boolean,
     private val serviceAdded: (Int) -> Unit = {},
 ) : BluetoothGattServerCallback() {
 
@@ -178,9 +177,7 @@ internal class EnergySignBluetoothGattServer(
     ): Int {
         if (preparedWrite) return BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED
         if (offset != 0) return BluetoothGatt.GATT_INVALID_OFFSET
-        val write = GattWrite(value, responseNeeded)
-        writes.accept(write)
-        return if (write.delivered) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE
+        return if (!closed && takeWrite(value, responseNeeded)) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE
     }
 
     override fun onCharacteristicReadRequest(

@@ -18,7 +18,7 @@ class BluetoothPeerTest {
     private val cccd = mock(BluetoothGattDescriptor::class.java)
     private val worker = TestStartWorker()
     private val shown = mutableListOf<BluetoothStatusUpdate>()
-    private val gatt = EnergySignBluetoothGattServer(context, manager, model, worker)
+    private val gatt = EnergySignBluetoothGattServer(context, manager, model, worker, { _, _ -> true })
 
     init {
         `when`(manager.openGattServer(context, gatt)).thenReturn(platform)

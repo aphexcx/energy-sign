@@ -13,26 +13,23 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.ParcelUuid
-import com.jakewharton.rxrelay3.PublishRelay
 import cx.aphex.energysign.MainViewModel
 import cx.aphex.energysign.OptionalStart
 import cx.aphex.energysign.optional
 import cx.aphex.energysign.StartWorker
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
-import cx.aphex.energysign.message.MessageManager
-import io.reactivex.rxjava3.disposables.Disposable
 
 internal class EnergySignBluetoothManager(
     val context: Context,
     val viewModel: MainViewModel,
     private val worker: StartWorker,
+    private val takeWrite: (ByteArray, Boolean) -> Boolean,
 ) {
 
     private val warn: (String) -> Unit = { logW(it) }
 
     private fun post(action: () -> Unit) = worker.post(action)
-    private val writes = PublishRelay.create<GattWrite>()
     private var server: EnergySignBluetoothGattServer? = null
     private var cancelAdvertising: (() -> Unit)? = null
 
@@ -42,15 +39,9 @@ internal class EnergySignBluetoothManager(
     private val bluetoothAdapter: BluetoothAdapter
         get() = checkNotNull(bluetoothManager.adapter)
 
-    private var writeSubscription: Disposable? = null
-
-    fun subscribeToWrites(manager: MessageManager) {
-        writeSubscription = writes.deliverEachWrite(manager)
-    }
-
     private fun registerService(added: (Int) -> Unit): Boolean {
         // A callback belongs to this server alone, even if Android delivers it after close().
-        val attempt = EnergySignBluetoothGattServer(context, bluetoothManager, viewModel, worker, writes) { status ->
+        val attempt = EnergySignBluetoothGattServer(context, bluetoothManager, viewModel, worker, takeWrite) { status ->
             post { added(status) }
         }
         server = attempt
@@ -146,7 +137,6 @@ internal class EnergySignBluetoothManager(
 
     fun start() = worker.post(::ensure)
     fun onForeground() = start()
-    fun stop() { writeSubscription?.dispose() }
 
     private fun stopServices() {
         val cancel = cancelAdvertising

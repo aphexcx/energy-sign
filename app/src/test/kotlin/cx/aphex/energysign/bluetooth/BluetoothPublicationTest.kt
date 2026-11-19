@@ -122,7 +122,7 @@ class BluetoothPublicationTest {
                 return null
             }
         }
-        val manager = EnergySignBluetoothManager(app, ObjenesisStd().newInstance(MainViewModel::class.java), TestStartWorker())
+        val manager = EnergySignBluetoothManager(app, ObjenesisStd().newInstance(MainViewModel::class.java), TestStartWorker()) { _, _ -> true }
         manager.ensure()
         assertEquals(1, registered.size)
         manager.ensure()
