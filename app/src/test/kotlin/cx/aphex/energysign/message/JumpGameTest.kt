@@ -49,6 +49,9 @@ class JumpGameTest {
         return "score ${game.score}, ${game.ended ?: "running"}"
     }
 
+    /** Rules for a game to look at: nothing to hit, and one [speed]. */
+    private fun toLookAt(speed: Double) = JumpGame.Rules(obstacles = listOf(JumpGame.Shape(listOf(0))), startSpeed = speed, topSpeed = speed)
+
     /** With one kind of obstacle and one speed: for how many milliseconds of pressing (in steps of 10) the first obstacle is cleared. */
     private fun windowMs(kind: Int, speed: Double): Int {
         val standard = JumpGame.Rules()
@@ -137,24 +140,58 @@ class JumpGameTest {
                     every(10, 5_000).mapNotNull { game.frame(it)?.obstacles?.firstOrNull()?.column }.last()
                 }
             },
-            // THE FRAME on the wire: two keys, the text of the note, 32 bytes at most in play
+            // THE STARFIELD behind the play: its place is a quarter of what the ground has moved, by the clock alone, and wraps at 60
+            row("the starfield's place at a ground speed of 30 columns a second, after 0, 1, 2 and 4 seconds", listOf(0, 7, 15, 30)) {
+                val game = game(toLookAt(speed = 30.0))
+                listOf(0L, 1_000, 2_000, 4_000).map { game.frame(it)?.stars }
+            },
+            row("and at 54 columns a second after 2 seconds", 27) { game(toLookAt(speed = 54.0)).frame(2_000)?.stars },
+            row("it wraps: at 30 columns a second after 7.9, 8 and 9 seconds", listOf(59, 0, 7)) {
+                val game = game(toLookAt(speed = 30.0))
+                listOf(7_900L, 8_000, 9_000).map { game.frame(it)?.stars }
+            },
+            row("it gets faster as the game does: the columns it moves in the first four seconds, and in four seconds two minutes in", listOf(30, 54)) {
+                val game = game(JumpGame.Rules(obstacles = listOf(JumpGame.Shape(listOf(0)))))
+                listOf(0L, 120_000).map { from ->
+                    val before = game.frame(from)?.stars
+                    val after = game.frame(from + 4_000)?.stars
+                    if (before == null || after == null) null else Math.floorMod(after - before, 60)
+                }
+            },
+            row("its place half a minute into a game is the same however the sign asks: every 10 ms, every 45, unevenly, once", List(4) { 30 }) {
+                listOf(every(10, 30_000), every(45, 30_000), unevenly(30_000), emptyList()).map { requests ->
+                    val game = game(JumpGame.Rules(obstacles = listOf(JumpGame.Shape(listOf(0)))))
+                    requests.forEach { game.frame(it) }
+                    game.frame(30_000)?.stars
+                }
+            },
+            // THE FRAME on the wire: two keys, the text of the note with the starfield's place behind it, 35 bytes at most in play
             row("every frame of that minute as the sign reads it: longest in bytes, and how many are not of the note's form", listOf(true, 0)) {
                 val game = game()
-                val form = Regex("""\{"str":"[0-7][01]([abc]-?\d{1,2}){0,4}","type":"G"\}""")
+                val form = Regex("""\{"str":"[0-7][01]([abc]-?\d{1,2}){0,4}s[1-5]?\d","type":"G"\}""")
                 val frames = (pressed.map { it to true } + every(10, minute).map { it to false }).sortedBy { it.first }.mapNotNull { (now, press) ->
                     if (press) game.jump(now)
                     game.frame(now)?.let { SignResponder.GSON.toJson(gameFrame(it)) }
                 }
-                listOf(frames.maxOf { it.length } in 23..32, frames.count { !form.matches(it) })
+                listOf(frames.maxOf { it.length } in 25..35, frames.count { !form.matches(it) })
             },
             // THE RUNNER IS BLUE, by the sign's own default: in play and when it runs in no colour is sent; where a show names its colour, it begins blue (6)
-            row("the first frame of the run-in, of a game, and of the new best's hop", listOf("00r-12e1", "00", "00r2p62e1")) {
+            row("the first frame of the run-in, of a game, and of the new best's hop", listOf("00r-12e1s56", "00s0", "00r2p62e1s0")) {
                 val shows = GameShows(0, 0, 0)
                 listOf((shows.intro().last() as Beat.Frames).at(0), game().frame(0)!!, (shows.newBest(1, null)[4] as Beat.Frames).at(0)).map { gameFrame(it).str }
             },
-            row("a frame with more than the sign can read is cut to what it can: four obstacles, every number in its range", "71a10b20c30a-99r99p70e2") {
+            // THE STARFIELD IN THE SHOWS: it slides into the game's first place while the runner runs in, stands still at a hit, moves on in the hop
+            row("the starfield in the run-in (at 0, 250 and 499 ms), in the picture of a hit at 17 (at 0 and 650 ms), in the hop (at 1 and 2 s)",
+                listOf(56, 58, 59, 17, 17, 13, 27)) {
+                val shows = GameShows(0, 0, 0)
+                val runIn = shows.intro().last() as Beat.Frames
+                val hit = shows.over(0, 0, JumpGame.Frame(0, 0, emptyList(), stars = 17)).first() as Beat.Frames
+                val hop = shows.newBest(1, null)[4] as Beat.Frames
+                listOf(runIn.at(0), runIn.at(250), runIn.at(499), hit.at(0), hit.at(650), hop.at(1_000), hop.at(2_000)).map { it.stars }
+            },
+            row("a frame with more than the sign can read is cut to what it can: four obstacles, every number in its range", "71a10b20c30a-99r99p70e2s10") {
                 val obstacles = listOf(0 to 150, 1 to -120, 7 to 3, 0 to 10, 1 to 20, 2 to 30, 0 to -99, 1 to 50).map { JumpGame.Obstacle(it.first, it.second) }
-                gameFrame(JumpGame.Frame(rise = 12, picture = 5, obstacles = obstacles, runnerAt = 300, colours = 9 to -1, effect = 2)).str
+                gameFrame(JumpGame.Frame(rise = 12, picture = 5, obstacles = obstacles, runnerAt = 300, colours = 9 to -1, effect = 2, stars = 130)).str
             },
             row("the least room between two obstacles on a face in that minute, in columns: a jump and time to press again", true) {
                 val game = game()
