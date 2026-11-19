@@ -76,7 +76,7 @@ fun File.replaceContent(
     }
     if (!beside.renameTo(this)) throw IOException("could not rename ${beside.name} to $name")
     try {
-        steps.syncDirectory(absoluteFile.parentFile!!)
+        absoluteFile.parentFile!!.syncDirectory(steps.openDirectory)
     } catch (e: Exception) {
         warn("$name is saved, but its directory could not be forced to storage: ${e.javaClass.simpleName}: ${e.message}")
     }
@@ -92,15 +92,21 @@ class SaveSteps(
     val open: (File) -> FileOutputStream = ::FileOutputStream,
     /** Forces what was written to that file to storage. */
     val syncData: (FileOutputStream) -> Unit = { it.fd.sync() },
-    /** Forces the directory to storage, after the rename. */
-    val syncDirectory: (File) -> Unit = { it.syncDirectory() },
+    /**
+     * Opens the directory, which is then forced to storage and closed ([syncDirectory]), after
+     * the rename. Only the opening can be another: the force is always the real call.
+     */
+    val openDirectory: (File) -> FileChannel = { FileChannel.open(it.toPath(), StandardOpenOption.READ) },
 )
 
 /**
  * Forces this directory to storage: the names in it, so a file that was just renamed into place
  * keeps its new name through a power cut. (Forcing the file's own data does not do that.)
+ * The directory is opened for reading, forced (its metadata too) and closed. [open] is the real
+ * way to open it ([SaveSteps.openDirectory]) unless a test hands in a channel of its own, to
+ * see what is asked of it.
  */
 @Throws(IOException::class)
-fun File.syncDirectory() {
-    FileChannel.open(toPath(), StandardOpenOption.READ).use { it.force(true) }
+fun File.syncDirectory(open: (File) -> FileChannel = SaveSteps().openDirectory) {
+    open(this).use { it.force(true) }
 }
