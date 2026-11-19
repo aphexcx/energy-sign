@@ -1,155 +1,122 @@
 package cx.aphex.energysign.message
 
-import android.graphics.Color
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
-import org.junit.jupiter.api.BeforeEach
+import com.google.gson.JsonParser
 import org.junit.jupiter.api.Test
-import org.mockito.MockedStatic
-import org.mockito.Mockito
+import org.junit.jupiter.api.io.TempDir
+import java.io.File
 import kotlin.test.assertEquals
+
+/** Capture the JSON that a real next-message request hands to the sign link. */
+internal fun assertSignFrame(message: Message, expectedJson: String) {
+    val frames = mutableListOf<String>()
+    val responder = SignResponder(nextMessage = { message }, write = { frame, _ -> frames.add(frame) })
+    responder.onRequest(byteArrayOf('~'.code.toByte()), 1)
+
+    assertEquals(JsonParser.parseString(expectedJson), JsonParser.parseString(frames.single()))
+}
 
 class MessageSerializationTest {
 
-    private val json = Json {
-        ignoreUnknownKeys = true
-        classDiscriminator = "_class"
-    }
-
-    private lateinit var mockedColor: MockedStatic<Color>
-
-    @BeforeEach
-    fun setup() {
-        mockedColor = Mockito.mockStatic(Color::class.java)
-        mockedColor.`when`<Int> { Color.red(Mockito.anyInt()) }.thenReturn(255)
-        mockedColor.`when`<Int> { Color.green(Mockito.anyInt()) }.thenReturn(0)
-        mockedColor.`when`<Int> { Color.blue(Mockito.anyInt()) }.thenReturn(0)
-    }
-
     @Test
     fun testMarqueeUserSerialization() {
-        val message = Message.Marquee.User("Test Message")
-        val jsonString = json.encodeToString(message)
-        val deserializedMessage = json.decodeFromString<Message.Marquee.User>(jsonString)
-        assertEquals(message, deserializedMessage)
+        assertSignFrame(Message.Marquee.User("Test Message"), """{"type":"D","str":"Test Message"}""")
     }
 
     @Test
     fun testMarqueeGPTQuerySerialization() {
-        val message = Message.Marquee.AIQuery("Test AI Query")
-        val jsonString = json.encodeToString(message)
-        val deserializedMessage = json.decodeFromString<Message.Marquee.AIQuery>(jsonString)
-        assertEquals(message, deserializedMessage)
+        assertSignFrame(Message.Marquee.AIQuery("Test query"), """{"type":"D","str":"Test query"}""")
     }
 
     @Test
     fun testMarqueeChonkySerialization() {
-        val message = Message.Marquee.Chonky("Chonky Message")
-        val jsonString = json.encodeToString(message)
-        val deserializedMessage = json.decodeFromString<Message.Marquee.Chonky>(jsonString)
-        assertEquals(message, deserializedMessage)
+        assertSignFrame(Message.Marquee.Chonky("Chonky Message"), """{"type":"N","str":"Chonky Message"}""")
     }
 
     @Test
-    fun testMarqueeGPTReplySerialization() {
-        val message = Message.Marquee.AIReply("AI Reply")
-        val jsonString = json.encodeToString(message)
-        val deserializedMessage = json.decodeFromString<Message.Marquee.AIReply>(jsonString)
-        assertEquals(message, deserializedMessage)
+    fun testMarqueeGPTReplySerialization(@TempDir dir: File) {
+        val reply = Message.Marquee.AIReply("AI Reply")
+        val repository = MessageRepository(saver = { it.run() })
+        repository.pushMarqueeMessage(reply)
+        repository.saveMarqueeMessages(dir)
+
+        assertEquals("CHONKYMARQUEE\u000BAI Reply\n", File(dir, "signstrings.bin").readText())
+        assertSignFrame(reply.toChonkyMessage(), """{"type":"N","str":"AI Reply"}""")
     }
 
     @Test
     fun testStarfieldSerialization() {
-        val message = Message.Starfield("Starfield", 500)
-        val jsonString = json.encodeToString(message)
-        val deserializedMessage = json.decodeFromString<Message.Starfield>(jsonString)
-        assertEquals(message, deserializedMessage)
+        assertSignFrame(Message.Starfield("Stars", 500), """{"type":"S","str":"Stars","stars":500}""")
     }
 
     @Test
     fun testNowPlayingTrackMessageSerialization() {
-        val message = Message.NowPlayingTrackMessage("Now Playing: Test Track")
-        val jsonString = json.encodeToString(message)
-        val deserializedMessage = json.decodeFromString<Message.NowPlayingTrackMessage>(jsonString)
-        assertEquals(message, deserializedMessage)
+        assertSignFrame(Message.NowPlayingTrackMessage("Test Track"), """{"type":"T","str":"Test Track"}""")
     }
 
     @Test
     fun testOneByOneMessageSerialization() {
-        val message = Message.ColorMessage.OneByOneMessage("One By One", 0xFF0000, 500)
-        val jsonString = json.encodeToString(message)
-        val deserializedMessage = json.decodeFromString<Message.ColorMessage.OneByOneMessage>(jsonString)
-        assertEquals(message, deserializedMessage)
+        assertSignFrame(
+            Message.ColorMessage.OneByOneMessage("One By One", 0x123456, 500),
+            """{"type":"O","str":"One By One","dly":500,"r":18,"g":52,"b":86}""",
+        )
     }
 
     @Test
     fun testChonkySlideSerialization() {
-        val message = Message.ColorMessage.ChonkySlide("Chonky Slide", 0x00FF00, 750)
-        val jsonString = json.encodeToString(message)
-        val deserializedMessage = json.decodeFromString<Message.ColorMessage.ChonkySlide>(jsonString)
-        assertEquals(message, deserializedMessage)
+        assertSignFrame(
+            Message.ColorMessage.ChonkySlide("Chonky Slide", 0x2468AC, 750),
+            """{"type":"C","str":"Chonky Slide","dly":750,"scroll":false,"r":36,"g":104,"b":172}""",
+        )
     }
 
     @Test
     fun testGPTThinkingSerialization() {
-        val message = Message.ColorMessage.AIThinking("...", 0x0000FF)
-        val jsonString = json.encodeToString(message)
-        val deserializedMessage = json.decodeFromString<Message.ColorMessage.AIThinking>(jsonString)
-        assertEquals(message, deserializedMessage)
+        assertSignFrame(
+            Message.ColorMessage.AIThinking("...", 0x123456),
+            """{"type":"C","str":"...","dly":250,"scroll":false,"r":18,"g":52,"b":86,"showCaret":true,"thinkDots":0}""",
+        )
     }
 
     @Test
     fun testIconInvadersSerialization() {
-        val message = Message.ColorMessage.IconInvaders.Enemy1(0xFFFF00)
-        val jsonString = json.encodeToString(message)
-        val deserializedMessage = json.decodeFromString<Message.ColorMessage.IconInvaders.Enemy1>(jsonString)
-        assertEquals(message, deserializedMessage)
+        assertSignFrame(
+            Message.ColorMessage.IconInvaders.Enemy1(0x234567),
+            """{"type":"I","str":"1","r":35,"g":69,"b":103}""",
+        )
     }
 
     @Test
     fun testFlashingAnnouncementSerialization() {
-        val message = Message.FlashingAnnouncement.CustomFlashyAnnouncement("Flash", 300)
-        val jsonString = json.encodeToString(message)
-        val deserializedMessage =
-            json.decodeFromString<Message.FlashingAnnouncement.CustomFlashyAnnouncement>(jsonString)
-        assertEquals(message, deserializedMessage)
+        assertSignFrame(
+            Message.FlashingAnnouncement.CustomFlashyAnnouncement("Flash", 300),
+            """{"type":"F","str":"Flash","time":300}""",
+        )
     }
 
     @Test
     fun testCountDownAnnouncementSerialization() {
-        val message = Message.CountDownAnnouncement.NewMessageAnnouncement
-        val jsonString = json.encodeToString(message)
-        val deserializedMessage =
-            json.decodeFromString<Message.CountDownAnnouncement.NewMessageAnnouncement>(jsonString)
-        assertEquals(message, deserializedMessage)
+        assertSignFrame(
+            Message.CountDownAnnouncement.NewMessageAnnouncement,
+            """{"type":"W","str":"NEW\u000bMSG\u000b"}""",
+        )
     }
 
     @Test
     fun testUtilityMessageSerialization() {
-        val message = Message.UtilityMessage.EnableMic
-        val jsonString = json.encodeToString(message)
-        val deserializedMessage = json.decodeFromString<Message.UtilityMessage.EnableMic>(jsonString)
-        assertEquals(message, deserializedMessage)
+        assertSignFrame(Message.UtilityMessage.EnableMic, """{"type":"U","str":"E","subtype":"M"}""")
     }
 
     @Test
     fun testChooserSerialization() {
-        val message = Message.Chooser(1, 5, Message.Marquee.User("Choose me"))
-        val jsonString = json.encodeToString(message)
-        val deserializedMessage = json.decodeFromString<Message.Chooser>(jsonString)
-        assertEquals(message, deserializedMessage)
+        val chooser = Message.Chooser(1, 5, Message.Marquee.User("Choose me"))
+        assertSignFrame(chooser, """{"type":"H","str":"Choose me","flashy":"1/5"}""")
     }
 
     @Test
     fun testKeyboardEchoSerialization() {
-        val message = Message.KeyboardEcho.Input("Test Input")
-        val jsonString = json.encodeToString(message)
-        val deserializedMessage = json.decodeFromString<Message.KeyboardEcho.Input>(jsonString)
-        assertEquals(message, deserializedMessage)
-    }
-
-    @org.junit.jupiter.api.AfterEach
-    fun tearDown() {
-        mockedColor.close()
+        assertSignFrame(
+            Message.KeyboardEcho.Input("abcdefghijklmnopqrstuvwxyz"),
+            """{"type":"K","str":"hijklmnopqrstuvwxyz_","mode":"I"}""",
+        )
     }
 }
