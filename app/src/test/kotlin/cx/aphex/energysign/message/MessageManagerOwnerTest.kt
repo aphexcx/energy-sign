@@ -22,6 +22,7 @@ import org.koin.dsl.module
 import java.io.File
 import java.nio.file.Files
 import java.util.concurrent.Callable
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.FutureTask
 import java.util.concurrent.Executor
@@ -58,13 +59,15 @@ class MessageManagerOwnerTest {
     private val owner = OwnerQueue()
     private lateinit var manager: MessageManager
 
+    private val immediateTasks = object : TaskExecutor() {
+        override fun executeOnDiskIO(runnable: Runnable) = runnable.run()
+        override fun postToMainThread(runnable: Runnable) = runnable.run()
+        override fun isMainThread(): Boolean = true
+    }
+
     @BeforeAll
     fun android() {
-        ArchTaskExecutor.getInstance().setDelegate(object : TaskExecutor() {
-            override fun executeOnDiskIO(runnable: Runnable) = runnable.run()
-            override fun postToMainThread(runnable: Runnable) = runnable.run()
-            override fun isMainThread(): Boolean = true
-        })
+        ArchTaskExecutor.getInstance().setDelegate(immediateTasks)
         startKoin {
             modules(module {
                 single { repo }
@@ -253,9 +256,18 @@ class MessageManagerOwnerTest {
 
     // ---- a message that could not be written (class D)
 
+    private fun startWithTwoStoredMessages(): App {
+        val home = newFilesDir()
+        File(home, "signstrings.bin").writeText("DEFAULT\u000bMESSAGE 2\nDEFAULT\u000bMESSAGE 1\n")
+        return App(home)
+    }
+
     @Test
     fun `a one-time message that could not be written goes back to the front and a stored one retries at its place`() {
-        phone("!micOff")
+        val app = startWithTwoStoredMessages()
+        val repo = app.repo
+        val manager = app.manager
+        app.phone("!micOff")
         ownerRuns()
         repo.enqueueOneTimeMessage(Message.Starfield())
         val taken = manager.getNextMessage()
@@ -272,17 +284,44 @@ class MessageManagerOwnerTest {
         assertEquals("MESSAGE 1", stored.str)
         manager.returnUnsent(stored)
         assertEquals(0, repo.oneTimeMessages.size)
-        assertEquals(5, repo.marqueeMessages.size)
+        assertEquals(2, repo.marqueeMessages.size)
         assertSame(stored, manager.getNextMessage())
         assertSame(repo.marqueeMessages[1], manager.getNextMessage())
     }
 
     @Test
-    fun `a failed last stored message retries before the ads it triggered, even after repeated failures`() {
-        val app = App(newFilesDir())
+    fun `a marquee taken from the one time queue retries there even when it also has a stored place`() {
+        val app = startWithTwoStoredMessages()
         val repo = app.repo
         val manager = app.manager
-        repo.marqueeMessages.addAll(listOf(Message.Marquee.User("FIRST"), Message.Marquee.User("LAST")))
+        val queued = repo.marqueeMessages.last()
+        repo.pushOneTimeMessage(queued)
+        assertSame(queued, manager.getNextMessage())
+        manager.returnUnsent(queued)
+        assertSame(queued, repo.oneTimeMessages.firstOrNull())
+        assertSame(queued, manager.getNextMessage())
+        assertSame(repo.marqueeMessages.first(), manager.getNextMessage())
+    }
+
+    @Test
+    fun `deleting a failed stored message before the retry leaves the cursor on its successor`() {
+        val app = startWithTwoStoredMessages()
+        val manager = app.manager
+        val failed = manager.getNextMessage()
+        manager.returnUnsent(failed)
+        app.phone("!choose")
+        app.phone("!delete")
+        app.phone("!endchoose")
+        ownerRuns()
+        assertTrue(app.repo.marqueeMessages.none { it === failed })
+        assertEquals("MESSAGE 2", manager.getNextMessage().str)
+    }
+
+    @Test
+    fun `a failed last stored message retries before the ads it triggered, even after repeated failures`() {
+        val app = startWithTwoStoredMessages()
+        val repo = app.repo
+        val manager = app.manager
         app.phone("!A1")
         app.phone("!last")
         ownerRuns()
@@ -326,11 +365,13 @@ class MessageManagerOwnerTest {
             }
             override fun close() {}
         }
-        val home = newFilesDir()
-        File(home, "signstrings.bin").writeText("DEFAULT\u000bMESSAGE 2\nDEFAULT\u000bMESSAGE 1\n")
-        val manager = App(home).manager
+        val manager = startWithTwoStoredMessages().manager
         lateinit var link: SignLink
-        val responder = SignResponder(manager::getNextMessage, { frame, reply -> link.send(frame, reply) }, manager::returnUnsent)
+        val responder = SignResponder(
+            nextMessage = manager::getNextMessage,
+            write = { frame, reply -> link.send(frame, reply) },
+            unsent = manager::returnUnsent,
+        )
         link = SignLink(
             wire = wire, baud = 14400, name = "test", events = ::ownerRuns,
             prepareAnswers = {
@@ -347,6 +388,13 @@ class MessageManagerOwnerTest {
             nanoTime = { clock }, sleepNanos = { clock += it },
         )
 
+        val main = Thread.currentThread()
+        val mainTasks = ConcurrentLinkedQueue<Runnable>()
+        ArchTaskExecutor.getInstance().setDelegate(object : TaskExecutor() {
+            override fun executeOnDiskIO(runnable: Runnable) = immediateTasks.executeOnDiskIO(runnable)
+            override fun postToMainThread(runnable: Runnable) { mainTasks.add(runnable) }
+            override fun isMainThread() = Thread.currentThread() === main
+        })
         val thread = Thread(link, "test-sign-link")
         val mainBusyFrom = System.nanoTime()
         try {
@@ -354,7 +402,9 @@ class MessageManagerOwnerTest {
             Thread.sleep(5_000) // this thread built the manager and cannot run a callback
         } finally {
             link.stop()
+            while (true) (mainTasks.poll() ?: break).run()
             thread.join(2_000)
+            ArchTaskExecutor.getInstance().setDelegate(immediateTasks)
         }
         assertFalse(thread.isAlive)
         assertEquals(listOf(SignResponder.GSON.toJson(Message.Marquee.User("MESSAGE 1"))), frames)

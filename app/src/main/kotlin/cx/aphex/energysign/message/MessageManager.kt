@@ -40,6 +40,10 @@ class MessageManager(
     private var nowPlayingTrack: Message.NowPlayingTrackMessage? = null
 
     private val currentIdx = atomic<Int>(0)
+    /** Set only if this request took its message from the stored list (a queued reply can be in both). */
+    private var takenFromList: Message.Marquee? = null
+    /** This stored selection already counted towards ads or started a query on its first attempt. */
+    private var retryStored: Message.Marquee? = null
 
     // Message type state mess **
     private var isInChooserMode: Boolean = false
@@ -266,11 +270,23 @@ class MessageManager(
      * ever the answer to a request the sign really made. Owner thread only.
      */
     fun getNextMessage(): Message {
+        takenFromList = null
         if (isInChooserMode) {
             return getNextChooserMessage()
         }
         keyboardManager.handleKeyboardInput()?.let {
             return it
+        }
+
+        retryStored?.let { retry ->
+            retryStored = null
+            // A command may have moved the cursor, or a reply may have replaced the query.
+            // Retry only the same selection, before the ads or thinking notice it scheduled.
+            if (msgRepo.marqueeMessages.getOrNull(currentIdx.value) === retry) {
+                getIdxAndAdvance()
+                takenFromList = retry
+                return retry
+            }
         }
 
         // A thinking notice whose time is up goes first of all, so that everything below sees
@@ -360,6 +376,7 @@ class MessageManager(
         msgRepo.onePieceShown() // the queue is empty: whatever was one piece has been shown or dropped
         val idx = getIdxAndAdvance()
         val currentMsg: Message.Marquee = msgRepo.marqueeMessages[idx]
+        takenFromList = currentMsg
         logD("getNextMessage: messages[$idx] = $currentMsg")
         usrMsgCount++
         if (currentMsg is Message.Marquee.AIQuery) {
@@ -427,15 +444,20 @@ class MessageManager(
     /**
      * [message] was taken by getNextMessage and could not be written to the sign. A one-time
      * message (a command such as the microphone switch, an announcement) goes back to the front
-     * of its queue; a stored message needs nothing, it comes round again. A reply that was taken
-     * from the queue, behind its heading, goes back like a one-time message. Owner thread only.
+     * of its queue, including a reply behind its heading. A stored message is retried at its
+     * place in the list. Owner thread only.
      */
     fun returnUnsent(message: Message) {
-        // (the thinking message put its follow-up in the queue when it was taken)
-        // A reply that was taken from the queue, behind its heading, is not one that "comes
-        // round again" now: its heading has been shown.
-        val fromTheList = message is Message.Marquee && !msgRepo.isOfOnePiece(message)
-        if (!fromTheList && message !is Message.Chooser && message !is Message.KeyboardEcho &&
+        if (message is Message.Marquee && message === takenFromList) {
+            val place = msgRepo.marqueeMessages.indexOfFirst { it === message }
+            if (place >= 0) {
+                currentIdx.value = place
+                retryStored = message
+            }
+            return
+        }
+        // The thinking notice queued its follow-up when it was taken.
+        if (message !is Message.Chooser && message !is Message.KeyboardEcho &&
             message !is Message.ColorMessage.AIThinking
         ) {
             msgRepo.putBackOneTimeMessage(message)
