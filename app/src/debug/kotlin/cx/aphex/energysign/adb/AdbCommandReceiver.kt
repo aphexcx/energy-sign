@@ -5,7 +5,6 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import cx.aphex.energysign.bluetooth.BLUETOOTH_WRITE_TAG
-import cx.aphex.energysign.message.MessageManager
 import org.koin.core.context.GlobalContext
 
 /**
@@ -24,40 +23,47 @@ import org.koin.core.context.GlobalContext
  * messages, which carries out the commands of both doors one after the other.
  *
  * The answer is the broadcast's result (`am broadcast` prints its code and its data), and it
- * says what the owner DID. It is one of three things and never the wrong one:
+ * says what the owner DID. THE HOOK NEVER PROMISES WHAT NOTHING ALIVE HOLDS:
  * - "ok <n> bytes" (code -1): the owner has run the command and nothing was thrown (a command
  *   the app does not know is run as nothing, and is "ok" too).
- * - "refused: <why>" (code 1): it is CERTAIN that nothing happened; sending it again is safe.
- *   Every way to it, and why it is certain there:
+ * - "refused: <why>" (code 1): it is CERTAIN that nothing happened and that nothing will;
+ *   sending it again is safe. Every way to it, and why it is certain there:
  *     the wrong action, extras that cannot be read, an extra of the wrong type or with an
  *     unknown name, no extra, bad base64, nothing to send: decided before the app is touched;
- *     the app has no MessageManager: there is nobody to hand the bytes to;
+ *     "the app is not up yet, send it again": no sign link is running the owner's queue (the
+ *     process was started by this very broadcast, or the main screen has not got that far),
+ *     and the hook makes no message manager to carry the command out itself;
+ *     "the command was not handed to the app within 5000 ms, and it will not be": the
+ *     receiver's thread did not get to the hand-over in time, and when it gets there it finds
+ *     the command refused and hands nothing over;
  *     the hook could not start its timer or the command's thread, or failed before the command
- *     was handed to the app: the command's thread never ran;
+ *     was handed to the app: the command's thread, which makes the hand-over, never ran;
  *     the sign link did not get to it: the owner's queue withdrew the change, and says so with
  *     a value only the queue makes (OwnerQueue.Asked.Withdrawn).
  * - anything else: the command MAY have happened. "failed: ..." (code 2): the app threw on
  *   the command, and part of it may have been done; or the call threw, and it is not known.
- *   "underway: ..." (code 3): no outcome within 5 s of the broadcast's arrival here; the
- *   command is not cut short, and how it ends goes to the log. And "result=0" with NO data is
- *   not an answer of this hook at all: the app died, or the system's time limit for the
- *   broadcast ran out before the hook answered (see AdbCommand.Kind).
+ *   "underway: ..." (code 3): the running app has been handed the command and there is no
+ *   outcome within 5 s of the broadcast's arrival here; the command is not cut short, and
+ *   how it ends goes to the log, written by the app that the HOME activity keeps alive:
+ *   ONE line, "adb write, after its answer: ...", with the outcome, or with "gave up after
+ *   60 s" when the command has not ended a minute after the broadcast came.
+ *   And "result=0" with NO data is not an answer of this hook at all: the app died, or the
+ *   system's time limit for the broadcast ran out before the hook answered (see AdbCommand.Kind).
  * A command that throws ends neither the app nor this door.
  *
- * The 5 s are counted from the first statements of onReceive: the timer is armed before the
- * extras are read and before the app's MessageManager is asked for. What the system spends
- * BEFORE onReceive (starting the app when it is not running, a busy main thread) is not the
- * hook's to bound: see AdbCommand.ANSWER_WITHIN_MS for what happens then.
+ * The 5 s are ONE deadline, taken by the first statements of onReceive, before the extras are
+ * read and before the app is asked for its way in. What the system spends BEFORE onReceive
+ * (starting the app when it is not running, a busy main thread) is not the hook's to bound:
+ * see AdbCommand.ANSWER_WITHIN_MS for what happens then.
  *
  * Every line in the log has the outcome first and a bounded piece of the command behind it
- * (AdbCommand.logLine): "adb write: ok 5 bytes [!next]"; after an "underway", the one line
- * "adb write, after its answer: ..." says how the command ended.
+ * (AdbCommand.logLine): "adb write: ok 5 bytes [!next]".
  */
 class AdbCommandReceiver : BroadcastReceiver() {
 
     /**
-     * Three statements, and then everything is AdbCommand.receive, which arms its timer before
-     * it does anything else: from there on the broadcast is answered within
+     * Three statements, and then everything is AdbCommand.receive, which takes its deadline and
+     * arms its timer before it does anything else: from there on the broadcast is answered within
      * AdbCommand.ANSWER_WITHIN_MS whatever this thread is held up by. The three before it read a
      * flag and take the broadcast's result object; they wait for nothing.
      */
@@ -78,10 +84,9 @@ class AdbCommandReceiver : BroadcastReceiver() {
         }
         AdbCommand.receive(
             command = { commandOf(intent) },
-            // On this thread, the main thread: MessageManager is built by its first use, and only
-            // the main thread may build it (it observes LiveData). Normally the main screen has
-            // done that; when it has not, this reads storage, and the timer answers meanwhile.
-            app = { messageManager()?.let(AdbCommand::entryOf) },
+            // Null when the app is not up: the hook makes no message manager (Koin would, here,
+            // when the main screen has not).
+            app = { AdbCommand.entryWhenUp(GlobalContext.getOrNull()) },
             late = ::log,
         ) { outcome, line ->
             try {
@@ -95,14 +100,6 @@ class AdbCommandReceiver : BroadcastReceiver() {
             }
         }
     }
-
-    private fun messageManager(): MessageManager? =
-        try {
-            GlobalContext.getOrNull()?.get<MessageManager>()
-        } catch (e: Exception) {
-            Log.w(BLUETOOTH_WRITE_TAG, "adb write: the app has no MessageManager", e)
-            null
-        }
 
     private fun commandOf(intent: Intent): AdbCommand {
         if (intent.action != AdbCommand.ACTION) return AdbCommand.Refused("the action must be ${AdbCommand.ACTION}")

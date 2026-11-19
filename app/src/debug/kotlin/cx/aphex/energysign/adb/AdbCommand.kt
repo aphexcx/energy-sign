@@ -5,9 +5,9 @@ import cx.aphex.energysign.message.OwnerQueue
 import java.util.Base64
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
+import org.koin.core.Koin
 
 /**
  * What a COMMAND broadcast asks for: the bytes to hand to the app as one Bluetooth write, or the
@@ -85,8 +85,8 @@ sealed class AdbCommand {
          * MessageManager.processNewBytesAndTell, which waits by OwnerQueue.askFor: it returns
          * when the thread that owns the messages has carried the command out, however long that
          * takes once that thread has STARTED it, and says which of three things happened: done,
-         * the owner threw, or the owner did not get to the command in time (no sign link is
-         * running) and it was withdrawn, never to be carried out.
+         * the owner threw, or the owner did not get to the command in time (its sign link is
+         * held up, or is being stopped) and it was withdrawn, never to be carried out.
          *
          * AN ANSWER IS ONE OF THREE THINGS, AND NEVER THE WRONG ONE:
          * - "ok": the owner has run the command and it did not throw. Not "queued". It does not
@@ -124,10 +124,17 @@ sealed class AdbCommand {
         private fun failed(thrown: Throwable): Outcome =
             Outcome(Kind.FAILED, "failed: the app threw ${thrown.javaClass.simpleName} (${thrown.message})$MAYBE_IN_PART", thrown)
 
-        /** The answer when no outcome has come in time ([receive]). */
+        /** The answer at the deadline for a command the running app has been handed ([receive]). */
         fun underway(): Outcome = Outcome(
             Kind.UNDERWAY,
             "underway: no outcome in time; the command may have been carried out, or may still be. How it ends goes to the log",
+            thrown = null,
+        )
+
+        /** The line that ends an "underway" whose command has not ended [afterMs] after the broadcast came ([receive]). */
+        fun gaveUp(afterMs: Long): Outcome = Outcome(
+            Kind.UNDERWAY,
+            "gave up after ${afterMs / 1000} s: the app has not finished the command; it may have been carried out, or may still be. Nothing more about it goes to the log",
             thrown = null,
         )
 
@@ -148,8 +155,8 @@ sealed class AdbCommand {
          * BROADCAST_BG_TIMEOUT = 60*1000, counted by BroadcastQueue from the moment the system
          * hands the broadcast to the app). `am broadcast` sends a background one unless it is
          * given `--receiver-foreground`. The bound here is half of the SHORTER limit, whichever
-         * way the broadcast was sent, and it is counted from the receiver's first statements
-         * ([receive] arms the timer before anything else).
+         * way the broadcast was sent, and it is ONE deadline, taken by the receiver's first
+         * statements ([receive]): every wait is for what is left of it.
          *
          * WHAT NO BOUND IN HERE CAN COVER: the time before onReceive is called at all. The
          * system's clock for the broadcast runs from the moment it hands the broadcast to the
@@ -158,58 +165,89 @@ sealed class AdbCommand {
          * on the board that took 47 s once. A background broadcast then still has its answer in
          * time (47 + 5 < 60); a foreground one (10 s) does not, so `--receiver-foreground` is
          * not for a board that is starting. When the system's limit runs out first, `am` prints
-         * "result=0" with no data (see [Kind]), and the command is STILL carried out when the
-         * main thread gets to it: its line in the log says so.
+         * "result=0" with no data (see [Kind]); what the hook then did with the command, when
+         * the main thread got to it, is its line in the log.
          */
         const val ANSWER_WITHIN_MS: Long = 5_000
 
         /**
+         * How long after the broadcast reached the receiver the hook stops waiting for the end
+         * of a command it has answered "underway", and says so in the log ([gaveUp]).
+         *
+         * A change of the owner's may neither wait for another thread nor write a file (the
+         * rule of OwnerQueue), so one that is carried out at all ends within milliseconds. A
+         * minute is far beyond anything a command does, and short enough that the line comes
+         * while whoever sent the command still looks at the log.
+         */
+        const val GIVE_UP_AFTER_MS: Long = 60_000
+
+        /**
          * ONE BROADCAST, from the first thing the receiver does with it to its end. The rule:
          *
-         * EVERY BROADCAST GETS EXACTLY ONE ANSWER INSIDE THE LIMIT, AND EVERY COMMAND THAT WAS
-         * ANSWERED "underway" GETS EXACTLY ONE LINE IN THE LOG THAT SAYS HOW IT ENDED.
+         * THE HOOK NEVER PROMISES WHAT NOTHING ALIVE HOLDS, AND IT KEEPS WHAT IT PROMISES.
+         * Every broadcast gets exactly one answer by the deadline. "underway" (how it ends goes
+         * to the log) is answered only for a command that the RUNNING app has been handed: the
+         * process that will end it and log its end is then the one the HOME activity keeps
+         * alive. A command that has not been handed over by the deadline is refused, and it is
+         * NOT handed over later. And every command that was answered "underway" gets exactly
+         * one line in the log: how it ended, or, when it has not ended [giveUpAfterMs] after
+         * the broadcast came, that the hook gave up waiting for it.
          *
          * The receiver calls this on the main thread, as the first thing after goAsync(), and
-         * does nothing else. In the order things happen here, with what a step that takes long
-         * or throws does to the answer:
+         * does nothing else. In the order things happen here:
          *
-         * 1. THE TIMER IS ARMED FIRST, before anything that can take time: a thread that answers
-         *    [underway] when [answerWithinMs] have passed and nobody has answered. From here on
-         *    the answer does not depend on this thread getting anywhere. If that thread cannot
-         *    be started, the answer is given at once ("refused"): nothing that can take long is
-         *    begun without a limit.
+         * 0. THE CLOCK is read, once: [now] is when the broadcast came. The deadline is that
+         *    plus [answerWithinMs], the giving up that plus [giveUpAfterMs]; every wait is for
+         *    what is left to one of the two.
+         * 1. THE TIMER IS ARMED, before anything that can take time: a thread that answers at
+         *    the deadline when nobody has. However late that thread gets to run, it does not
+         *    wait past the deadline. If it cannot be started, the answer is given at once
+         *    ("refused"): nothing that can take long is begun without a limit.
          * 2. [command] reads the extras. Refused: that is the answer.
-         * 3. [app] gets the app's way in (MessageManager.processNewBytesAndTell), or null when
-         *    the app has none. This is the step that can take LONG on the main thread: on a
-         *    cold start the message manager is made by this call and reads the saved messages
-         *    and the advertisements from storage. It stays on this thread (only the main thread
-         *    may make it), the timer answers "underway" meanwhile, and the command is carried
-         *    out when this step is through.
-         * 4. The command's thread is started; it waits for the owner ([carriedOut]).
+         * 3. [app] gives the app's way in, or null when the app is not up ([entryWhenUp], which
+         *    makes no message manager to find that out). Null: "refused", [NOT_UP].
+         * 4. The command's thread is started (the main thread must not wait for the owner),
+         *    and THE HAND-OVER is the first thing that thread does: the one decision between
+         *    the command and the timer ([Stage]). Whoever is first settles it, and the other
+         *    one finds it settled.
+         *    The command first: it is the app's from here, and its thread waits for the owner
+         *    ([carriedOut]). At the deadline the timer answers "underway" and then waits on,
+         *    for the command's end or the giving up.
+         *    The timer first: it has answered "refused" ([notHanded]), and the command's
+         *    thread hands nothing over, however late step 2 or 3 let it be started.
          *
-         * Whatever ends the command (its outcome, a refusal at step 2 or 3, a thread that
-         * cannot be started, anything thrown by step 2 or 3) goes through ONE place, which is
-         * passed once: it is the answer, to [done], when the timer has not answered yet, and
-         * otherwise the line for the log, to [late]. Anything thrown before the command's thread
-         * was started is "refused": the app has not been handed the bytes. [done] and [late]
-         * get the outcome and its line for the log ([logLine]); what they throw is dropped,
-         * so that no thread of the hook dies of it (that would end the app).
+         * Whatever ends the command on this thread or on the command's (its outcome, a refusal
+         * at step 2 or 3, a thread that cannot be started, anything thrown by step 2 or 3) goes
+         * through ONE place, passed once: it is the answer, to [done], when the timer has not
+         * answered; after an "underway" it is the one line for the log, to [late], and never
+         * in the log before that answer is given; and after the timer's refusal or its giving
+         * up it is not said at all, because the last word on this command has been said.
+         * Anything thrown before the command's thread ran is
+         * "refused": the app has not been handed the bytes. [done] and [late] get the outcome
+         * and its line for the log ([logLine]); what they throw is dropped, so that no thread
+         * of the hook dies of it (that would end the app).
          *
-         * Not covered, because nothing can cover it from in here: a command the owner never
-         * finishes, and a step 3 that never returns, are answered "underway" and get no line.
+         * The command's thread stays with a command that never ends; there is one such thread
+         * at most for each change the owner is stuck in, since the queue withdraws every later
+         * one that the owner does not take up.
          *
-         * [start] starts a thread; only tests set it.
+         * [start] starts a thread and [now] is the clock, in nanoseconds; only tests set them.
          */
         fun receive(
             command: () -> AdbCommand,
             app: () -> ((ByteArray) -> OwnerQueue.Asked<Unit>)?,
             answerWithinMs: Long = ANSWER_WITHIN_MS,
+            giveUpAfterMs: Long = GIVE_UP_AFTER_MS,
             start: (Thread) -> Unit = Thread::start,
-            late: (Outcome, String) -> Unit = { _, _ -> },
+            now: () -> Long = System::nanoTime,
+            late: (Outcome, String) -> Unit,
             done: (Outcome, String) -> Unit,
         ) {
-            val answered = AtomicBoolean(false) // set once, by whoever answers the broadcast
-            val wake = CountDownLatch(1)
+            val came = now() // 0
+            val deadline = came + TimeUnit.MILLISECONDS.toNanos(answerWithinMs)
+            val givingUp = came + TimeUnit.MILLISECONDS.toNanos(giveUpAfterMs)
+            val stage = AtomicReference(Stage.NOT_HANDED)
+            val ended = CountDownLatch(1)
             val bytesKnown = AtomicReference<ByteArray?>(null)
 
             fun tell(to: (Outcome, String) -> Unit, what: String, outcome: Outcome) {
@@ -225,23 +263,47 @@ sealed class AdbCommand {
              * by this thread on a path that returns right after and has not started that thread.
              */
             fun end(outcome: Outcome) {
-                // Who answers is settled first, and only then is the timer's thread let go: once
-                // the answer has been claimed here, the timer cannot give one.
-                val inTime = answered.compareAndSet(false, true)
-                wake.countDown()
-                if (inTime) tell(done, "adb write", outcome) else tell(late, "adb write, after its answer", outcome)
+                // Who speaks is settled first, and only then is the timer's thread let go: once
+                // the word has been claimed here, the timer cannot say anything.
+                val was = stage.getAndSet(Stage.CLOSED)
+                ended.countDown()
+                when (was) {
+                    Stage.NOT_HANDED, Stage.HANDED -> tell(done, "adb write", outcome)
+                    // Behind the timer's "underway", which may be on its way out this moment.
+                    Stage.UNDERWAY -> synchronized(stage) { tell(late, AFTER_ITS_ANSWER, outcome) }
+                    Stage.CLOSED -> Unit
+                }
             }
 
             fun refused(why: String, thrown: Throwable? = null) = end(Outcome(Kind.REFUSED, "refused: $why", thrown))
 
-            // 1
-            val timer = thread(start = false, name = "adb-command-deadline", isDaemon = true) {
+            /** Returns when the command has ended, or at [at] on the clock: nothing left is no wait at all. */
+            fun waitForTheEndUntil(at: Long) {
                 try {
-                    wake.await(answerWithinMs, TimeUnit.MILLISECONDS) // zero or less: no wait at all
+                    ended.await(at - now(), TimeUnit.NANOSECONDS)
                 } catch (e: InterruptedException) {
                     // then the time is up now
                 }
-                if (answered.compareAndSet(false, true)) tell(done, "adb write", underway())
+            }
+
+            // 1
+            val timer = thread(start = false, name = "adb-command-deadline", isDaemon = true) {
+                waitForTheEndUntil(deadline)
+                // Nothing was handed over, and from this line on nothing can be (step 4).
+                if (stage.compareAndSet(Stage.NOT_HANDED, Stage.CLOSED)) {
+                    tell(done, "adb write", Outcome(Kind.REFUSED, "refused: ${notHanded(answerWithinMs)}", thrown = null))
+                    return@thread
+                }
+                // Said before anyone can write the line that it promises (see end).
+                val promised = synchronized(stage) {
+                    stage.compareAndSet(Stage.HANDED, Stage.UNDERWAY).also { if (it) tell(done, "adb write", underway()) }
+                }
+                if (promised) {
+                    // It is the command's thread that writes the line, or this one, when that
+                    // thread does not come back.
+                    waitForTheEndUntil(givingUp)
+                    if (stage.compareAndSet(Stage.UNDERWAY, Stage.CLOSED)) tell(late, AFTER_ITS_ANSWER, gaveUp(giveUpAfterMs))
+                }
             }
             try {
                 start(timer)
@@ -257,9 +319,12 @@ sealed class AdbCommand {
                 }
                 bytesKnown.set(bytes)
                 // 3
-                val carryOut = app() ?: return refused(NOT_READY)
+                val carryOut = app() ?: return refused(NOT_UP)
                 // 4
-                val runner = thread(start = false, name = "adb-command", isDaemon = true) { end(carriedOut(bytes, carryOut)) }
+                val runner = thread(start = false, name = "adb-command", isDaemon = true) {
+                    // Not when the timer has refused it: then it stays refused.
+                    if (stage.compareAndSet(Stage.NOT_HANDED, Stage.HANDED)) end(carriedOut(bytes, carryOut))
+                }
                 try {
                     start(runner)
                 } catch (e: Throwable) {
@@ -272,10 +337,54 @@ sealed class AdbCommand {
             }
         }
 
-        /** The hook's way into [app]: one write of the phone, carried out by the owner of its messages. */
-        fun entryOf(app: MessageManager): (ByteArray) -> OwnerQueue.Asked<Unit> = app::processNewBytesAndTell
+        /** Where one broadcast is, for [receive]. Each step is taken by whoever gets to it first. */
+        private enum class Stage {
+            /** Not answered, and the app has not been handed the command. */
+            NOT_HANDED,
 
-        const val NOT_READY = "the app is not ready (it has no MessageManager)"
+            /** Not answered; the command is the running app's. */
+            HANDED,
+
+            /** Answered "underway": one line for the log is owed. */
+            UNDERWAY,
+
+            /** The last word on the command has been said: its answer, or the line that was owed. */
+            CLOSED,
+        }
+
+        private const val AFTER_ITS_ANSWER = "adb write, after its answer"
+
+        /**
+         * The hook's way into the app (one write of the phone, carried out by the owner of its
+         * messages), or null when the app is not up. [koin] is the app's, or null when it has
+         * none yet.
+         *
+         * UP means that the thread which runs the owner's queue is alive
+         * ([OwnerQueue.ownerRuns]): the sign link's, which the main screen starts AFTER it has
+         * made the message manager, and which ends when the link is stopped. So when the app is
+         * up the manager is there to be taken, and when it is not, THE MANAGER IS NOT ASKED
+         * FOR. That matters because Koin MAKES the manager when it is first asked for it: in a
+         * process that this broadcast started, the hook would read the saved messages from
+         * storage to carry out a command that no sign link is there to take, in a process that
+         * nothing keeps alive. (The queue itself is made by the question when nobody has asked
+         * for it yet; it is an empty list, and the one the app then gets.)
+         *
+         * A link that is being stopped counts as up until its thread has ended. A command that
+         * is handed over then is withdrawn by the queue [OwnerQueue.ASK_TIMEOUT_MS] later and
+         * is answered "refused"; only one handed over in the last two of the five seconds would
+         * be answered "underway" first, with the withdrawal as its line.
+         */
+        fun entryWhenUp(koin: Koin?): ((ByteArray) -> OwnerQueue.Asked<Unit>)? {
+            if (koin == null || !koin.get<OwnerQueue>().ownerRuns) return null
+            return koin.get<MessageManager>()::processNewBytesAndTell
+        }
+
+        /** The timer's refusal: it cannot know why the receiver's thread did not get to the hand-over. */
+        fun notHanded(withinMs: Long): String =
+            "the command was not handed to the app within $withinMs ms, and it will not be (the app is not up yet, or its main thread is held up); send it again"
+
+        /** The refusal for an app that is not up: nothing was handed to it, and nothing will be. */
+        const val NOT_UP = "the app is not up yet, send it again (no sign link is running)"
 
         /**
          * The line for the log: what it is, THE OUTCOME, and then a bounded piece of the command

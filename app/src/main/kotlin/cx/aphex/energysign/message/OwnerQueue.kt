@@ -35,6 +35,14 @@ class OwnerQueue {
     @Volatile
     private var mustNotWait: Thread? = null
 
+    /**
+     * The thread that last ran this queue ([drain]) is alive. False before any thread has, and
+     * when that thread has ended. It does not say that the owner is looking at the queue now:
+     * a change handed over may still be withdrawn ([askFor]). For a caller that must not hand
+     * over what nobody is there to carry out (the adb hook).
+     */
+    val ownerRuns: Boolean get() = ownerThread?.isAlive == true
+
     /** Hands [event] to the owner. From any thread; returns at once. */
     fun post(event: () -> Unit) {
         events.add(event)
