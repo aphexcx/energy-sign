@@ -32,10 +32,15 @@ class BluetoothRecoveryTest {
         unregister = { registered = false },
         enabled = { false },
         enable = { enableRequests++; false },
-        openServices = {
+        openGatt = { added ->
             serviceStarts++
-            published = true
             gattFailure?.let { throw it }
+            added(BluetoothGatt.GATT_SUCCESS)
+            true
+        },
+        advertise = { result ->
+            published = true
+            result(0)
         },
         closeServices = { published = false },
     )

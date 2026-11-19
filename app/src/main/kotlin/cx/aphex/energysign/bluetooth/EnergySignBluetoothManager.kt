@@ -148,7 +148,8 @@ class EnergySignBluetoothManager(
         unregister = receivers::clear,
         enabled = { bluetoothAdapter.isEnabled },
         enable = { bluetoothAdapter.enable() },
-        openServices = ::startServices,
+        openGatt = { startServer(); true },
+        advertise = { startAdvertising() },
         closeServices = ::stopServices,
     )
 

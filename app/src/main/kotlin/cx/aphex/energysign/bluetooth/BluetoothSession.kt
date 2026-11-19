@@ -9,7 +9,8 @@ internal class BluetoothSession(
     private val unregister: () -> Unit,
     private val enabled: () -> Boolean,
     private val enable: () -> Boolean,
-    private val openServices: () -> Unit,
+    private val openGatt: (onAdded: (Int) -> Unit) -> Boolean,
+    private val advertise: (onResult: (Int) -> Unit) -> Unit,
     private val closeServices: () -> Unit,
 ) {
     private var listening = false
@@ -31,7 +32,10 @@ internal class BluetoothSession(
 
     fun adapterOn() {
         if (!listening || servicesOpen) return
-        servicesOpen = startup.optional("Bluetooth services", openServices) != null
+        servicesOpen = startup.optional("Bluetooth services") {
+            advertise {}
+            check(openGatt {}) { "Bluetooth GATT service registration refused" }
+        } != null
         // Advertising can already be live when GATT fails. Keep the receivers for the next STATE_ON.
         if (!servicesOpen) closeServices()
     }

@@ -26,7 +26,6 @@ import android.os.IBinder
 import android.text.format.DateFormat
 import android.view.KeyEvent
 import android.view.KeyEvent.ACTION_DOWN
-import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
 import com.chibatching.kotpref.Kotpref
 import cx.aphex.energysign.beatlinkdata.BeatLinkDataConsumerServerService
@@ -42,7 +41,7 @@ import java.util.concurrent.TimeUnit
 
 class GattServerActivity : AppCompatActivity() {
 
-    private val viewModel: MainViewModel by viewModels()
+    private val viewModel by lazy(LazyThreadSafetyMode.NONE) { (application as MainApplication).signViewModel() }
     private val keyboardManager = KeyboardManager
 
     /* Local UI */
