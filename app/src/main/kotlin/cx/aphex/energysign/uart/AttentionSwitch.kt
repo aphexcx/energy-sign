@@ -14,8 +14,8 @@ import java.io.File
  * it is gone after a restart of the board and is for the bench.
  *
  * The value in force is said in the log when the app starts and whenever it has changed. A
- * change of the property is seen at the next look ([inForce]); the link looks whenever the
- * chooser changes.
+ * change of the property is seen at the next look ([inForce]); the link looks in every turn in
+ * which a push is wanted, so: when the chooser next changes.
  *
  * The file is read once, where this is built. [set] and [inForce] are called on the sign link
  * thread; the file is written through [saveLater], not by the caller.
@@ -63,23 +63,30 @@ class AttentionSwitch(
             return false
         }
         saved = value
-        saveLater {
-            // On the saver's thread: nothing may escape into it
-            try {
-                file.replaceWith(listOf(word(value)))
-            } catch (e: Throwable) {
-                log("Pushes to the sign: '${word(value)}' could not be saved, it holds until the app restarts: $e")
-            }
-        }
         logged = null // a change is always said, also when the property keeps another value in force
         inForce()
+        val notSaved = "Pushes to the sign: '${word(value)}' could not be saved, it holds until the app restarts"
+        try {
+            saveLater {
+                // On the saver's thread: nothing may escape into it
+                try {
+                    file.replaceWith(listOf(word(value)))
+                } catch (e: Throwable) {
+                    log("$notSaved: $e")
+                }
+            }
+        } catch (e: Exception) {
+            // (a saver that takes no more work)
+            log("$notSaved: $e")
+        }
         return true
     }
 
     private fun readSaved(): Attention {
         try {
             if (!file.exists()) return Attention.OFF
-            Attention.parse(file.readText())?.let { return it }
+            // One word: a file that is longer is damaged, and is not read into memory to find that out
+            if (file.length() <= MAX_FILE_BYTES) Attention.parse(file.readText())?.let { return it }
             log("Pushes to the sign: ${file.name} does not hold one of off, auto, break, zeros; off")
         } catch (e: Exception) {
             log("Pushes to the sign: ${file.name} could not be read ($e); off")
@@ -91,5 +98,6 @@ class AttentionSwitch(
 
     companion object {
         const val FILE_NAME: String = "attention.txt"
+        private const val MAX_FILE_BYTES: Long = 64
     }
 }

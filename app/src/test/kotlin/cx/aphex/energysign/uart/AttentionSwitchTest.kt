@@ -14,6 +14,9 @@ class AttentionSwitchTest {
 
     private var property: () -> String? = { null }
     private val saves = mutableListOf<() -> Unit>()
+
+    /** The saver takes no more work (its executor was shut down). */
+    private var saverRefuses = false
     private val log = mutableListOf<String>()
 
     private fun file() = File(dir, AttentionSwitch.FILE_NAME)
@@ -22,7 +25,10 @@ class AttentionSwitchTest {
     private fun started(file: File = file()) = AttentionSwitch(
         file = file,
         property = { property() },
-        saveLater = { saves += it },
+        saveLater = {
+            if (saverRefuses) throw java.util.concurrent.RejectedExecutionException("shut down")
+            saves += it
+        },
         log = { log += it },
     )
 
@@ -166,6 +172,9 @@ class AttentionSwitchTest {
         file().writeText("zeros\nauto\n") // two words are not one
         assertEquals(Attention.OFF, started().inForce())
 
+        file().writeText("zeros" + "\n".repeat(100)) // longer than a word: damaged, and not read
+        assertEquals(Attention.OFF, started().inForce())
+
         file().writeText("zeros\n")
         assertEquals(Attention.ZEROS, started().inForce())
     }
@@ -186,6 +195,16 @@ class AttentionSwitchTest {
         assertTrue(log.last().contains("'zeros' could not be saved"), log.last())
         assertEquals(Attention.ZEROS, switch.inForce())
         assertEquals(Attention.OFF, started(nowhere).inForce())
+    }
+
+    @Test
+    fun `a saver that takes no more work does not stop the command, the word is in force and both are said`() {
+        val switch = started()
+        saverRefuses = true
+        assertTrue(switch.set("zeros"))
+        assertEquals(Attention.ZEROS, switch.inForce())
+        assertEquals("Pushes to the sign: zeros", log[1])
+        assertTrue(log.last().contains("'zeros' could not be saved"), log.last())
     }
 
     @Test

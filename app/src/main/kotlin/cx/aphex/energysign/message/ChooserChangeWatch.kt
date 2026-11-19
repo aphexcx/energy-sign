@@ -4,8 +4,10 @@ package cx.aphex.energysign.message
  * Notices when what the chooser should show has changed, so the app can push it to the sign
  * (chooser contract VERSION 3.1: the app gets the sign's attention, the sign need not ask while it scrolls).
  *
- * Everything that can change the stored messages, the chooser index or the chooser mode runs
- * inside [watch]. [view] is what the chooser shows at that moment, null outside chooser mode.
+ * Every change the owner is handed (a command, a new message, a reply, a key that stores a
+ * message) runs inside [watch]. (Answering a request of the sign moves the index and the list
+ * too, but only outside chooser mode, where the chooser shows nothing.) [view] is what the
+ * chooser shows at that moment, null outside chooser mode.
  * When the text or the count differ after the outermost [watch] from before it, [onChange] is
  * called once: entering chooser mode, another message, another count, and leaving it. A command
  * that changes nothing the sign shows (`!next` on the last message) calls nothing, so the sign's

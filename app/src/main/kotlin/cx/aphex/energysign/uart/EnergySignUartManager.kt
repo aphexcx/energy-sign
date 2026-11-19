@@ -27,7 +27,7 @@ import java.lang.reflect.Method
  * Three switches for measuring on the device, without a rebuild:
  *  - the timing log: `adb shell setprop log.tag.SignUart VERBOSE` (see [UartTimingLog])
  *  - whether and how the chooser is pushed: `adb shell setprop debug.energysign.attn off|auto|break|zeros`
- *    (read whenever the chooser changes; wins over the saved switch while it is set; see [ATTN_PROPERTY])
+ *    (read when the chooser next changes; wins over the saved switch while it is set; see [ATTN_PROPERTY])
  *  - the priority of the link thread: `adb shell setprop debug.energysign.nice -16`
  *    (read when the app starts; see [NICE_PROPERTY])
  */

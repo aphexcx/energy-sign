@@ -153,6 +153,8 @@ class SignLinkPushTest {
     private var frameCostNs = 0L
     private var frameThrows = 0
     private var framesMade = 0
+    private var switchThrows = 0
+    private var toldThrows = 0
 
     /** The switch. These tests are about pushes that are on; the product's default is off. */
     private var mode = Attention.AUTO
@@ -191,8 +193,18 @@ class SignLinkPushTest {
         pushed = {
             told += chooser ?: "nothing"
             line += "told:${chooser ?: "nothing"}"
+            if (toldThrows > 0) {
+                toldThrows--
+                throw IllegalStateException("no screen")
+            }
         },
-        attention = { mode },
+        attention = {
+            if (switchThrows > 0) {
+                switchThrows--
+                throw IllegalStateException("no switch")
+            }
+            mode
+        },
         timing = UartTimingLog(isEnabled = { true }, emit = { timingLines += it }),
         nanoTime = { now },
         sleepNanos = { nanos ->
@@ -255,6 +267,18 @@ class SignLinkPushTest {
             check(++turns < 1_000_000)
         }
         repeat(5) { link.step() }
+    }
+
+    /**
+     * The sign asks for a message outside chooser mode and gets M1: from here on the link knows
+     * the sign is NOT in its chooser display, where a request is good for a second. So a request
+     * that is read away afterwards is read away because of the push, not because it is old.
+     */
+    private fun signShowsAnOrdinaryMessage() {
+        chooser = null
+        arrives(0, "~")
+        runUntil(50)
+        assertEquals(listOf("M1"), taken)
     }
 
     private fun wire() = line.filter { it.startsWith("tx[") || it.startsWith("low@") }
@@ -595,6 +619,48 @@ class SignLinkPushTest {
     }
 
     @Test
+    fun `rule 3 where the sign listens a second, a request sent into the attention of leaving is read away though it is not old`() {
+        signShowsAnOrdinaryMessage()
+        command(100, null)
+        arrives(120, "~") // into the zeros; 50 ms old when it is read
+        runUntil(250)
+        assertEquals(listOf("M1"), taken)
+        assertEquals(1, drops().size)
+        assertTrue(line.any { it == "log:Read 1 bytes from UART that the sign sent into a push: not answered" }, line.toString())
+        arrives(300, "~")
+        runUntil(400)
+        assertEquals(listOf("M1", "M2"), taken)
+    }
+
+    @Test
+    fun `rule 4 where the sign listens a second, a request sent into half a run of zeros is read away though it is not old`() {
+        signShowsAnOrdinaryMessage()
+        takesBeforeStuck = 30 // 21 ms of LOW get out, from 100 to 121
+        stuckUntilNs = 150 * ms
+        command(100, null)
+        arrives(110, "~") // 12 ms old when it is read
+        runUntil(190)
+        assertEquals(listOf("M1"), taken)
+        assertEquals(1, drops().size)
+        arrives(200, "~") // behind the half: answered, and the answer is the push
+        runUntil(1_000)
+        assertEquals(listOf("M1", "M2"), taken)
+        assertEquals(1, txs.count { it.zeros })
+    }
+
+    @Test
+    fun `the attention alone does not put the sign into its chooser display, a request half a second late is still answered`() {
+        signShowsAnOrdinaryMessage()
+        command(100, null)
+        runUntil(180)
+        sleepOverrunNs = 300 * ms
+        runUntil(200)
+        arrives(now / ms - 250, "~") // it came while the link was kept from the wire, after the attention was over
+        runUntil(now / ms + 10)
+        assertEquals(listOf("M1", "M2"), taken)
+    }
+
+    @Test
     fun `rule 3, more than one read's worth sent into the attention is void to its last byte`() {
         // 33 bytes with a request byte last: the first read is full, so it says nothing about when the rest came
         command(0, null)
@@ -668,7 +734,6 @@ class SignLinkPushTest {
                 "zeros ${(next.atNs - tx.goneAtNs) / ms} ms behind a frame"
             )
         }
-        assertTrue(SignLink.PUSH_SPACING_MS > SignLink.SIGN_QUIET_BEFORE_REQUEST_MS)
     }
 
     @Test
@@ -706,7 +771,7 @@ class SignLinkPushTest {
         command(0, "B")
         runUntil(140)
         assertEquals(emptyList(), wire())
-        assertTrue(warnings().any { it.contains("the attention was not taken in full (0 of 72 bytes)") }, warnings().toString())
+        assertTrue(warnings().any { it.contains("the attention was not taken in one run (0 of 72 bytes)") }, warnings().toString())
         runUntil(1_000)
         // given up after 50 ms, tried again 100 ms after that
         assertEquals(listOf("tx[00x72]@150", "tx[H:B]@220"), wire())
@@ -775,7 +840,8 @@ class SignLinkPushTest {
         command(0, "B")
         failWrites = 1 // the zeros go out; the write of the frame throws
         runUntil(2_000)
-        assertEquals(listOf("tx[00x72]@0", "tx[00x72]@320", "tx[H:B]@390"), wire())
+        // it may have handed the frame over before it threw: the next try keeps its distance from where that would end
+        assertEquals(listOf("tx[00x72]@0", "tx[00x72]@322", "tx[H:B]@392"), wire())
         assertTrue(warnings().first().contains("write failed"), warnings().toString())
         assertEquals(listOf("B"), told)
     }
@@ -784,11 +850,42 @@ class SignLinkPushTest {
     fun `a run of zeros whose write throws is no attention, no frame is sent after it, and it is tried again`() {
         command(0, "B")
         failZeroWrites = 1
-        runUntil(90)
+        runUntil(290)
         assertEquals(emptyList(), wire())
         assertTrue(warnings().first().contains("write failed"), warnings().toString())
         runUntil(1_000)
-        assertEquals(listOf("tx[00x72]@100", "tx[H:B]@170"), wire())
+        // it may have handed the zeros over before it threw: they would be on the line until 50, and the next try is 250 ms behind that
+        assertEquals(listOf("tx[00x72]@300", "tx[H:B]@370"), wire())
+    }
+
+    @Test
+    fun `rule 4, a write of the zeros that threw may have put them on the line, a request sent into that time is void`() {
+        signShowsAnOrdinaryMessage()
+        failZeroWrites = 1
+        command(100, null) // leaving: an answer would take a message
+        arrives(120, "~") // 2 ms old when it is read: only the time the zeros would be on the line makes it void
+        runUntil(250)
+        assertEquals(listOf("M1"), taken)
+        assertEquals(1, drops().size)
+    }
+
+    @Test
+    fun `a run of zeros with a hole in it is no attention, no frame is sent after it, and the whole run comes again`() {
+        // the transmitter takes 32 bytes at a time, and the link is kept from it for 60 ms after the first piece:
+        // 22 ms of LOW, then a line that stands HIGH. A second piece now would be a second short LOW.
+        takesPerWrite = 32
+        command(0, "B")
+        sleepOverrunNs = 60 * ms
+        runUntil(200)
+        assertEquals(listOf("tx[00x32]@0"), wire())
+        assertTrue(warnings().single().contains("the attention was not taken in one run (32 of 72 bytes)"), warnings().toString())
+        assertEquals(emptyList(), told)
+        runUntil(1_000)
+        assertEquals(listOf("B"), told)
+        val again = txs.drop(1).takeWhile { it.zeros }
+        assertEquals(listOf(32, 32, 8), again.map { it.bytes.size })
+        assertTrue(again[0].atNs - txs[0].goneAtNs >= SignLink.PUSH_SPACING_MS * ms)
+        again.zipWithNext { a, b -> assertEquals(a.goneAtNs, b.leavesFromNs) } // this time with no hole
     }
 
     @Test
@@ -831,13 +928,35 @@ class SignLinkPushTest {
     fun `a frame that cannot be made does not end the loop, the push stays wanted and goes out later`() {
         frameThrows = 1
         command(0, "B")
+        arrives(20, "?") // the link is not kept from the wire by the failure: this is answered while the sign listens
         runUntil(90)
         assertTrue(warnings().single().contains("push failed on UART: java.lang.IllegalStateException: no frame"), warnings().toString())
-        assertEquals(emptyList(), wire())
-        arrives(180, "?") // and the link still answers
+        assertEquals(listOf("tx[{c:B}]@20"), wire())
+        arrives(180, "?")
         runUntil(1_000)
-        assertEquals(listOf("tx[00x72]@100", "tx[H:B]@170", "tx[{c:B}]@180"), wire())
+        assertEquals(listOf("tx[{c:B}]@20", "tx[00x72]@100", "tx[H:B]@170", "tx[{c:B}]@180"), wire())
         assertEquals(listOf("B"), told)
+    }
+
+    @Test
+    fun `a switch that cannot be asked is off, said once, and the link goes on answering`() {
+        switchThrows = 1
+        command(0, "B")
+        arrives(20, "?")
+        runUntil(500)
+        assertEquals(listOf("tx[{c:B}]@20"), wire())
+        assertTrue(warnings().single().contains("push failed on UART: java.lang.IllegalStateException: no switch"), warnings().toString())
+        assertEquals(0, framesMade)
+    }
+
+    @Test
+    fun `an app that throws when it is told of a pushed frame does not keep the link from the wire behind that frame`() {
+        toldThrows = 1
+        command(0, "B")
+        arrives(83, "?") // the frame has left at 72; the sign asks 11 ms later
+        runUntil(300)
+        assertEquals(listOf("tx[00x72]@0", "tx[H:B]@70", "tx[{c:B}]@84"), wire())
+        assertTrue(warnings().single().contains("no screen"), warnings().toString())
     }
 
     // ================= liveness
@@ -964,6 +1083,16 @@ class SignLinkPushTest {
         assertEquals(listOf("tx[00x72]@0"), wire())
         assertEquals(emptyList(), warnings()) // it is over, not a push that failed
         assertEquals(emptyList(), told)
+    }
+
+    @Test
+    fun `after stop no push is made, even for a change that is already there`() {
+        stopAtNs = 5 * ms
+        link.step() // the idle turn in whose pause the app is stopped
+        command(5, "B")
+        repeat(5) { link.step() }
+        assertEquals(emptyList(), wire())
+        assertEquals(0, framesMade)
     }
 
     @Test

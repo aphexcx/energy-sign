@@ -67,7 +67,8 @@ enum class Attention {
  * All of it is counted from the RETURN of the call, the latest moment the line can have seen
  * it. A time taken before the call is too early whenever the thread is held up between taking
  * the time and making the call (it was: the frame then went out into the LOW). The price of the
- * later bound is that the line may be free a call's length sooner than this says, never later.
+ * later bound is that the line may be free a call's length sooner than this says; never later,
+ * as long as the transmitter starts on what it took by the time the call returns.
  *
  * Times are `System.nanoTime` values: only their differences mean anything.
  */
@@ -157,8 +158,9 @@ class LineClock(private val baud: Int, startNs: Long) {
  *  3. A push starts when the line is free of what was sent before ([LineClock]); until then the
  *     loop goes on reading. From the read of the turn that starts it until the push is over
  *     (the last byte of its frame has left the line, or its guard has passed when it has no
- *     frame), whatever the sign sends is void: it was sent into the attention or into the frame,
- *     the sign cannot have been listening for an answer to it, and it asks again. Those bytes
+ *     frame), whatever the sign sends is void: it was sent into the attention or into the frame.
+ *     With a frame, that frame is what the sign reads behind its request; with none, the sign
+ *     gets nothing and asks again. Either way a second frame would be one too many. Those bytes
  *     are read away and none is answered, whether they came while the frame was being made,
  *     into the attention, into the guard, or while the frame was leaving.
  *  4. A push that failed (the attention or the frame was not taken in full) is still wanted and
@@ -234,7 +236,7 @@ class SignLink(
     private var readFailures = 0
 
     /** The attention of the words `auto` and `zeros`: 0x00 is the start bit and eight data bits LOW, then the stop bit HIGH. */
-    private val zeroRun = ByteArray((ATTN_BREAK_MS * baud + 9_999) / 10_000)
+    private val zeroRun = ByteArray(ATTN_BREAK_MS * baud / 10_000)
 
     // What send() did for the request being answered; logged after the write.
     private var sentFrame: String? = null
@@ -245,7 +247,11 @@ class SignLink(
     private var lastWarning = ""
     private var lastWarningNs = takenUpToNs
 
-    /** Asks for the chooser to be pushed to the sign. From any thread; returns at once. */
+    /**
+     * Asks for the chooser to be pushed to the sign; returns at once. The app calls it on the
+     * link thread, from a change the link is running, so a push that is asked for is never older
+     * than an answer that settles it (rule 2). Another thread may call it; the loop is woken.
+     */
     fun requestPush() {
         pushWanted.set(true)
         // The link thread asking for itself (a change it has just made) is awake: a wake-up
@@ -406,6 +412,8 @@ class SignLink(
      *  - when the whole frame has had the time it needs on the line and [WRITE_PATIENCE_MS] more:
      *    a transmitter that takes a byte now and then must not keep this thread, which serves
      *    everything, for seconds.
+     * With [oneRun] (the run of zeros that is an attention) the line may not stand still at all
+     * once it has begun: a run with a hole is two short LOWs, and the sign may see neither.
      * The standstill is counted from the start of an offer because that is the EARLIEST the
      * bytes can have left: the sign may have given up by then. When the line is FREE again is
      * the other question, with the other bound, and the line clock's: every byte taken is
@@ -413,7 +421,7 @@ class SignLink(
      * Returns how many bytes were taken; fewer than all is a failed frame for the caller to act
      * on. The sign throws the torn start away with its failed read and asks again.
      */
-    private fun writeAll(bytes: ByteArray, kind: String, firstByNs: Long?): Int {
+    private fun writeAll(bytes: ByteArray, kind: String, firstByNs: Long?, oneRun: Boolean = false): Int {
         val callNs = nanoTime()
         val patienceNs = WRITE_PATIENCE_MS * NS_PER_MS
         val frameByNs = callNs + bytes.size * 10 * NS_PER_S / baud + patienceNs
@@ -425,6 +433,7 @@ class SignLink(
                 val offerNs = nanoTime()
                 if (done == 0 && firstByNs != null && offerNs - firstByNs > 0) break
                 if (offerNs - goneAtNs >= patienceNs || offerNs - frameByNs > 0) break
+                if (oneRun && done > 0 && offerNs - goneAtNs > 0) break
                 val rest = if (done == 0) bytes else bytes.copyOfRange(done, bytes.size)
                 val took = wire.write(rest, rest.size).coerceIn(0, rest.size)
                 if (took > 0) {
@@ -437,6 +446,8 @@ class SignLink(
             }
         } catch (e: Exception) {
             complain("write", e)
+            // It may have handed bytes over before it failed: the line counts as carrying the rest
+            clock.wrote(nanoTime(), bytes.size - done)
         }
         timing.tx(callNs, nanoTime(), done, bytes.size, kind)
         return done
@@ -453,7 +464,13 @@ class SignLink(
      */
     private fun duePush(): Attention? {
         if (!pushWanted.get()) return null
-        val mode = attention()
+        val mode = try {
+            attention()
+        } catch (e: Exception) {
+            // A switch that cannot be asked is off
+            complain("push", e)
+            Attention.OFF
+        }
         if (mode == Attention.OFF) {
             pushWanted.set(false)
             return null
@@ -464,8 +481,8 @@ class SignLink(
 
     /**
      * One push: the attention ([mode] says how), the guard, the chooser frame. This thread
-     * sleeps through the attention and the guard: the sign is not listening for an answer then,
-     * so there is nobody to keep waiting.
+     * sleeps through the attention and the guard: whatever the sign sends in that time is void
+     * (rule 3), so there is nothing to read for.
      */
     private fun push(mode: Attention) {
         // A change from here on is the next push. None can come before the frame is made:
@@ -476,8 +493,9 @@ class SignLink(
         val text = try {
             chooserFrame()
         } catch (e: Exception) {
-            pushFailed(lineWasNs)
-            throw e
+            // Not thrown on: the loop's pause after a failure would keep the link from the wire
+            complain("push", e)
+            return pushFailed(lineWasNs)
         }
         val frame = text?.toByteArray()
         val callNs = nanoTime()
@@ -497,34 +515,37 @@ class SignLink(
             complain("push", "the frame was not taken in full")
             return pushFailed(lineWasNs)
         }
-        // The sign is in its chooser display with this message, as with one it asked for
+        // The sign may be in its chooser display with this message now, as with one it asked for
         if (frame != null) chooserDisplay = true
-        holdPushUntil(clock.freeAtNs + PUSH_SPACING_MS * NS_PER_MS)
+        pushNotBeforeNs = clock.freeAtNs + PUSH_SPACING_MS * NS_PER_MS
         val doneNs = nanoTime()
         // The short pause from here on: the sign's next request must be told from what came into the frame
         lastHeardNs = doneNs
         timing.push(wantedNs, callNs, raisedNs, guardEndNs, doneNs, frame?.size ?: 0)
-        // Like a reply: on the line first, then the log and the screen
+        // On the line first, then the log and the screen
         if (text != null) {
             log("Pushed >$text< to $name")
-            pushed()
+            try {
+                pushed()
+            } catch (e: Exception) {
+                // The frame is out: what the app makes of it must not keep the link from the wire
+                complain("push", e)
+            }
         } else {
             log("Pushed attention alone to $name")
         }
     }
 
     /**
-     * Rule 4: the push is still wanted. It waits [ERROR_PAUSE_MS], and when this try put
-     * anything on the line (it was free at [lineWasNs] before), the distance of rule 5 from that.
+     * Rule 4: the push is still wanted. When this try put anything on the line (it was free at
+     * [lineWasNs] before), the next keeps the distance of rule 5 from that; when it put nothing
+     * there, it waits [ERROR_PAUSE_MS].
      */
     private fun pushFailed(lineWasNs: Long) {
         pushWanted.set(true)
-        holdPushUntil(nanoTime() + ERROR_PAUSE_MS * NS_PER_MS)
-        if (clock.freeAtNs != lineWasNs) holdPushUntil(clock.freeAtNs + PUSH_SPACING_MS * NS_PER_MS)
-    }
-
-    private fun holdPushUntil(notBeforeNs: Long) {
-        if (notBeforeNs - pushNotBeforeNs > 0) pushNotBeforeNs = notBeforeNs
+        pushNotBeforeNs =
+            if (clock.freeAtNs != lineWasNs) clock.freeAtNs + PUSH_SPACING_MS * NS_PER_MS
+            else nanoTime() + ERROR_PAUSE_MS * NS_PER_MS
     }
 
     /**
@@ -544,11 +565,11 @@ class SignLink(
             clock.low(nanoTime(), ATTN_BREAK_MS)
             return true
         }
-        // In pieces if the transmitter takes it so: pieces that follow each other while the
-        // first are still leaving are one run on the line
-        val took = writeAll(zeroRun, "attention", null)
+        // In pieces if the transmitter takes it so, but ONE run on the line: a piece is only
+        // offered while the pieces before it are still leaving
+        val took = writeAll(zeroRun, "attention", null, oneRun = true)
         if (took != zeroRun.size) {
-            complain("push", "the attention was not taken in full ($took of ${zeroRun.size} bytes)")
+            complain("push", "the attention was not taken in one run ($took of ${zeroRun.size} bytes)")
             return false
         }
         return true
@@ -575,7 +596,6 @@ class SignLink(
             val left = deadlineNs - nanoTime()
             if (left <= 0) return
             sleepNanos(left)
-            if (Thread.currentThread().isInterrupted) stopped = true
         }
     }
 
@@ -617,7 +637,12 @@ class SignLink(
         /** How long after the last byte from the sign (or a push) the short pause is kept. */
         const val ACTIVE_WINDOW_MS: Int = 2_000
 
-        /** In its chooser display the sign listens 60 ms; an answer takes up to 10. A request that may have waited longer is not answered. */
+        /**
+         * In its chooser display the polling sign listens 60 ms; an answer takes up to 10. A
+         * request that may have waited longer is not answered. (The firmware that listens for
+         * pushes waits a second there too; the link cannot tell which one it talks to, and
+         * keeps the limit that is safe for both.)
+         */
         const val CHOOSER_FRESH_MS: Int = 50
 
         /** Otherwise the sign listens a second. */
