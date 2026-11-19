@@ -310,7 +310,7 @@ class AIReplyRunnerTest {
         runner.ask("now") { results.add(it) }
         assertEquals(AIReplyResult.Reply("now"), next())
         assertFalse(done)
-        assertTrue(logged.any { it.contains("could not be started") }, "$logged")
+        assertTrue(logged.single { it.contains("could not be started") }.contains("sign link continues"), "$logged")
     }
 
     // ---- found by the review of round 3
@@ -356,6 +356,7 @@ class AIReplyRunnerTest {
             assertFalse(result.reason.askAgain || result.reason.backOff, "the query becomes a plain message, quietly")
             assertNull(results.poll(50, TimeUnit.MILLISECONDS), "one result an ask")
             assertTrue(warned.single().contains(failure.javaClass.name), "$warned")
+            assertTrue(warned.single().contains("sign link continues"), "$warned")
             assertFalse(warned.single().contains("boom") || warned.single().contains("some/sdk"), "only the kind of failure is logged")
         }
     }

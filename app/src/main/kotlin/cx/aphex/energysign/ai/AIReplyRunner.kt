@@ -72,7 +72,7 @@ class AIReplyRunner(
         } catch (e: Throwable) {
             // No thread: there is no warm-up, and the first query pays for the slow first use.
             busy.set(false)
-            quietly { log("The warm-up could not be started (${e.javaClass.simpleName})") }
+            quietly { log("The AI warm-up could not be started (${e.javaClass.simpleName}), sign link continues") }
             false
         }
     }

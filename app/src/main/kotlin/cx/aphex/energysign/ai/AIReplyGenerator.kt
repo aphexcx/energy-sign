@@ -236,7 +236,7 @@ fun aiRepliesOrNone(warn: (String) -> Unit, build: () -> AIReplySource): AIReply
         // Only the kind of failure: what a library writes into its message is not ours to print.
         val why = "the replies could not be set up (${e.javaClass.name})"
         try {
-            warn("No AI replies in this run: $why")
+            warn("No AI replies in this run: $why, sign link continues")
         } catch (logFailure: Throwable) {
             // nothing
         }
