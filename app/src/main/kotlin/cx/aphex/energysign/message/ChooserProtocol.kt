@@ -172,19 +172,13 @@ class SignResponder(
          * Gson builds the writer for a class by reflection the first time it writes one. On the
          * Pico that was 140 ms inside the first reply after the app started and 76 ms inside
          * the first icon. The link does this once before its first read, so an answer never
-         * races a background warm-up. Returns how many classes it prepared.
+         * races a background warm-up. Returns how many classes it prepared before [stopped].
          */
-        fun warmUp(nanoTime: () -> Long = System::nanoTime): Int {
-            val started = nanoTime()
-            fun checkBudget() {
-                if (nanoTime() - started >= java.util.concurrent.TimeUnit.SECONDS.toNanos(20)) {
-                    throw java.util.concurrent.TimeoutException("JSON adapter preparation deadline")
-                }
-            }
+        fun warmUp(stopped: () -> Boolean = { false }): Int {
             var prepared = 0
-            fun visit(type: Class<*>) {
-                checkBudget()
+            fun visit(type: Class<*>): Boolean {
                 if (Message::class.java.isAssignableFrom(type) && !Modifier.isAbstract(type.modifiers)) {
+                    if (stopped()) return false
                     try {
                         GSON.getAdapter(type)
                         prepared++
@@ -192,11 +186,11 @@ class SignResponder(
                         // then it is built at its first use, as before
                     }
                 }
-                type.declaredClasses.forEach(::visit)
+                return type.declaredClasses.all(::visit)
             }
-            visit(Message::class.java)
-            checkBudget()
-            GSON.toJson(ChooserProtocol.chooserMessage(emptyList(), 0))
+            if (visit(Message::class.java) && !stopped()) {
+                GSON.toJson(ChooserProtocol.chooserMessage(emptyList(), 0))
+            }
             return prepared
         }
     }

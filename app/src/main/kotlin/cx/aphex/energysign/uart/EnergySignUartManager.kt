@@ -50,7 +50,7 @@ class EnergySignUartManager(private val viewModel: MainViewModel, private val ow
         override fun close() = uartDevice.close()
     }
 
-    private val writers = WriterPreparation(SignStartup { logW(it) }, { SignResponder.warmUp() }, owner::post)
+    private val writers = WriterPreparation(SignStartup { logW(it) }, { stopped -> SignResponder.warmUp(stopped) }, owner::post)
 
     internal fun onForeground() = writers.onForeground()
 
@@ -58,7 +58,9 @@ class EnergySignUartManager(private val viewModel: MainViewModel, private val ow
         wire = wire,
         baud = UART_BAUD_RATE,
         name = UART_DEVICE_NAME,
-        events = { owner.drain { error -> logW("A change to the messages failed: $error", error) } },
+        events = { stopped ->
+            owner.drain(stopped = stopped) { error -> logW("A change to the messages failed: $error", error) }
+        },
         answer = ::answer,
         prepareAnswers = writers::beforeFirstRead,
         timing = timing,

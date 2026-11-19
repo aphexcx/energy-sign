@@ -474,12 +474,4 @@ class SignResponderTest {
         assertEquals(before, SignResponder.GSON.toJson(Message.Marquee.User("HELLO")))
         assertEquals(prepared, SignResponder.warmUp())
     }
-
-    @Test
-    fun preparationYieldsWhenItsElapsedBudgetIsSpent() {
-        var elapsed = -10_000_000_000L
-        kotlin.test.assertFailsWith<java.util.concurrent.TimeoutException> {
-            SignResponder.warmUp { elapsed += 10_000_000_000L; elapsed }
-        }
-    }
 }

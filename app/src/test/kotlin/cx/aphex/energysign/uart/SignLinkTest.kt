@@ -1,6 +1,8 @@
 package cx.aphex.energysign.uart
 
+import cx.aphex.energysign.message.OwnerQueue
 import cx.aphex.energysign.message.Reply
+import cx.aphex.energysign.message.SignResponder
 import org.junit.jupiter.api.Test
 import java.io.IOException
 import java.util.concurrent.CountDownLatch
@@ -717,7 +719,7 @@ class SignLinkTest {
         events: () -> Unit = {},
         answer: (ByteArray, Int) -> Unit = { _, _ -> },
     ) = SignLink(
-        wire = wire, baud = baud, name = "UART", events = events, answer = answer,
+        wire = wire, baud = baud, name = "UART", events = { events() }, answer = answer,
         timing = UartTimingLog(isEnabled = { false }, emit = {}),
         sleepNanos = { nanos -> LockSupport.parkNanos(maxOf(nanos, 5_000 * ms)) },
     )
@@ -748,6 +750,54 @@ class SignLinkTest {
         assertTrue(System.nanoTime() - stopAt < 1_000 * ms, "stop took ${(System.nanoTime() - stopAt) / ms} ms")
         assertEquals(1, quiet.closes.get())
         assertSame(thread, quiet.closedBy.get())
+    }
+
+    @Test
+    fun `stop during an owner change leaves the rest queued and closes before another read`() {
+        val owner = OwnerQueue()
+        val quiet = QuietWire()
+        val real = SignLink(
+            wire = quiet, baud = baud, name = "UART", answer = { _, _ -> },
+            events = { stopped -> owner.drain(stopped = stopped) },
+            timing = UartTimingLog(isEnabled = { false }, emit = {}),
+        )
+        val ran = mutableListOf<String>()
+        owner.post {
+            ran += "first"
+            real.stop()
+        }
+        owner.post { ran += "second" }
+        real.run()
+        assertEquals(listOf("first"), ran)
+        assertEquals(0, quiet.reads.get())
+        assertEquals(1, quiet.closes.get())
+        assertEquals(1, owner.drain())
+        assertEquals(listOf("first", "second"), ran)
+    }
+
+    @Test
+    fun `stop during adapter preparation finishes only the adapter already started and closes the wire`() {
+        val quiet = QuietWire()
+        var prepared = 0
+        lateinit var real: SignLink
+        real = SignLink(
+            wire = quiet, baud = baud, name = "UART", events = {}, answer = { _, _ -> },
+            timing = UartTimingLog(isEnabled = { false }, emit = {}),
+            prepareAnswers = { stopped ->
+                prepared = SignResponder.warmUp {
+                    val wasStopped = stopped()
+                    // The first preparation has permission to start. Stop before the next one.
+                    if (!wasStopped) real.stop()
+                    wasStopped
+                }
+                real.stop() // keep the fixture finite even if warmUp ignores the callback
+            },
+        )
+        real.run()
+        assertEquals(1, prepared, "only the in-flight adapter should finish")
+        assertEquals(0, quiet.reads.get())
+        assertEquals(1, quiet.closes.get())
+        assertSame(Thread.currentThread(), quiet.closedBy.get())
     }
 
     @Test
