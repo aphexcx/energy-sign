@@ -26,7 +26,10 @@ import java.time.format.DateTimeParseException
  * Switch: `adb shell setprop debug.energysign.ai.warmup off` before the app starts leaves the
  * warm-up out, so the first query pays for the slow first use (for a comparison on the sign).
  */
-class AIReplies(private val context: Context) : AIReplySource {
+class AIReplies(
+    private val context: Context,
+    override val hourlyBudget: AIHourlyBudget = AIHourlyBudget(nowMs = { SystemClock.elapsedRealtime() }),
+) : AIReplySource {
 
     // No key of this build may reach a log line, whatever a library writes into a message.
     private val secrets = Secrets(
@@ -58,6 +61,8 @@ class AIReplies(private val context: Context) : AIReplySource {
             log = warn,
             info = info,
             serverClock = serverClock,
+            budget = hourlyBudget,
+            nanoTime = { SystemClock.elapsedRealtimeNanos() },
         )
         info("Replies are written by ${generator.name}")
         val service = AIReplyService(
@@ -82,7 +87,9 @@ class AIReplies(private val context: Context) : AIReplySource {
     }
 
     private val runner = AIReplyRunner(
-        reply = { text, deadline, stillWanted -> parts.service.replyTo(text, deadline, stillWanted) },
+        reply = { text, deadline, stillWanted, reservation ->
+            parts.service.replyTo(text, deadline, stillWanted, reservation)
+        },
         warmUp = if (warmUpWanted()) ({ parts.generator.warmUp() }) else null,
         log = info,
         // The same clock as the desk's (AppModule): it goes on while the board sleeps.
@@ -96,12 +103,17 @@ class AIReplies(private val context: Context) : AIReplySource {
         // Behind everything else: the sign link is slow enough in the first minute. The runner
         // calls this on the warm-up thread and goes on when Android refuses it.
         onWarmUpThread = { Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND) },
+        hourlyBudget = hourlyBudget,
     )
 
     override fun warmUp(onDone: () -> Unit): Boolean = runner.warmUp(onDone)
 
-    override fun ask(text: String, stillWanted: () -> Boolean, onResult: (AIReplyResult) -> Unit) =
-        runner.ask(text, stillWanted, onResult)
+    override fun ask(
+        text: String,
+        stillWanted: () -> Boolean,
+        reservation: AIHourlyBudget.Reservation?,
+        onResult: (AIReplyResult) -> Unit,
+    ) = runner.ask(text, stillWanted, reservation, onResult)
 
     /** Asked on the main thread while this object is made: whatever fails in it, the warm-up is wanted. */
     private fun warmUpWanted(): Boolean =

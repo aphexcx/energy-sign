@@ -25,7 +25,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class AIReplyRunner(
     /** One whole reply: the prompt of this moment, the provider, the clean-up. See [AIReplyService.replyTo]. */
-    private val reply: suspend (text: String, deadline: Deadline, stillWanted: () -> Boolean) -> AIReplyResult,
+    private val reply: suspend (text: String, deadline: Deadline, stillWanted: () -> Boolean, reservation: AIHourlyBudget.Reservation?) -> AIReplyResult,
     /** The warm-up, or null for none. Blocks until it is done. Runs on its own thread. */
     private val warmUp: (() -> Unit)? = null,
     private val log: (String) -> Unit = {},
@@ -43,6 +43,7 @@ class AIReplyRunner(
      * effort: when it fails, the warm-up runs all the same.
      */
     private val onWarmUpThread: () -> Unit = {},
+    override val hourlyBudget: AIHourlyBudget? = null,
 ) : AIReplySource {
 
     /** True while the warm-up or a call is out. */
@@ -77,7 +78,12 @@ class AIReplyRunner(
         }
     }
 
-    override fun ask(text: String, stillWanted: () -> Boolean, onResult: (AIReplyResult) -> Unit) {
+    override fun ask(
+        text: String,
+        stillWanted: () -> Boolean,
+        reservation: AIHourlyBudget.Reservation?,
+        onResult: (AIReplyResult) -> Unit,
+    ) {
         if (!busy.compareAndSet(false, true)) {
             quietly { onResult(AIReplyResult.NoReply(NoReplyReason.UNEXPECTED_FAILURE, "another call is out")) }
             return
@@ -86,7 +92,7 @@ class AIReplyRunner(
         try {
             scope.launch {
                 val result = try {
-                    reply(text, deadline, stillWanted)
+                    reply(text, deadline, stillWanted, reservation)
                 } catch (e: Throwable) {
                     // Whatever it is, the caller hears of it: a query whose result never comes would
                     // hold the one slot for ever.

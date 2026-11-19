@@ -16,6 +16,7 @@ import com.aallam.openai.client.OpenAI
 import com.aallam.openai.client.OpenAIConfig
 import com.aallam.openai.client.OpenAIHost
 import com.aallam.openai.client.RetryStrategy
+import io.ktor.client.engine.okhttp.OkHttpConfig
 import io.ktor.client.plugins.HttpResponseValidator
 import io.ktor.client.plugins.ResponseException
 import kotlinx.coroutines.CancellationException
@@ -24,6 +25,7 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withTimeoutOrNull
 import java.time.Duration
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
@@ -59,6 +61,8 @@ class OpenAIReplyGenerator(
     private val minTimeToSend: Duration = AnthropicReplyGenerator.MIN_TIME_TO_SEND,
     /** How much longer than [requestTimeout] the HTTP client's own limits are. Only tests set this. */
     transportMargin: Duration = TRANSPORT_MARGIN,
+    /** Shared rolling-hour ceiling on paid HTTP requests leaving the app. */
+    private val budget: AIHourlyBudget = AIHourlyBudget(),
 ) : AIReplyGenerator {
 
     private val apiKey: String = apiKey.trim()
@@ -73,6 +77,9 @@ class OpenAIReplyGenerator(
      * anybody looks at the body. One request at a time uses this object.
      */
     private val failedWithStatus = AtomicInteger(0)
+
+    /** Carries per-call context into OkHttp's application/network interceptors on Ktor's dispatcher thread. */
+    private val activeCall = AtomicReference<WireCallContext.Paid?>(null)
 
     /** What the client is built from. */
     internal val config = OpenAIConfig(
@@ -91,6 +98,17 @@ class OpenAIReplyGenerator(
         host = baseUrl?.let { OpenAIHost(baseUrl = it) } ?: OpenAIHost.OpenAI,
         retry = RetryStrategy(maxRetries = 0),
         httpClientConfig = {
+            engine {
+                if (this is OkHttpConfig) {
+                    addInterceptor { chain ->
+                        val tagged = chain.request().newBuilder()
+                            .tag(WireCallContext::class.java, activeCall.get())
+                            .build()
+                        chain.proceed(tagged)
+                    }
+                    addNetworkInterceptor(WireBudgetInterceptor(budget))
+                }
+            }
             HttpResponseValidator {
                 handleResponseExceptionWithRequest { failure, _ ->
                     (failure as? ResponseException)?.let { failedWithStatus.set(it.response.status.value) }
@@ -119,34 +137,56 @@ class OpenAIReplyGenerator(
             }
             val limitMs = minOf(requestTimeout.toMillis(), leftMs)
             val stream = Stream()
+            activeCall.set(WireCallContext.Paid(request.reservation, request.deadline, minTimeToSend))
             val ended = try {
                 withTimeoutOrNull(limitMs) { collect(client, request, stream) } != null
             } catch (e: OpenAITimeoutException) {
                 // A limit of the HTTP client ended it after all: what has come is read the same way.
                 false
+            } finally {
+                activeCall.set(null)
             }
             stream.read(ended, limitMs)
         } catch (e: CancellationException) {
             throw e
         } catch (e: OpenAITimeoutException) {
-            noReply(NoReplyReason.TIMEOUT, e.javaClass.simpleName)
+            WireSendBlockedException.findIn(e)?.let(::blockedResult) ?: noReply(NoReplyReason.TIMEOUT, e.javaClass.simpleName)
         } catch (e: OpenAIIOException) {
-            noReply(NoReplyReason.NETWORK, e.javaClass.simpleName)
+            WireSendBlockedException.findIn(e)?.let(::blockedResult) ?: noReply(NoReplyReason.NETWORK, e.javaClass.simpleName)
         } catch (e: OpenAIAPIException) {
             // Every HTTP status with an error body, whatever class the client makes of it.
             noReply(NoReplyReason.forHttpStatus(e.statusCode), summary(e))
         } catch (e: OpenAIServerException) {
             noReply(NoReplyReason.SERVER_ERROR, e.javaClass.simpleName)
         } catch (e: OpenAIException) {
-            noReply(NoReplyReason.PROVIDER_ERROR, e.javaClass.simpleName)
+            WireSendBlockedException.findIn(e)?.let(::blockedResult) ?: noReply(NoReplyReason.PROVIDER_ERROR, e.javaClass.simpleName)
         } catch (e: Exception) {
-            // What the client let through as it was. With a status noted, it is an error
-            // response whose body the client could not read: the status says what it means.
-            val status = failedWithStatus.get()
-            if (status > 0) noReply(NoReplyReason.forHttpStatus(status), "HTTP $status, with a body that is not the API's")
-            else noReply(NoReplyReason.PROVIDER_ERROR, e.javaClass.simpleName)
+            WireSendBlockedException.findIn(e)?.let(::blockedResult) ?: run {
+                // What the client let through as it was. With a status noted, it is an error
+                // response whose body the client could not read: the status says what it means.
+                val status = failedWithStatus.get()
+                if (status > 0) noReply(NoReplyReason.forHttpStatus(status), "HTTP $status, with a body that is not the API's")
+                else noReply(NoReplyReason.PROVIDER_ERROR, e.javaClass.simpleName)
+            }
         }
     }
+
+    private fun blockedResult(blocked: WireSendBlockedException): AIReplyResult.NoReply =
+        if (!blocked.afterWireSend) {
+            when (blocked.kind) {
+                WireSendBlockedException.Kind.TOO_LATE ->
+                    noReply(NoReplyReason.TOO_LATE_TO_SEND, "not sent: ${blocked.leftMs / 1000} s of the query's time were left")
+                WireSendBlockedException.Kind.BUDGET_EXHAUSTED ->
+                    noReply(NoReplyReason.WITHDRAWN, "not sent: hourly budget is spent")
+            }
+        } else {
+            val status = blocked.priorHttpStatus
+            if (status != null) {
+                noReply(NoReplyReason.forHttpStatus(status), "HTTP $status (replay blocked: ${blocked.kind})")
+            } else {
+                noReply(NoReplyReason.NETWORK, "replay blocked: ${blocked.kind}")
+            }
+        }
 
     override fun syncClock(limit: Duration) {
         timeFrom?.syncClock(limit)

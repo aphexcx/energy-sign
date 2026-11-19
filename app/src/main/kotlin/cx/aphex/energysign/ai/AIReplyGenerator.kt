@@ -33,6 +33,8 @@ data class AIReplyRequest(
     val userText: String,
     val deadline: Deadline = Deadline.after(AIReplyRunner.QUERY_BUDGET),
     val stillWanted: () -> Boolean = { true },
+    /** The hourly budget place reserved by [AIQueryDesk] for this call, or null when called directly. */
+    val reservation: AIHourlyBudget.Reservation? = null,
 )
 
 /** What a generator answers: the reply text, or why there is none. */
@@ -191,6 +193,12 @@ interface AIReplyGenerator {
  */
 interface AIReplySource {
     /**
+     * The ONE hourly budget shared with the provider transport, or null when this source sends no
+     * HTTP requests of its own ([NoAIReplies] or a test stand-in).
+     */
+    val hourlyBudget: AIHourlyBudget? get() = null
+
+    /**
      * Starts the warm-up when there is one, and returns at once. True: [onDone] will be called
      * once, on some other thread, and nothing may be asked before that. False: there is no
      * warm-up and [onDone] is never called.
@@ -202,7 +210,12 @@ interface AIReplySource {
      * some other thread, whatever happens. [stillWanted] is asked on that other thread, as the
      * last thing before the request goes out; when it says no, nothing is sent.
      */
-    fun ask(text: String, stillWanted: () -> Boolean = { true }, onResult: (AIReplyResult) -> Unit)
+    fun ask(
+        text: String,
+        stillWanted: () -> Boolean = { true },
+        reservation: AIHourlyBudget.Reservation? = null,
+        onResult: (AIReplyResult) -> Unit,
+    )
 }
 
 /**
@@ -213,7 +226,12 @@ interface AIReplySource {
 class NoAIReplies(private val why: String) : AIReplySource {
     override fun warmUp(onDone: () -> Unit): Boolean = false
 
-    override fun ask(text: String, stillWanted: () -> Boolean, onResult: (AIReplyResult) -> Unit) {
+    override fun ask(
+        text: String,
+        stillWanted: () -> Boolean,
+        reservation: AIHourlyBudget.Reservation?,
+        onResult: (AIReplyResult) -> Unit,
+    ) {
         try {
             onResult(AIReplyResult.NoReply(NoReplyReason.NOT_SET_UP, why))
         } catch (e: Throwable) {
@@ -355,23 +373,28 @@ object AIReplyGenerators {
         log: (String) -> Unit,
         info: (String) -> Unit = log,
         serverClock: ServerClock? = null,
+        /** Shared hourly wire-request budget. */
+        budget: AIHourlyBudget = AIHourlyBudget(),
+        /** Monotonic clock in nanoseconds for internal deadlines (the free GET). */
+        nanoTime: () -> Long = System::nanoTime,
         /** Only tests set these, to local fakes of the two APIs. */
         anthropicBaseUrl: String? = null,
         openAiBaseUrl: String? = null,
     ): AIReplyGenerator = when (provider) {
         AIProvider.ANTHROPIC -> AnthropicReplyGenerator(
             apiKey = anthropicApiKey, log = log, info = info, effort = effort, serverClock = serverClock,
-            baseUrl = anthropicBaseUrl,
+            baseUrl = anthropicBaseUrl, budget = budget, nanoTime = nanoTime,
         )
 
         AIProvider.OPENAI -> OpenAIReplyGenerator(
-            apiKey = openAiApiKey, log = log, baseUrl = openAiBaseUrl,
+            apiKey = openAiApiKey, log = log, baseUrl = openAiBaseUrl, budget = budget,
             // The OpenAI client hands no response headers on, so it cannot tell the time. When
             // this build has an Anthropic key too, the free request of that API tells it;
             // otherwise (that generator asks nobody without a key) the time stays unknown and
             // the prompt says nothing about time.
             timeFrom = if (serverClock == null) null else AnthropicReplyGenerator(
                 apiKey = anthropicApiKey, log = log, info = info, serverClock = serverClock, baseUrl = anthropicBaseUrl,
+                budget = budget, nanoTime = nanoTime,
             ),
         )
     }

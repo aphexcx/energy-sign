@@ -19,6 +19,7 @@ class AIQueryDeskTest {
     }
 
     private val sent = mutableListOf<Query>()
+    private val reservations = mutableListOf<AIHourlyBudget.Reservation>()
     private val list = mutableListOf<Query>()
     private var now = 1_000_000L
 
@@ -29,16 +30,29 @@ class AIQueryDeskTest {
     private val said = mutableListOf<String>()
     private var logFails = false
 
-    private fun desk(warmingUp: Boolean = false, limits: AIQueryDesk.Limits = AIQueryDesk.Limits()) =
+    private fun desk(
+        warmingUp: Boolean = false,
+        limits: AIQueryDesk.Limits = AIQueryDesk.Limits(),
+        stampOnStart: Boolean = true,
+        budget: AIHourlyBudget? = null,
+        onListedAmong: () -> Unit = {},
+    ) =
         AIQueryDesk<Query>(
-            start = { sent.add(it) },
+            start = { query, reservation ->
+                sent.add(query)
+                reservations.add(reservation)
+                if (stampOnStart) reservation.stamp(now)
+            },
             listedAmong = { known ->
                 passes++
+                onListedAmong()
                 list.filter { it in known }.toSet()
             },
             log = { if (logFails) throw IllegalStateException("the log failed") else said.add(it) },
             limits = limits,
             warmingUp = warmingUp,
+            nowMs = { now },
+            budget = budget,
         )
 
     private val reply = AIReplyResult.Reply("HYDRATE.")
@@ -462,14 +476,17 @@ class AIQueryDeskTest {
         val a = query("a")
         val b = query("b")
         assertTrue(desk.shown(a, now))
-        assertTrue(desk.shown(b, now + 1))
+        now += 1
+        assertTrue(desk.shown(b, now))
 
-        desk.warmedUp(now + 2)
+        now += 1
+        desk.warmedUp(now)
         assertEquals(listOf(a), sent)
-        desk.finished(a, reply, now + 3)
+        now += 1
+        desk.finished(a, reply, now)
 
         assertEquals(listOf(a), sent, "b would be the second call of the hour")
-        assertFalse(desk.thinkingWanted(now + 4), "b left the line: its notice comes down")
+        assertFalse(desk.thinkingWanted(now + 1), "b left the line: its notice comes down")
     }
 
     @Test
@@ -481,15 +498,68 @@ class AIQueryDeskTest {
         assertEquals(AIQueryDesk.Outcome.Gone, desk.finished(gone, reply, now))
 
         val failed = query("failed")
-        desk.shown(failed, now + 1)
-        desk.finished(failed, noReply(NoReplyReason.NETWORK), now + 2)
+        now += 1
+        desk.shown(failed, now)
+        now += 1
+        desk.finished(failed, noReply(NoReplyReason.NETWORK), now)
 
-        val noKey = query("no key")
-        desk.shown(noKey, now + 3)
-        desk.finished(noKey, noReply(NoReplyReason.MISSING_KEY), now + 4)
+        val refused = query("refused")
+        now += 1
+        desk.shown(refused, now)
+        now += 1
+        desk.finished(refused, noReply(NoReplyReason.REFUSED), now)
 
-        assertFalse(desk.shown(query("fourth"), now + 5))
+        now += 1
+        assertFalse(desk.shown(query("fourth"), now))
         assertEquals(3, sent.size)
+    }
+
+    @Test
+    fun `a reserved place holds the ceiling during preparation, is given back when never sent, and uses no attempt`() {
+        val budget = AIHourlyBudget(callsPerHour = 1, nowMs = { now })
+        val desk = desk(
+            limits = AIQueryDesk.Limits(callsPerHour = 1, coolDownsMs = listOf(0)),
+            stampOnStart = false,
+            budget = budget,
+        )
+        val q = query("q")
+        assertTrue(desk.shown(q, now))
+        // While q is being prepared (unstamped), the reservation still holds the 1-call ceiling.
+        assertFalse(budget.hasRoom(now), "reservation must hold the ceiling during preparation")
+        assertFalse(desk.shown(query("other"), now), "no second query enters line while ceiling is held")
+
+        // Ends unsent (WITHDRAWN) 5 times: slot is returned each time, and never retires q.
+        repeat(5) {
+            assertEquals(AIQueryDesk.Outcome.Failed(NoReplyReason.WITHDRAWN, whileWatched = true), desk.finished(q, noReply(NoReplyReason.WITHDRAWN), now))
+            assertTrue(budget.hasRoom(now), "unused place must be returned")
+            assertTrue(desk.shown(q, now), "withdrawn call must not retire or exhaust budget")
+        }
+
+        // Now stamp at send time (5 s after handover) and finish with a reply.
+        now += 5_000
+        assertTrue(reservations.last().stamp(now))
+        assertIs<AIQueryDesk.Outcome.Reply>(desk.finished(q, reply, now))
+        assertFalse(budget.hasRoom(now + 3_599_999), "expiry is measured from stamp time, not handover")
+        assertTrue(budget.hasRoom(now + 3_600_000), "slot reopens 1 full hour after stamp time")
+    }
+
+    @Test
+    fun `desk reads the clock itself when taking the next query from the line`() {
+        val a = query("a")
+        val b = query("b")
+        var advanceDuringScan = false
+        val desk = desk(onListedAmong = {
+            if (advanceDuringScan) now += 2 // crosses b's 30 s waiting limit during the history scan
+        })
+        assertTrue(desk.shown(a, now))
+        assertTrue(desk.shown(b, now)) // b.until = now + 30_000
+
+        now += 29_999 // 1 ms before b expires when finished() starts
+        advanceDuringScan = true
+        assertIs<AIQueryDesk.Outcome.Reply>(desk.finished(a, reply, now))
+
+        assertEquals(listOf(a), sent, "b expired during listedAmong and must not be promoted")
+        assertFalse(desk.thinkingWanted(now))
     }
 
     // ---- the log is not part of the rules (class C, a minor of the deep gate)
