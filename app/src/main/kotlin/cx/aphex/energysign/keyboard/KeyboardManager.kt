@@ -25,20 +25,23 @@ object KeyboardManager : KoinComponent {
 
 
     /**
-     * The up arrow, the button of the jump game: it types nothing and starts no input. Called
-     * on the main thread, like every key; whoever owns the game posts what the press does.
+     * EVERY KEY THE JUMP GAME MAY TAKE goes through here: the up arrow ([UP_ARROW], which types
+     * nothing and starts no input) and every key that would be typed, before it is. Asked on
+     * the owner thread with the key, whether it is a repeat of a key held down, and when the
+     * press arrived ([clock], read on the main thread); true when the game took the key for
+     * itself, and then nothing is typed. Whoever owns the game sets both.
      */
     @Volatile
-    var onUpArrow: () -> Unit = {}
+    var takenByTheGame: (key: Char, repeated: Boolean, arrivedAt: Long) -> Boolean = { _, _, _ -> false }
 
-    fun upArrow(): Unit = onUpArrow()
-
-    /**
-     * Asked on the owner thread for every key that would be typed, before it is: true when the
-     * game took the key for itself, and then nothing is typed.
-     */
     @Volatile
-    var takenByTheGame: (Char) -> Boolean = { false }
+    var clock: () -> Long = System::currentTimeMillis
+
+    /** The up arrow, the button of the jump game. Called on the main thread, like every key. */
+    fun upArrow(repeated: Boolean = false) {
+        val arrived = clock()
+        owner.post { takenByTheGame(UP_ARROW, repeated, arrived) }
+    }
 
     /** Whether somebody is typing (the echo is on the sign). Owner thread only. */
     val typing: Boolean get() = isInKeyboardInputMode
@@ -52,13 +55,18 @@ object KeyboardManager : KoinComponent {
 
     private var keyboardStringBuilder: StringBuilder = StringBuilder()
 
-    fun processNewKeyboardKey(key: Char): Unit = owner.post {
+    fun processNewKeyboardKey(key: Char, repeated: Boolean = false) {
+        val arrived = clock()
+        owner.post { typed(key, repeated, arrived) }
+    }
+
+    private fun typed(key: Char, repeated: Boolean, arrived: Long) {
         //TODO key.toInt() needed here?
         if (key.code == 0) {
             logD("Invalid key!")
-            return@post
+            return
         }
-        if (takenByTheGame(key)) return@post
+        if (takenByTheGame(key, repeated, arrived)) return
         isInKeyboardInputMode = true
         isMessageSubmitted = false
         msgRepo.oneTimeMessages.clear()
@@ -149,6 +157,9 @@ object KeyboardManager : KoinComponent {
             return null
         }
     }
+
+    /** The up arrow as a key for [takenByTheGame]. */
+    const val UP_ARROW: Char = '\u2191'
 
     private const val MINIMUM_INPUT_ENTRY_PERIOD: Int = 5_000
 

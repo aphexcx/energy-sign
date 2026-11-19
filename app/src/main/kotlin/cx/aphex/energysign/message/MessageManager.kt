@@ -35,6 +35,8 @@ class MessageManager(
      * while the board sleeps (AppModule); this default is for tests on the JVM.
      */
     private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 },
+    /** The jump game. A test hands in one whose obstacles it knows. */
+    jumpGame: JumpGame = JumpGame(),
 ) :
     KoinComponent {
     private val advertisements: MutableList<Message> = mutableListOf()
@@ -261,43 +263,42 @@ class MessageManager(
         on = gameStore.loadOn(),
         say = { logD(it) },
         bestIs = { best -> saveOfTheGame("the best score") { gameStore.saveBest(best) } },
+        game = jumpGame,
     )
 
     init {
         logD("Game: switched ${if (game.on) "on" else "off"} at the start.")
-        // The up arrow comes on the main thread, like a command from the phone on its own: it is posted.
-        keyboardManager.onUpArrow = {
-            val arrived = nowMs()
-            change { gameButton(arrived) }
-        }
-        // On the owner thread, before a key is typed: while anything of a game is on, the
-        // space bar is the game's and types nothing. It jumps while the game is played; in the
-        // intro and in a closing show it does nothing (a press that comes a moment after the
-        // hit must not take the score off the sign). Any other typing takes the sign from the game.
-        keyboardManager.takenByTheGame = { key ->
-            if (key == ' ' && game.busy) {
-                game.jump(nowMs())
-                true
-            } else {
-                game.end("somebody is typing")
-                false
-            }
-        }
+        keyboardManager.clock = nowMs
+        keyboardManager.takenByTheGame = { key, repeated, arrivedAt -> gameKey(key, repeated, arrivedAt) }
     }
 
     /**
-     * The one button there is on the keyboard: it starts a game when nothing of one is on, and
-     * jumps while one is played. In the intro and in a closing show it does nothing: a jump
-     * that comes a moment after the hit is not a new game. (!game is one at any time.)
+     * EVERY KEY THE GAME MAY TAKE, on the owner thread, with the time the press arrived. True
+     * when the key was the game's: then nothing is typed.
+     *
+     * The button is the up arrow, and the space bar while anything of a game is on. It starts
+     * a game when nothing of one is on (the up arrow only) and jumps while one is played; in
+     * the intro and in a closing show it does nothing (a jump that comes a moment after the
+     * hit is not a new game, and takes no score off the sign). A HELD KEY IS ONE PRESS: its
+     * repeats are the game's as well, and do nothing. Any other key is typing, repeats and all,
+     * and takes the sign from the game.
      */
-    private fun gameButton(arrivedAt: Long) {
-        if (game.busy) game.jump(nowMs(), arrivedAt) else startGame()
+    private fun gameKey(key: Char, repeated: Boolean, arrivedAt: Long): Boolean {
+        val isTheButton = key == KeyboardManager.UP_ARROW || (key == ' ' && game.busy)
+        if (!isTheButton) {
+            game.end("somebody is typing", arrivedAt)
+            return false
+        }
+        if (!repeated) {
+            if (game.busy) game.jump(arrivedAt) else startGame(arrivedAt)
+        }
+        return true
     }
 
     /** Not while the sign is somebody else's: a game behind the chooser or the echo would be played by nobody. */
-    private fun startGame() {
+    private fun startGame(arrivedAt: Long) {
         if (isInChooserMode || keyboardManager.typing) logD("Game: not started, the sign is taken (the chooser, or somebody typing).")
-        else game.start()
+        else game.start(arrivedAt)
     }
 
     private fun saveOfTheGame(what: String, write: () -> Unit) = msgRepo.saveLater {
@@ -625,23 +626,24 @@ class MessageManager(
 
     private fun processUartCommand(value: ByteArray, arrivedAt: Long = nowMs()) {
         when (val cmd = String(value)) {
-            "!game" -> startGame()
+            // (the game gets every one of these with the time the command ARRIVED)
+            "!game" -> startGame(arrivedAt)
 
             "!j",
-            "!jump" -> game.jump(nowMs(), arrivedAt)
+            "!jump" -> game.jump(arrivedAt)
 
-            "!game reset" -> game.forgetBest()
+            "!game reset" -> game.forgetBest(arrivedAt)
 
             "!game on",
             "!game off" -> {
-                game.switch(cmd == "!game on")
+                game.switch(cmd == "!game on", arrivedAt)
                 val on = game.on
                 saveOfTheGame("the switch") { gameStore.saveOn(on) }
             }
 
             "!c",
             "!choose" -> {
-                game.end("the chooser takes the sign")
+                game.end("the chooser takes the sign", arrivedAt)
                 isInChooserMode = true
             }
 
@@ -880,7 +882,7 @@ class MessageManager(
         } else if (cmd.startsWith("!")) {
             // logged here, by the caller: the owner has the sign to answer
             logD("Procesing Uart command $cmd")
-            val arrived = nowMs() // (a press of the game's button is timed from here)
+            val arrived = nowMs() // (what the game does with a command, it does as of this moment)
             ({ processUartCommand(value, arrived) })
         } else {
             ({ addNewUserMessage(cmd, isQuery = false) })

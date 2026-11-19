@@ -14,8 +14,9 @@ import kotlin.random.Random
  * The game runs HERE, not on the sign: the sign asks, gets the few numbers of a [Frame], draws
  * it and asks again. Its requests do not come evenly, so nothing here goes by their count: the
  * game is worked out in ticks of [Rules.tickMs] of ELAPSED time since it began, and a request
- * only asks "how does it look now?". The same presses at the same moments are the same game,
- * however often and however unevenly the sign asks.
+ * only asks "how does it look now?". And a press counts from the moment it ARRIVED, not from
+ * the moment somebody got round to it ([jump]). The same presses at the same moments are the
+ * same game, however often and unevenly the sign asks and however late a press is carried out.
  *
  * No Android in here, no thread and no lock: whoever owns the game calls it from one thread and
  * hands in the time.
@@ -85,53 +86,92 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
 
     enum class End { HIT, TOO_LONG }
 
-    var score: Int = 0
-        private set
-
-    /** Why the last game ended; null while one runs and before the first. */
-    var ended: End? = null
-        private set
-
-    var running: Boolean = false
-        private set
-
     private class Coming(val kind: Int, val shape: Shape, var x: Double, var passed: Boolean = false)
 
+    /** The game at one tick: everything that changes while it is played. */
+    private class Moment(
+        /** How many ticks of the game have been worked out. */
+        var ticks: Long = 0,
+        /** The tick at which the runner left the ground; -1 when it is on the ground. */
+        var jumpedAt: Long = -1,
+        val coming: ArrayList<Coming> = ArrayList(),
+        /** Columns still to go before the next obstacle starts, and how many have started. */
+        var nextAfter: Double = 0.0,
+        var started: Int = 0,
+        var score: Int = 0,
+        var ended: End? = null,
+    ) {
+        fun copy() = Moment(ticks, jumpedAt, coming.mapTo(ArrayList()) { Coming(it.kind, it.shape, it.x, it.passed) }, nextAfter, started, score, ended)
+    }
+
+    private var began = false
     private var startedAt = 0L
-    /** How many ticks of the game have been worked out. */
-    private var ticks = 0L
-    /** The tick at which the runner left the ground; -1 when it is on the ground. */
-    private var jumpedAt = -1L
-    private val coming = ArrayList<Coming>()
-    /** Columns still to go before the next obstacle starts. */
-    private var nextAfter = 0.0
+
+    /** The game as far as it has been worked out. */
+    private var at = Moment()
+
+    /**
+     * The game as it was when the button was last pressed (or when it began): a press that
+     * arrived before the moment the game has been worked out to is put in from here.
+     */
+    private var lastPress = Moment()
+
+    /** The kind and the extra room of every obstacle so far, by its number: working a stretch out again gives the same obstacles. */
+    private val drawn = ArrayList<IntArray>()
+
+    val score: Int get() = at.score
+
+    /** Why the last game ended; null while one runs and before the first. */
+    val ended: End? get() = at.ended
+
+    val running: Boolean get() = began && at.ended == null
+
+    /** When the game ended, on the clock that is handed in; only for a game that has. */
+    val endedAt: Long get() = startedAt + at.ticks * rules.tickMs
 
     /** A new game begins at [now]. */
     fun start(now: Long) {
-        running = true
-        ended = null
-        score = 0
+        began = true
         startedAt = now
-        ticks = 0
-        jumpedAt = -1
-        coming.clear()
-        nextAfter = rules.firstAfterColumns.toDouble()
+        drawn.clear()
+        at = Moment(nextAfter = rules.firstAfterColumns.toDouble())
+        lastPress = at.copy()
     }
 
-    /** The button, at [now]. True when the runner left the ground for it. */
-    fun jump(now: Long): Boolean {
-        workOutTo(now)
-        if (!running || jumpedAt >= 0) return false
-        jumpedAt = ticks
+    /**
+     * The button, pressed at [pressedAt]: THE PRESS COUNTS FROM THEN, however much later this is
+     * called and whatever the game has been worked out to (or shown as) in between. When the
+     * game is past that moment already, it is taken back to the press before and worked out
+     * again with this one in it; a game that had ended after [pressedAt] goes on when the
+     * press saves it. True when the runner left the ground for it.
+     */
+    fun jump(pressedAt: Long): Boolean {
+        if (!began || pressedAt < startedAt) return false // (a press of before the game, in its intro, is none of the game's)
+        // (a press never counts from before the press before it)
+        val tick = ((pressedAt - startedAt) / rules.tickMs).coerceAtLeast(lastPress.ticks)
+        val asItWas = at
+        if (tick < at.ticks) at = lastPress.copy()
+        while (at.ended == null && at.ticks < tick) tick()
+        if (at.ended != null || at.jumpedAt >= 0) {
+            // no jump (the game had ended by then, or the runner was in the air): nothing has changed
+            if (asItWas.ticks > at.ticks) at = asItWas
+            return false
+        }
+        at.jumpedAt = at.ticks
+        lastPress = at.copy()
         return true
     }
 
     /** The game as it is at [now]; null when none runs (it has ended by [now], or never began). */
     fun frame(now: Long): Frame? {
         workOutTo(now)
-        if (!running) return null
-        val stride = if (jumpedAt >= 0) 0 else ((ticks * rules.tickMs / rules.strideMs) % 2).toInt()
-        val onTheFace = coming.filter { it.x < rules.faceColumns }.map { Obstacle(it.kind, Math.floor(it.x).toInt()) }
+        return if (running) picture() else null
+    }
+
+    /** The picture of the tick the game is at: for a game that has ended, the picture of its end. */
+    fun picture(): Frame {
+        val stride = if (at.jumpedAt >= 0) 0 else ((at.ticks * rules.tickMs / rules.strideMs) % 2).toInt()
+        val onTheFace = at.coming.filter { it.x < rules.faceColumns }.map { Obstacle(it.kind, Math.floor(it.x).toInt()) }
         return Frame(rise().coerceAtMost(rules.rows), stride, onTheFace)
     }
 
@@ -140,37 +180,39 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
      * was, this is short: a game in which nobody presses ends at its next obstacle.
      */
     private fun workOutTo(now: Long) {
-        while (running && (ticks + 1) * rules.tickMs <= now - startedAt) tick()
+        while (running && (at.ticks + 1) * rules.tickMs <= now - startedAt) tick()
     }
 
     private fun tick() {
-        ticks++
-        val elapsedMs = ticks * rules.tickMs
-        if (jumpedAt >= 0 && (ticks - jumpedAt) * rules.tickMs >= rules.jumpMs) jumpedAt = -1 // landed
+        val now = at
+        now.ticks++
+        val elapsedMs = now.ticks * rules.tickMs
+        if (now.jumpedAt >= 0 && (now.ticks - now.jumpedAt) * rules.tickMs >= rules.jumpMs) now.jumpedAt = -1 // landed
 
         val speed = minOf(rules.topSpeed, rules.startSpeed + rules.fasterEverySecond * elapsedMs / 1000.0)
         val moved = speed * rules.tickMs / 1000.0
         val runnerEnd = rules.runnerAt + rules.runner.width
-        val each = coming.iterator()
+        val each = now.coming.iterator()
         while (each.hasNext()) {
             val obstacle = each.next()
             obstacle.x -= moved
             if (!obstacle.passed && obstacle.x + obstacle.shape.width <= rules.runnerAt) {
                 obstacle.passed = true
-                score++
+                now.score++
             }
             if (obstacle.x + obstacle.shape.width <= 0) each.remove()
         }
-        nextAfter -= moved
-        if (nextAfter <= 0) {
-            val kind = random.nextInt(rules.obstacles.size)
-            coming += Coming(kind, rules.obstacles[kind], rules.faceColumns.toDouble())
+        now.nextAfter -= moved
+        if (now.nextAfter <= 0) {
+            while (drawn.size <= now.started) drawn += intArrayOf(random.nextInt(rules.obstacles.size), random.nextInt(rules.spread + 1))
+            val (kind, extra) = drawn[now.started++]
+            now.coming += Coming(kind, rules.obstacles[kind], rules.faceColumns.toDouble())
             // room for a whole jump and for pressing again, at the speed of the moment
-            nextAfter = speed * (rules.jumpMs + rules.reactionMs) / 1000.0 + rules.runner.width + random.nextInt(rules.spread + 1)
+            now.nextAfter = speed * (rules.jumpMs + rules.reactionMs) / 1000.0 + rules.runner.width + extra
         }
 
         val up = rise()
-        val hit = coming.any { obstacle ->
+        val hit = now.coming.any { obstacle ->
             val left = Math.floor(obstacle.x).toInt()
             left < runnerEnd && left + obstacle.shape.width > rules.runnerAt && obstacle.shape.columns.withIndex().any { (i, lit) ->
                 val column = left + i - rules.runnerAt
@@ -178,21 +220,16 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
             }
         }
         when {
-            hit -> end(End.HIT)
-            elapsedMs >= rules.longestMs -> end(End.TOO_LONG)
+            hit -> now.ended = End.HIT
+            elapsedMs >= rules.longestMs -> now.ended = End.TOO_LONG
         }
     }
 
     /** How many whole rows the runner is above the ground at the tick that was worked out last. */
     private fun rise(): Int {
-        if (jumpedAt < 0) return 0
-        val part = (ticks - jumpedAt) * rules.tickMs / rules.jumpMs.toDouble()
+        if (at.jumpedAt < 0) return 0
+        val part = (at.ticks - at.jumpedAt) * rules.tickMs / rules.jumpMs.toDouble()
         return Math.floor(4 * rules.jumpRows * part * (1 - part) + 1e-9).toInt()
-    }
-
-    private fun end(why: End) {
-        running = false
-        ended = why
     }
 }
 
@@ -201,7 +238,7 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
  * the contract note of the firmware's half (game-contract.md, version 1). The text is the rise
  * (one digit), the picture (one digit), then the obstacles (kind letter and left column), the
  * runner's column when it is not the usual one, the colours and the effect when they are not
- * the usual ones. Whatever a frame holds, what is written here is a frame the sign can read:
+ * the usual ones (the sign's own: a blue runner, red obstacles, so a game in play sends none). Whatever a frame holds, what is written here is a frame the sign can read:
  * the sign draws nothing of a frame with a fifth obstacle or a number out of range.
  */
 fun gameFrame(frame: JumpGame.Frame): Message.GameFrame {
@@ -257,10 +294,11 @@ class GameShows(private val runnerColour: Int, private val crashColour: Int, pri
         flash("NEW${Message.VT}BEST!"),
         // the score in the big font with its colour wave, in the middle of the six places
         Beat.Once(Message.ColorMessage.ChonkySlide(score.toString().let { it.padStart((6 + it.length) / 2).padEnd(6) }, scoreColour, delayMs = 1500)),
-        // two seconds of the runner hopping across the face through all the colours, with stars
+        // two seconds of the runner hopping across the face through all the colours, with stars.
+        // It sets off in its own colour, blue (6: the sign's colour for the runner when none is sent).
         Beat.Frames(2_000) { t ->
             val hop = Math.abs(Math.sin(t / 140.0)) * 3
-            JumpGame.Frame(hop.toInt(), 0, emptyList(), runnerAt = (2 + 45 * t / 2_000).toInt(), colours = (1 + t / 120 % 7).toInt() to 2, effect = 1)
+            JumpGame.Frame(hop.toInt(), 0, emptyList(), runnerAt = (2 + 45 * t / 2_000).toInt(), colours = (1 + (5 + t / 120) % 7).toInt() to 2, effect = 1)
         },
         Beat.Once(Message.Starfield(stars = 600)),
     )
@@ -299,7 +337,10 @@ class GameStore(private val dir: File, private val warn: (String) -> Unit = {}) 
  * It ANSWERS the sign's requests itself ([answer]) and takes nothing from any queue: whatever
  * else is waiting for the sign waits, and is shown after the game as if there had been none.
  *
- * One thread calls this (the one that answers the sign) and hands in the time.
+ * One thread calls this (the one that answers the sign) and hands in the time: for a request of
+ * the sign the time of the request, for everything else THE TIME THE EVENT ARRIVED, which may
+ * be well before the call. Every way in first brings the game to that moment ([settle]), so a
+ * game that ended by the clock while nobody asked has its end before the event is looked at.
  */
 class GameOnTheSign(
     private val shows: GameShows,
@@ -319,9 +360,6 @@ class GameOnTheSign(
     private var beatBegan = -1L
     private var given: Message? = null
 
-    /** The last frame of the game that is played, for the picture of the hit. */
-    private var last: JumpGame.Frame? = null
-
     /** When the press arrived that the next frame answers; -1 when none is waiting for its frame. */
     private var pressedAt = -1L
     private var saidItIsOff = false
@@ -335,18 +373,42 @@ class GameOnTheSign(
     /** Whether anything of a game is on: its intro, the game, or a closing show. */
     val busy: Boolean get() = stage != Stage.NONE
 
+    /** The game as it is at [at]: one that was played and had ended by then has its closing show now (and its best). */
+    private fun settle(at: Long) {
+        if (stage == Stage.PLAY && game.frame(at) == null) closing()
+    }
+
+    /**
+     * Whether the game was closed for an end that came AFTER [at]: the sign was answered for a
+     * later moment before an event that arrived at [at] is carried out. For that event the
+     * game is still being played, and what the closing did to the best is not done yet.
+     */
+    private fun closedAfter(at: Long) = stage == Stage.CLOSING && at < game.endedAt
+
+    /** The best as it was before the game was closed. */
+    private var bestBefore = 0
+
+    private fun takeBackTheBest() {
+        if (best == bestBefore) return
+        best = bestBefore
+        bestIs(best)
+    }
+
     /** The switch. Off ends whatever of a game there is. */
-    fun switch(to: Boolean) {
+    fun switch(to: Boolean, at: Long) {
         on = to
         saidItIsOff = false
-        if (!to) end("it was switched off")
+        if (!to) end("it was switched off", at)
         say("Game: switched ${if (to) "on" else "off"}.")
     }
 
     /** There is no best any more: the next score above none is one. */
-    fun forgetBest() {
-        best = 0
-        bestIs(0)
+    fun forgetBest(at: Long) {
+        settle(at)
+        // (a game that ended after this arrived is the first score after the reset)
+        best = if (closedAfter(at)) game.score else 0
+        bestBefore = 0
+        bestIs(best)
         say("Game: the best is reset to none.")
     }
 
@@ -354,7 +416,9 @@ class GameOnTheSign(
      * A game is asked for. It begins with its intro, at the sign's next request, unless one is
      * on already (its intro or the game itself: nothing starts twice). True when one begins.
      */
-    fun start(): Boolean {
+    fun start(at: Long): Boolean {
+        settle(at)
+        if (closedAfter(at)) return false // (a game was being played when this arrived: nothing starts twice)
         if (!on) {
             if (!saidItIsOff) say("Game: it is switched off (!game on); nothing is started.")
             saidItIsOff = true
@@ -374,13 +438,29 @@ class GameOnTheSign(
         given = null
     }
 
-    /** The button, pressed at [arrivedAt] and carried out [now]: a jump while a game is played, nothing otherwise. */
-    fun jump(now: Long, arrivedAt: Long = now) {
-        if (stage == Stage.PLAY && game.jump(now)) pressedAt = arrivedAt
+    /**
+     * The button, pressed at [at]: a jump while a game is played, nothing otherwise. The press
+     * counts from [at] ([JumpGame.jump]). Also when the sign was answered for a later moment
+     * in between and the game was closed there for a hit this press prevents: the game goes on.
+     */
+    fun jump(at: Long) {
+        val closedTooSoon = closedAfter(at)
+        if (stage != Stage.PLAY && !closedTooSoon) return
+        if (!game.jump(at)) return
+        if (closedTooSoon) {
+            // Played on from the press: its end, its score and its best are those it comes to now.
+            takeBackTheBest()
+            stage = Stage.PLAY
+            show(emptyList())
+            say("Game: goes on, a press had arrived before the hit.")
+        }
+        pressedAt = at
     }
 
-    /** Somebody else takes the sign (the chooser, a typist), or the game is switched off: no game, no show, no score. */
-    fun end(why: String) {
+    /** Somebody else takes the sign (the chooser, a typist) at [at], or the game is switched off: no game, no show. A game that had ended before [at] keeps its score. */
+    fun end(why: String, at: Long) {
+        settle(at)
+        if (closedAfter(at)) takeBackTheBest() // (it was ended by this, before its hit: no score)
         if (stage == Stage.NONE) return
         stage = Stage.NONE
         show(emptyList())
@@ -394,7 +474,6 @@ class GameOnTheSign(
             game.frame(now)?.let { frame ->
                 if (pressedAt >= 0) say("Game: jump, ${now - pressedAt} ms from the press to its frame.")
                 pressedAt = -1
-                last = frame
                 return gameFrame(frame)
             }
             closing()
@@ -418,7 +497,6 @@ class GameOnTheSign(
                     given = null
                     if (stage == Stage.INTRO) {
                         stage = Stage.PLAY
-                        last = null
                         game.start(now)
                         return answer(now)
                     }
@@ -434,11 +512,13 @@ class GameOnTheSign(
         val score = game.score
         val isBest = score > best
         say("Game: over, score $score (${if (isBest) "a new best, it was $best" else "best $best"}), ${game.ended}.")
+        bestBefore = best
         if (isBest) {
             best = score
             bestIs(score)
         }
-        show(if (isBest) shows.newBest(score, last) else shows.over(score, best, last))
+        // (the picture of the hit is the game's at the tick of the hit, not what the sign last asked for)
+        show(if (isBest) shows.newBest(score, game.picture()) else shows.over(score, best, game.picture()))
         stage = Stage.CLOSING
         pressedAt = -1
     }

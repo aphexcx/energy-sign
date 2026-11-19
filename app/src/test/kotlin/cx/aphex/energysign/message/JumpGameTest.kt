@@ -81,6 +81,28 @@ class JumpGameTest {
                 game.jump(330)
                 onTheGround + listOf(400L, 600).map { game.frame(it)?.picture }
             },
+            // A PRESS COUNTS FROM WHEN IT ARRIVED (the gate's case): with a post first, the game without a press ends at 2,140 ms
+            row("a post first, a press that arrived at 2,110 ms and is carried out when the game has been worked out to 2,160", listOf(null, true, 1)) {
+                val game = game(JumpGame.Rules(obstacles = listOf(JumpGame.Rules().obstacles[1])))
+                val withoutThePress = game.frame(2_160)
+                val jumped = game.jump(2_110)
+                game.frame(3_000)
+                listOf(withoutThePress, jumped, game.score)
+            },
+            row("a press that arrived after the hit is no jump, and the game stays ended", listOf(false, JumpGame.End.HIT, 0)) {
+                val game = game(JumpGame.Rules(obstacles = listOf(JumpGame.Rules().obstacles[1])))
+                game.frame(2_160)
+                listOf(game.jump(2_150), game.ended, game.score)
+            },
+            row("the presses of a minute of play, each carried out up to 300 ms late, between the sign's requests: the same game", replay(pressed, every(40, minute), minute)) {
+                val late = Random(5)
+                val game = game()
+                val carriedOut = pressed.map { it + late.nextLong(0, 301) to it }
+                val moments = (carriedOut.map { it.first to it.second } + every(40, minute).map { it to null }).sortedBy { it.first }
+                for ((now, press) in moments) if (press != null) game.jump(press) else game.frame(now)
+                game.frame(minute)
+                "score ${game.score}, ${game.ended ?: "running"}"
+            },
             // a player who presses in time is never hit, in a minute in which the speed reaches its top
             row("a minute of play, the sign asking every 10 ms", "running") { replay(pressed, every(10, minute), minute).substringAfter(", ") },
             row("it scored", true) { replay(pressed, every(10, minute), minute) != "score 0, running" },
@@ -124,6 +146,11 @@ class JumpGameTest {
                     game.frame(now)?.let { SignResponder.GSON.toJson(gameFrame(it)) }
                 }
                 listOf(frames.maxOf { it.length } in 23..32, frames.count { !form.matches(it) })
+            },
+            // THE RUNNER IS BLUE, by the sign's own default: in play and when it runs in no colour is sent; where a show names its colour, it begins blue (6)
+            row("the first frame of the run-in, of a game, and of the new best's hop", listOf("00r-12e1", "00", "00r2p62e1")) {
+                val shows = GameShows(0, 0, 0)
+                listOf((shows.intro().last() as Beat.Frames).at(0), game().frame(0)!!, (shows.newBest(1, null)[4] as Beat.Frames).at(0)).map { gameFrame(it).str }
             },
             row("a frame with more than the sign can read is cut to what it can: four obstacles, every number in its range", "71a10b20c30a-99r99p70e2") {
                 val obstacles = listOf(0 to 150, 1 to -120, 7 to 3, 0 to 10, 1 to 20, 2 to 30, 0 to -99, 1 to 50).map { JumpGame.Obstacle(it.first, it.second) }
