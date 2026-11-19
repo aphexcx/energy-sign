@@ -9,6 +9,9 @@ import cx.aphex.energysign.ai.AIReplySource
 import cx.aphex.energysign.ai.PostedAIAnswer
 import cx.aphex.energysign.beatlinkdata.currentTrack
 import cx.aphex.energysign.keyboard.KeyboardManager
+import cx.aphex.energysign.uart.SignLink
+import cx.aphex.energysign.uart.SignWire
+import cx.aphex.energysign.uart.UartTimingLog
 import io.ktor.serialization.gson.gson
 import io.ktor.server.application.install
 import io.ktor.server.routing.routing
@@ -23,6 +26,7 @@ import org.koin.dsl.module
 import java.io.File
 import java.nio.file.Files
 import java.util.concurrent.Callable
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.FutureTask
 import java.util.concurrent.Executor
@@ -59,13 +63,15 @@ class MessageManagerOwnerTest {
     private val owner = OwnerQueue()
     private lateinit var manager: MessageManager
 
+    private val immediateTasks = object : TaskExecutor() {
+        override fun executeOnDiskIO(runnable: Runnable) = runnable.run()
+        override fun postToMainThread(runnable: Runnable) = runnable.run()
+        override fun isMainThread(): Boolean = true
+    }
+
     @BeforeAll
     fun android() {
-        ArchTaskExecutor.getInstance().setDelegate(object : TaskExecutor() {
-            override fun executeOnDiskIO(runnable: Runnable) = runnable.run()
-            override fun postToMainThread(runnable: Runnable) = runnable.run()
-            override fun isMainThread(): Boolean = true
-        })
+        ArchTaskExecutor.getInstance().setDelegate(immediateTasks)
         startKoin {
             modules(module {
                 single { repo }
@@ -254,9 +260,18 @@ class MessageManagerOwnerTest {
 
     // ---- a message that could not be written (class D)
 
+    private fun startWithTwoStoredMessages(): App {
+        val home = newFilesDir()
+        File(home, "signstrings.bin").writeText("DEFAULT\u000bMESSAGE 2\nDEFAULT\u000bMESSAGE 1\n")
+        return App(home)
+    }
+
     @Test
-    fun `a one-time message that could not be written goes back to the front, a stored one comes round by itself`() {
-        phone("!micOff")
+    fun `a one-time message that could not be written goes back to the front and a stored one retries at its place`() {
+        val app = startWithTwoStoredMessages()
+        val repo = app.repo
+        val manager = app.manager
+        app.phone("!micOff")
         ownerRuns()
         repo.enqueueOneTimeMessage(Message.Starfield())
         val taken = manager.getNextMessage()
@@ -273,7 +288,241 @@ class MessageManagerOwnerTest {
         assertEquals("MESSAGE 1", stored.str)
         manager.returnUnsent(stored)
         assertEquals(0, repo.oneTimeMessages.size)
-        assertEquals(5, repo.marqueeMessages.size)
+        assertEquals(2, repo.marqueeMessages.size)
+        assertSame(stored, manager.getNextMessage())
+        assertSame(repo.marqueeMessages[1], manager.getNextMessage())
+    }
+
+    @Test
+    fun `a marquee taken from the one time queue retries there even when it also has a stored place`() {
+        val app = startWithTwoStoredMessages()
+        val repo = app.repo
+        val manager = app.manager
+        val queued = repo.marqueeMessages.last()
+        repo.pushOneTimeMessage(queued)
+        assertSame(queued, manager.getNextMessage())
+        manager.returnUnsent(queued)
+        assertSame(queued, repo.oneTimeMessages.firstOrNull())
+        assertSame(queued, manager.getNextMessage())
+        assertSame(repo.marqueeMessages.first(), manager.getNextMessage())
+    }
+
+    @Test
+    fun `deleting a failed stored message before the retry leaves the cursor on its successor`() {
+        val app = startWithTwoStoredMessages()
+        val manager = app.manager
+        val failed = manager.getNextMessage()
+        manager.returnUnsent(failed)
+        app.phone("!choose")
+        app.phone("!delete")
+        app.phone("!endchoose")
+        ownerRuns()
+        assertTrue(app.repo.marqueeMessages.none { it === failed })
+        assertEquals("MESSAGE 2", manager.getNextMessage().str)
+    }
+
+    @Test
+    fun `failed writes near the end of a long history restore the slot used for each attempt`() {
+        val app = startWithTwoStoredMessages()
+        val history = app.repo.marqueeMessages
+        history.addAll((3..77).map { Message.Marquee.User("MESSAGE $it") })
+        val selected = history[75]
+        history[1] = selected // a search by identity would find the earlier occurrence
+        app.phone("!last")
+        app.phone("!prev")
+        ownerRuns()
+
+        repeat(3) {
+            assertSame(selected, app.manager.getNextMessage())
+            app.manager.returnUnsent(selected)
+        }
+        assertSame(selected, app.manager.getNextMessage())
+        assertSame(history.last(), app.manager.getNextMessage())
+    }
+
+    @Test
+    fun `a failed last stored message retries before the ads it triggered, even after repeated failures`() {
+        val app = startWithTwoStoredMessages()
+        val repo = app.repo
+        val manager = app.manager
+        app.phone("!A1")
+        app.phone("!last")
+        ownerRuns()
+        repo.oneTimeMessages.clear()
+        val last = repo.marqueeMessages.last()
+        assertSame(last, manager.getNextMessage())
+        val ads = repo.oneTimeMessages.toList()
+        assertTrue(ads.isNotEmpty())
+
+        repeat(2) {
+            manager.returnUnsent(last)
+            assertSame(last, manager.getNextMessage())
+            assertEquals(ads, repo.oneTimeMessages.toList())
+        }
+        ads.forEach { assertSame(it, manager.getNextMessage()) }
+        assertSame(repo.marqueeMessages.first(), manager.getNextMessage())
+    }
+
+    @Test
+    fun `pushed commands interrupt a repeatedly failing stored frame and its ads run once afterward`() {
+        val app = startWithTwoStoredMessages()
+        app.phone("!A1")
+        ownerRuns()
+        app.repo.oneTimeMessages.clear()
+        val manager = app.manager
+        val first = manager.getNextMessage()
+        val ads = app.repo.oneTimeMessages.toList()
+        assertTrue(ads.isNotEmpty())
+        manager.returnUnsent(first)
+
+        app.phone("!micOff")
+        ownerRuns()
+        assertSame(Message.UtilityMessage.DisableMic, manager.getNextMessage())
+        assertSame(first, manager.getNextMessage())
+        manager.returnUnsent(first)
+        app.phone("!B3")
+        ownerRuns()
+        assertTrue(manager.getNextMessage() is Message.UtilityMessage.BrightnessShift)
+        assertSame(first, manager.getNextMessage())
+        ads.forEach { assertSame(it, manager.getNextMessage()) }
+        assertSame(app.repo.marqueeMessages.last(), manager.getNextMessage())
+    }
+
+    @Test
+    fun `a new occurrence of an ad can preempt its own stored retry while the original and the tail stay ordered`() {
+        val app = startWithTwoStoredMessages()
+        app.phone("!A1")
+        ownerRuns()
+        app.repo.oneTimeMessages.clear()
+        val first = app.manager.getNextMessage()
+        val generated = app.repo.oneTimeMessages.toList()
+        app.manager.returnUnsent(first)
+
+        val sameIcon = generated.first()
+        val track = Message.NowPlayingTrackMessage("tail")
+        app.repo.pushOneTimeMessage(sameIcon)
+        app.repo.enqueueOneTimeMessage(track)
+        assertSame(sameIcon, app.manager.getNextMessage())
+        assertSame(first, app.manager.getNextMessage())
+        generated.forEach { assertSame(it, app.manager.getNextMessage()) }
+        assertSame(track, app.manager.getNextMessage())
+    }
+
+    @Test
+    fun `track updates between attempts keep their queued order and the failed stored cursor`() {
+        val app = startWithTwoStoredMessages()
+        val first = app.manager.getNextMessage()
+        app.manager.returnUnsent(first)
+        app.post(BeatLinkTrack(id = 1, artist = "DJ", title = "Old"))
+        app.post(BeatLinkTrack(id = 2, artist = "DJ", title = "New"))
+
+        val queued = app.repo.oneTimeMessages.toList()
+        assertEquals(listOf("DJ - New"), queued.filterIsInstance<Message.NowPlayingTrackMessage>().map { it.str })
+        queued.forEach { assertSame(it, app.manager.getNextMessage()) }
+        assertSame(first, app.manager.getNextMessage())
+        assertSame(app.repo.marqueeMessages.last(), app.manager.getNextMessage())
+    }
+
+    @Test
+    fun `a queued heading and reply stay together ahead of a retry and the command behind them`() {
+        val app = startWithTwoStoredMessages()
+        val first = app.manager.getNextMessage()
+        app.manager.returnUnsent(first)
+        val heading = Message.ColorMessage.ChonkySlide("SAYS", 0x123456)
+        val reply = Message.Marquee.Chonky("ANSWER")
+        app.repo.pushInOnePiece(listOf(heading, reply))
+        app.phone("!micOff")
+        ownerRuns()
+
+        assertSame(heading, app.manager.getNextMessage())
+        assertSame(reply, app.manager.getNextMessage())
+        assertSame(Message.UtilityMessage.DisableMic, app.manager.getNextMessage())
+        assertSame(first, app.manager.getNextMessage())
+    }
+
+    @Test
+    fun `a stored frame can fail three retries before the next stored frame gets its turn`() {
+        val app = startWithTwoStoredMessages()
+        val first = app.repo.marqueeMessages.first()
+        repeat(4) {
+            assertSame(first, app.manager.getNextMessage())
+            app.manager.returnUnsent(first)
+        }
+        assertSame(app.repo.marqueeMessages.last(), app.manager.getNextMessage())
+        assertSame(first, app.manager.getNextMessage(), "the failed frame stays in its normal rotation")
+    }
+
+    @Test
+    fun `a link starting with main busy for five seconds writes the first stored frame whole`() {
+        var clock = 0L
+        var preparedOn: Thread? = null
+        var firstReadOn: Thread? = null
+        var preparedBeforeRead = false
+        val frames = mutableListOf<String>()
+        var writeAt = Long.MAX_VALUE
+        val wire = object : SignWire {
+            override fun read(buffer: ByteArray, length: Int): Int {
+                if (firstReadOn == null) {
+                    firstReadOn = Thread.currentThread()
+                    preparedBeforeRead = preparedOn === firstReadOn
+                    return 0 // an empty read establishes freshness after the cold start
+                }
+                buffer[0] = '~'.code.toByte()
+                return 1
+            }
+            override fun write(buffer: ByteArray, length: Int): Int {
+                frames += String(buffer, 0, length)
+                writeAt = System.nanoTime()
+                return length
+            }
+            override fun close() {}
+        }
+        val manager = startWithTwoStoredMessages().manager
+        lateinit var link: SignLink
+        val responder = SignResponder(
+            nextMessage = manager::getNextMessage,
+            write = { frame, reply -> link.send(frame, reply) },
+            unsent = manager::returnUnsent,
+        )
+        link = SignLink(
+            wire = wire, baud = 14400, name = "test", events = { ownerRuns() },
+            prepareAnswers = {
+                SignResponder.warmUp()
+                preparedOn = Thread.currentThread()
+                clock += 611_000_000L // the measured cold Gson cost
+            },
+            answer = { buffer, count ->
+                if (preparedOn !== Thread.currentThread()) clock += 611_000_000L
+                responder.onRequest(buffer, count)
+                link.stop()
+            },
+            timing = UartTimingLog(isEnabled = { false }, emit = {}),
+            nanoTime = { clock }, sleepNanos = { clock += it },
+        )
+
+        val main = Thread.currentThread()
+        val mainTasks = ConcurrentLinkedQueue<Runnable>()
+        ArchTaskExecutor.getInstance().setDelegate(object : TaskExecutor() {
+            override fun executeOnDiskIO(runnable: Runnable) = immediateTasks.executeOnDiskIO(runnable)
+            override fun postToMainThread(runnable: Runnable) { mainTasks.add(runnable) }
+            override fun isMainThread() = Thread.currentThread() === main
+        })
+        val thread = Thread(link, "test-sign-link")
+        val mainBusyFrom = System.nanoTime()
+        try {
+            thread.start()
+            Thread.sleep(5_000) // this thread built the manager and cannot run a callback
+        } finally {
+            link.stop()
+            while (true) (mainTasks.poll() ?: break).run()
+            thread.join(2_000)
+            ArchTaskExecutor.getInstance().setDelegate(immediateTasks)
+        }
+        assertFalse(thread.isAlive)
+        assertEquals(listOf(SignResponder.GSON.toJson(Message.Marquee.User("MESSAGE 1"))), frames)
+        assertTrue(preparedBeforeRead)
+        assertSame(thread, preparedOn)
+        assertTrue(writeAt - mainBusyFrom < 5_000_000_000L)
     }
 
     // ---- the real commands

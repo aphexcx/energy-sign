@@ -54,11 +54,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
         // arrive before the link thread runs wait in the owner's queue.
         owner.neverWaitsOn(Looper.getMainLooper().thread)
         checkNotNull(messageManager)
-        Thread({ SignResponder.warmUp() }, "sign-json-warmup").apply {
-            isDaemon = true
-            priority = Thread.MIN_PRIORITY
-            start()
-        }
 
         energySignBluetoothManager = EnergySignBluetoothManager(application.applicationContext, this)
         energySignBluetoothManager.start()

@@ -1,6 +1,8 @@
 package cx.aphex.energysign.uart
 
+import cx.aphex.energysign.message.OwnerQueue
 import cx.aphex.energysign.message.Reply
+import cx.aphex.energysign.message.SignResponder
 import org.junit.jupiter.api.Test
 import java.io.IOException
 import java.util.concurrent.CountDownLatch
@@ -717,7 +719,7 @@ class SignLinkTest {
         events: () -> Unit = {},
         answer: (ByteArray, Int) -> Unit = { _, _ -> },
     ) = SignLink(
-        wire = wire, baud = baud, name = "UART", events = events, answer = answer,
+        wire = wire, baud = baud, name = "UART", events = { events() }, answer = answer,
         timing = UartTimingLog(isEnabled = { false }, emit = {}),
         sleepNanos = { nanos -> LockSupport.parkNanos(maxOf(nanos, 5_000 * ms)) },
     )
@@ -751,29 +753,134 @@ class SignLinkTest {
     }
 
     @Test
-    fun `the port is not closed under a reply that is still being made`() {
-        val inAnswer = CountDownLatch(1)
-        val letGo = CountDownLatch(1)
-        val wire = object : QuietWire() {
-            var asked = false
+    fun `stop during an owner change leaves the rest queued and closes before another read`() {
+        val owner = OwnerQueue()
+        val quiet = QuietWire()
+        val real = SignLink(
+            wire = quiet, baud = baud, name = "UART", answer = { _, _ -> },
+            events = { stopped -> owner.drain(stopped = stopped) },
+            timing = UartTimingLog(isEnabled = { false }, emit = {}),
+        )
+        val ran = mutableListOf<String>()
+        owner.post {
+            ran += "first"
+            real.stop()
+        }
+        owner.post { ran += "second" }
+        real.run()
+        assertEquals(listOf("first"), ran)
+        assertEquals(0, quiet.reads.get())
+        assertEquals(1, quiet.closes.get())
+        assertEquals(1, owner.drain())
+        assertEquals(listOf("first", "second"), ran)
+    }
+
+    @Test
+    fun `stop during adapter preparation finishes only the adapter already started and closes the wire`() {
+        val quiet = QuietWire()
+        var prepared = 0
+        lateinit var real: SignLink
+        real = SignLink(
+            wire = quiet, baud = baud, name = "UART", events = {}, answer = { _, _ -> },
+            timing = UartTimingLog(isEnabled = { false }, emit = {}),
+            prepareAnswers = { stopped ->
+                prepared = SignResponder.warmUp {
+                    val wasStopped = stopped()
+                    // The first preparation has permission to start. Stop before the next one.
+                    if (!wasStopped) real.stop()
+                    wasStopped
+                }
+                real.stop() // keep the fixture finite even if warmUp ignores the callback
+            },
+        )
+        real.run()
+        assertEquals(1, prepared, "only the in-flight adapter should finish")
+        assertEquals(0, quiet.reads.get())
+        assertEquals(1, quiet.closes.get())
+        assertSame(Thread.currentThread(), quiet.closedBy.get())
+    }
+
+    @Test
+    fun `a request buffered during a cold start cannot borrow a new 50 ms window`() {
+        arrives(0, "~")
+        arrives(621, "~")
+        lateinit var cold: SignLink
+        cold = SignLink(
+            wire = wire, baud = baud, name = "UART", events = {},
+            prepareAnswers = { now += 611 * ms },
+            answer = { _, _ ->
+                cold.send("FIRST", Reply.MESSAGE)
+                cold.stop()
+            },
+            timing = UartTimingLog(isEnabled = { true }, emit = { timingLines += it }),
+            nanoTime = { now }, sleepNanos = { now += it },
+        )
+        cold.run()
+        assertEquals(1, drops().size)
+        assertEquals(listOf("tx[FIRST]@621"), wire())
+    }
+
+    @Test
+    fun `failure to prewarm a writer still lets the link answer requests`() {
+        val quiet = object : QuietWire() {
             override fun read(buffer: ByteArray, length: Int): Int {
-                if (asked) return 0
-                asked = true
                 buffer[0] = '~'.code.toByte()
                 return 1
             }
         }
-        val real = sleepy(wire, answer = { _, _ ->
-            inAnswer.countDown()
-            letGo.await() // a reply that takes its time
-        })
+        lateinit var real: SignLink
+        var wrote = false
+        real = SignLink(
+            wire = quiet, baud = baud, name = "UART", events = {},
+            answer = { _, _ ->
+                wrote = real.send("FIRST", Reply.MESSAGE)
+                real.stop()
+            },
+            prepareAnswers = { throw IllegalStateException("adapter unavailable") },
+            timing = UartTimingLog(isEnabled = { false }, emit = {}),
+            nanoTime = { now }, warn = { line += it },
+        )
+        real.run()
+        assertTrue(wrote)
+        assertTrue(line.any { it.contains("adapter unavailable") })
+        assertEquals(1, quiet.closes.get())
+    }
+
+    @Test
+    fun `the port is not closed under a reply that is still being made`() {
+        val inAnswer = CountDownLatch(1)
+        val letGo = CountDownLatch(1)
+        val wire = object : QuietWire() {
+            override fun read(buffer: ByteArray, length: Int): Int {
+                if (reads.incrementAndGet() != 2) return 0 // establish freshness, then ask once
+                buffer[0] = '~'.code.toByte()
+                return 1
+            }
+        }
+        var clock = 0L
+        val real = SignLink(
+            wire = wire, baud = baud, name = "UART", events = {},
+            prepareAnswers = { clock += 611 * ms },
+            nanoTime = { clock }, sleepNanos = { nanos ->
+                clock += nanos
+                LockSupport.parkNanos(nanos)
+            },
+            timing = UartTimingLog(isEnabled = { false }, emit = {}),
+            answer = { _, _ ->
+                inAnswer.countDown()
+                letGo.await() // the port must stay open until this reply returns
+            },
+        )
         val thread = Thread(real, "sign-link-test").apply { start() }
-        assertTrue(inAnswer.await(2, TimeUnit.SECONDS))
-        real.stop()
-        Thread.sleep(100)
-        assertEquals(0, wire.closes.get()) // stop() itself closes nothing
-        letGo.countDown()
-        thread.join(2_000)
+        try {
+            assertTrue(inAnswer.await(2, TimeUnit.SECONDS))
+            real.stop()
+            assertEquals(0, wire.closes.get()) // stop() itself closes nothing
+        } finally {
+            real.stop()
+            letGo.countDown()
+            thread.join(2_000)
+        }
         assertFalse(thread.isAlive)
         assertEquals(1, wire.closes.get())
         assertSame(thread, wire.closedBy.get())
