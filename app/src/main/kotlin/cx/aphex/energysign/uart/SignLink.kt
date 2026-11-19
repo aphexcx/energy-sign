@@ -4,7 +4,8 @@ import cx.aphex.energysign.message.ChooserProtocol
 import cx.aphex.energysign.message.Reply
 import cx.aphex.energysign.message.SignResponder
 import java.io.IOException
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.LockSupport
 
 /** The serial line to the sign: the three calls of the UART that [SignLink] uses, and its close. */
@@ -279,7 +280,25 @@ class SignLink(
     private val warn: (line: String) -> Unit = {},
     private val prepareAnswers: (stopped: () -> Boolean) -> Unit = { SignResponder.warmUp(it) },
 ) : Runnable {
-    private val pushWanted = AtomicBoolean(false)
+    // ---- The pending change (the table in the class comment: WHEN A CHANGE IS DONE)
+    /** How many changes have been recorded ([want]). The only thing another thread may move. */
+    private val wanted = AtomicLong(0)
+
+    /**
+     * The changes up to this count are done: the sign has them ([frameWritten]), or they were
+     * given up on purpose ([dropped]). Assigned in those two functions and nowhere else. A
+     * change is pending while this is not [wanted].
+     */
+    private var settled = 0L
+
+    /** The changes up to this count have had the attention alone: it is not raised again for them. */
+    private var aloneGivenFor = -1L
+
+    /** The changes up to this count are in the answer that is being made: counted before it is made. */
+    private var answerCarries = 0L
+
+    /** The void time (rule 3) is that of a pushed frame that was called done. */
+    private var pushedFrameInVoid = false
 
     @Volatile
     private var stopped = false
@@ -318,24 +337,66 @@ class SignLink(
     private var sentBytes = 0
     private var sentOf = 0
 
-    // What the last writeAll() left: how many bytes were taken, and whether the start of
-    // something is, or may be, on the line without its end in time behind it
+    // What the last writeAll() left: how many bytes were taken; whether the start of something
+    // is, or may be, on the line without its end in time behind it; whether the line can say
+    // that the sign has all of it, in one piece and begun in time; and whether it was begun late
     private var takenLast = 0
     private var tornLast = false
+    private var provenLast = false
+    private var lateStartLast = false
 
-    private var lastWarning = ""
-    private var lastWarningNs = takenUpToNs
+    /** When each kind of failure was last said. (A switch that cannot be asked may be said from another thread.) */
+    private val lastWarningNs = ConcurrentHashMap<String, Long>()
 
     /**
      * Asks for the chooser to be pushed to the sign; returns at once. The app calls it on the
-     * link thread, from a change the link is running, so a push that is asked for is never older
-     * than an answer that settles it (rule 2). Another thread may call it; the loop is woken.
+     * link thread, from a change the link is running. Another thread may call it; the loop is
+     * woken. A change is recorded only while pushes are on: one made while they are off is
+     * not pushed, not even when they are switched on a moment later in the same turn.
      */
     fun requestPush() {
-        pushWanted.set(true)
+        want()
         // The link thread asking for itself (a change it has just made) is awake: a wake-up
         // would only cut its next sleep short
         if (Thread.currentThread() !== thread) wake()
+    }
+
+    /** SETS: the sign is behind by one more change. Not while pushes are off: then nothing is owed to it unasked. */
+    private fun want() {
+        if (switchInForce() != Attention.OFF) wanted.incrementAndGet()
+    }
+
+    /** What the switch says now. A switch that cannot be asked is off. */
+    private fun switchInForce(): Attention =
+        try {
+            attention()
+        } catch (e: Exception) {
+            complain("push", e)
+            Attention.OFF
+        }
+
+    /**
+     * THE ONE PLACE A PENDING CHANGE IS CALLED DONE. Called behind every write of a frame (a
+     * reply, a report, a pushed frame), with the count of changes that frame carries ([carries];
+     * null for a report, which is not the selection). The changes up to that count are done
+     * when, and only when, the line says the sign has the frame ([provenLast]: every byte was
+     * taken, no piece may have come late, and the first byte was with the transmitter while the
+     * sign listened for it). Changes recorded after the frame was made are not in it and stay
+     * pending. Everything else that can happen to a frame leaves the change where it is.
+     */
+    private fun frameWritten(carries: Long?) {
+        if (carries != null && provenLast) settled = carries
+    }
+
+    /** The other way a pending change ends, and it is not "done": pushes are off, so it is given up. The sign's next request gets the selection as it is then. */
+    private fun dropped() {
+        settled = wanted.get()
+    }
+
+    /** A push has something to do: a change is pending, and the attention alone has not been given for it. */
+    private fun pushWaiting(): Boolean {
+        val count = wanted.get()
+        return count != settled && count != aloneGivenFor
     }
 
     /** Gets the loop out of its sleep: there are events to run. From any thread. */
@@ -399,8 +460,9 @@ class SignLink(
 
     /**
      * Writes one frame to the sign: all of it, or it says that it could not. For [answer], on
-     * the link thread. [reply] says what the frame is to the sign. A full message that went out
-     * is also the push that was wanted (rule 2).
+     * the link thread. [reply] says what the frame is to the sign. A full message is also the
+     * state a push would carry (rule 2); whether the pending change is done with it is not
+     * decided here ([frameWritten]), and not by what this returns: that is about the MESSAGE.
      */
     fun send(frame: String, reply: Reply): Boolean {
         val bytes = frame.toByteArray()
@@ -413,7 +475,7 @@ class SignLink(
         if (tornLast) clock.hold(Behind.TORN_FRAME)
         // A message of another kind ends the sign's chooser display; a chooser message or a report keeps it there
         if (whole) chooserDisplay = reply != Reply.MESSAGE
-        if (whole && reply != Reply.REPORT) pushWanted.set(false)
+        frameWritten(if (reply == Reply.REPORT) null else answerCarries)
         return whole
     }
 
@@ -431,6 +493,14 @@ class SignLink(
             return false
         }
         lastHeardNs = readNs
+        if (pushedFrameInVoid && cameAfterNs - voidBeforeNs < 0) {
+            // SETS: the sign was sending while a pushed frame that was called done was on the
+            // line, or just before or behind it. It may not have that frame (it does not hear
+            // while it sends; or it did not see the attention and asks because bytes went by):
+            // the frame is owed again. Once for one frame, whatever came into it.
+            pushedFrameInVoid = false
+            wanted.incrementAndGet()
+        }
         val last = buffer[count - 1]
         if (last != POLL && last != NEXT) {
             timing.dropped(readNs, buffer, count)
@@ -458,6 +528,8 @@ class SignLink(
         if (stopped) return true
         timing.rx(readNs, lastEmptyReadNs, buffer, count)
         sentFrame = null
+        // The answer is made from here on: a change recorded after this is not in it
+        answerCarries = wanted.get()
         try {
             answer(buffer, count)
         } catch (e: Exception) {
@@ -530,13 +602,18 @@ class SignLink(
         // The EARLIEST the bytes taken so far can have left the line: ten bit times each, from the start of their offer
         var goneAtNs = callNs
         var done = 0
-        // A piece may have been handed over after the line had stood still too long; a write threw
+        // A piece may have been handed over after the line had stood still too long; the first
+        // byte was not, or may not have been, with the transmitter by its time; a write threw
         var late = false
+        var lateStart = false
         var threw = false
         try {
             while (!stopped) {
                 val offerNs = nanoTime()
-                if (done == 0 && firstByNs != null && offerNs - firstByNs > 0) break
+                if (done == 0 && firstByNs != null && offerNs - firstByNs > 0) {
+                    lateStart = true
+                    break
+                }
                 if (offerNs - goneAtNs >= patienceNs || offerNs - frameByNs > 0) break
                 if (writing == Writing.ATTENTION && done > 0 && offerNs - goneAtNs > 0) break
                 val rest = if (done == 0) bytes else bytes.copyOfRange(done, bytes.size)
@@ -544,6 +621,8 @@ class SignLink(
                 if (took > 0) {
                     val returnedNs = nanoTime()
                     clock.wrote(returnedNs, took)
+                    // The first byte may have been handed over as late as its call returned
+                    if (done == 0 && firstByNs != null && returnedNs - firstByNs > 0) lateStart = true
                     // The piece may have gone out as late as its call returned
                     val stoodStillNs = returnedNs - goneAtNs
                     if (done > 0 && (if (writing == Writing.ATTENTION) stoodStillNs > 0 else stoodStillNs >= patienceNs)) late = true
@@ -561,8 +640,10 @@ class SignLink(
         }
         timing.tx(callNs, nanoTime(), done, bytes.size, writing.kind)
         takenLast = done
-        tornLast = threw || late || done in 1 until bytes.size
-        return done == bytes.size && !(late && writing.unasked)
+        lateStartLast = lateStart
+        provenLast = done == bytes.size && !late && !lateStart
+        tornLast = threw || late || done in 1 until bytes.size || (lateStart && writing.unasked && done > 0)
+        return if (writing.unasked) provenLast else done == bytes.size
     }
 
     /** What a write to the sign is: the word of the timing log, and whether it answers a request. */
@@ -582,16 +663,10 @@ class SignLink(
      * on exactly as it does without pushes (the same pauses, the same reads).
      */
     private fun duePush(): Attention? {
-        if (!pushWanted.get()) return null
-        val mode = try {
-            attention()
-        } catch (e: Exception) {
-            // A switch that cannot be asked is off
-            complain("push", e)
-            Attention.OFF
-        }
+        if (!pushWaiting()) return null
+        val mode = switchInForce()
         if (mode == Attention.OFF) {
-            pushWanted.set(false)
+            dropped()
             return null
         }
         return if (nanoTime() - clock.pushAtNs >= 0) mode else null
@@ -601,11 +676,14 @@ class SignLink(
      * One push: the attention ([mode] says how), the guard, the chooser frame. This thread
      * sleeps through the attention and the guard: whatever the sign sends in that time is void
      * (rule 3), so there is nothing to read for.
+     *
+     * Nothing here calls the change done or sets it back: it stays pending through whatever
+     * becomes of the push, and only the frame, judged behind its write, can end it ([frameWritten]).
      */
     private fun push(mode: Attention) {
-        // A change from here on is the next push. None can come before the frame is made:
-        // changes are made by this thread, in events().
-        pushWanted.set(false)
+        // The frame is made from here on: a change recorded after this is not in it, and is the next push
+        val carries = wanted.get()
+        pushedFrameInVoid = false
         val wantedNs = nanoTime()
         val lineWasNs = clock.freeAtNs
         val text = try {
@@ -628,41 +706,54 @@ class SignLink(
         sleepUntil(clock.freeAtNs)
         if (stopped) return
         val guardEndNs = nanoTime()
-        val whole = frame == null || writeAll(frame, Writing.PUSHED_FRAME, null)
-        // Rule 3 lasts until the frame has left the line; with no frame, until the guard is over
+        if (frame == null) {
+            // Leaving: the attention alone, whole. It proves nothing (the sign may not have
+            // seen it), so the change stays pending; but it is not raised a second time for
+            // the same change. Rule 3 lasts until the guard is over.
+            voidBeforeNs = clock.freeAtNs
+            aloneGivenFor = carries
+            clock.hold(Behind.ATTENTION)
+            lastHeardNs = guardEndNs
+            timing.push(wantedNs, callNs, raisedNs, guardEndNs, guardEndNs, 0)
+            log("Pushed attention alone to $name")
+            return
+        }
+        // The sign listens for the first byte only so long after the attention, and then asks
+        val whole = writeAll(frame, Writing.PUSHED_FRAME, callNs + PUSH_FIRST_BYTE_MS * NS_PER_MS)
+        // Rule 3 lasts until the frame has left the line
         voidBeforeNs = clock.freeAtNs
+        frameWritten(carries)
         if (!whole) {
-            complain("push", "the frame was not taken in one piece ($takenLast of ${frame?.size} bytes)")
-            // With its start out the sign waits for the rest; with nothing of it out, this was the attention alone
+            val how = if (lateStartLast) "begun within $PUSH_FIRST_BYTE_MS ms of the attention" else "taken in one piece"
+            complain("push", "the frame was not $how ($takenLast of ${frame.size} bytes)")
+            // With its start out the sign waits for the rest, and with all of it out but late it may have asked
+            // into it; with nothing of it out, this was the attention alone
             return pushFailed(if (tornLast) Behind.TORN_FRAME else Behind.ATTENTION)
         }
+        pushedFrameInVoid = true
         // The sign may be in its chooser display with this message now, as with one it asked for
-        if (frame != null) chooserDisplay = true
+        chooserDisplay = true
         clock.hold(Behind.ATTENTION)
         val doneNs = nanoTime()
         // The short pause from here on: the sign's next request must be told from what came into the frame
         lastHeardNs = doneNs
-        timing.push(wantedNs, callNs, raisedNs, guardEndNs, doneNs, frame?.size ?: 0)
+        timing.push(wantedNs, callNs, raisedNs, guardEndNs, doneNs, frame.size)
         // On the line first, then the log and the screen
-        if (text != null) {
-            log("Pushed >$text< to $name")
-            try {
-                pushed()
-            } catch (e: Exception) {
-                // The frame is out: what the app makes of it must not keep the link from the wire
-                complain("push", e)
-            }
-        } else {
-            log("Pushed attention alone to $name")
+        log("Pushed >$text< to $name")
+        try {
+            pushed()
+        } catch (e: Exception) {
+            // The frame is out: what the app makes of it must not keep the link from the wire
+            complain("push", e)
         }
     }
 
     /**
-     * Rule 4: the push is still wanted. The next try waits for what the sign needs behind what
-     * this one put on the line ([behind]); when it put nothing there (null), [ERROR_PAUSE_MS].
+     * Rule 4: the push did not go out, and the change is pending as it was. The next try waits
+     * for what the sign needs behind what this one put on the line ([behind]); when it put
+     * nothing there (null), [ERROR_PAUSE_MS].
      */
     private fun pushFailed(behind: Behind?) {
-        pushWanted.set(true)
         if (behind != null) clock.hold(behind) else clock.holdFrom(nanoTime(), ERROR_PAUSE_MS)
     }
 
@@ -695,7 +786,7 @@ class SignLink(
     /** One pause of the loop: short while the sign is talking or a push is waiting its turn, and no longer than that turn is away. */
     private fun pause() {
         val now = nanoTime()
-        val pushing = pushWanted.get()
+        val pushing = pushWaiting()
         val talking = pushing || now - lastHeardNs < ACTIVE_WINDOW_MS * NS_PER_MS
         var nanos = (if (talking) ACTIVE_PAUSE_MS else IDLE_PAUSE_MS) * NS_PER_MS
         if (pushing) {
@@ -715,12 +806,16 @@ class SignLink(
         }
     }
 
-    /** A failure: once when it starts, then at most every [WARN_EVERY_MS]. A dead port must not flood the log. */
+    /**
+     * A failure: each kind ([what]) once when it starts, then at most every [WARN_EVERY_MS]. A
+     * dead port must not flood the log, and it fails in more than one way at a time (a write
+     * that throws is also a push that failed): each kind has its own limit.
+     */
     private fun complain(what: String, error: Any) {
         val now = nanoTime()
-        if (what != lastWarning || now - lastWarningNs >= WARN_EVERY_MS * NS_PER_MS) {
-            lastWarning = what
-            lastWarningNs = now
+        val last = lastWarningNs[what]
+        if (last == null || now - last >= WARN_EVERY_MS * NS_PER_MS) {
+            lastWarningNs[what] = now
             warn("Sign link: $what failed on $name: $error")
         }
     }
@@ -732,6 +827,18 @@ class SignLink(
 
         /** From the end of the attention to the first byte of the frame: the sign empties its buffer in it. */
         const val ATTN_GUARD_MS: Int = 20
+
+        /**
+         * From the START of the attention (before the call that begins it: the earliest the line
+         * can have gone LOW) to the first byte of the pushed frame being with the transmitter.
+         * The sign listens 150 ms for that byte and then asks with `~` (the firmware's lists,
+         * lm-t7f ROUND-3-PR6-fixes-lists, rows 4 and 7: "150 ms from the line going HIGH",
+         * "150 ms from the LOW"; the stricter of the two is counted here, from the LOW's start).
+         * A frame begun later can run into that request. 30 ms are kept in hand for what the
+         * link cannot see: where in its call the write handed the byte over, and the sign's own
+         * clock. Measured on the sign: an attention and its guard take 70 to 90 ms.
+         */
+        const val PUSH_FIRST_BYTE_MS: Int = 120
 
         /**
          * From the end of what one push put on the line to the start of the next. The firmware

@@ -676,6 +676,8 @@ class SignLinkPushTest {
         stallAtWrite[2] = 86 * ms
         command(0, next)
         arrives(0, "~")
+        runUntil(200)
+        takesPerWrite = Int.MAX_VALUE // from here on the transmitter takes what it is given
         runUntil(3_000)
         assertEquals(listOf(40, 18), txs.take(2).map { it.bytes.size })
         assertTrue(txs[1].leavesFromNs - txs[0].goneAtNs >= 50 * ms)
@@ -695,6 +697,8 @@ class SignLinkPushTest {
         stallAtWrite[2] = 86 * ms
         command(0, null)
         arrives(0, "~")
+        runUntil(200)
+        takesPerWrite = Int.MAX_VALUE
         runUntil(2_500)
         assertEquals(listOf("N".repeat(100)), taken)
         assertEquals(listOf(40, 40, 20), txs.take(3).map { it.bytes.size })
