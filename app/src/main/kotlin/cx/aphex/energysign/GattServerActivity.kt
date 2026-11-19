@@ -17,23 +17,18 @@
 package cx.aphex.energysign
 
 import android.bluetooth.BluetoothDevice
-import android.content.ComponentName
-import android.content.Context
-import android.content.Intent
-import android.content.ServiceConnection
 import android.os.Bundle
-import android.os.IBinder
 import android.text.format.DateFormat
 import android.view.KeyEvent
 import android.view.KeyEvent.ACTION_DOWN
 import androidx.appcompat.app.AppCompatActivity
 import com.chibatching.kotpref.Kotpref
-import cx.aphex.energysign.beatlinkdata.BeatLinkDataConsumerServerService
 import cx.aphex.energysign.databinding.ActivityServerBinding
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.observeNonNull
 import cx.aphex.energysign.keyboard.KeyboardManager
 import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers
+import io.reactivex.rxjava3.disposables.Disposable
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -41,7 +36,7 @@ import java.util.concurrent.TimeUnit
 
 class GattServerActivity : AppCompatActivity() {
 
-    private val viewModel by lazy(LazyThreadSafetyMode.NONE) { (application as MainApplication).signViewModel() }
+    private var logSubscription: Disposable? = null
     private val keyboardManager = KeyboardManager
 
     /* Local UI */
@@ -68,9 +63,9 @@ class GattServerActivity : AppCompatActivity() {
         // Devices with a display should not go to sleep
 //        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        Intent(this, BeatLinkDataConsumerServerService::class.java).also { intent ->
-            bindService(intent, connection, Context.BIND_AUTO_CREATE)
-        }
+        val app = application as MainApplication
+        val viewModel = app.signViewModel()
+        app.bindBeatLink()
 
         viewModel.currentString.observeNonNull(this) {
             binding.currentString.text = STRING_PREFIX + it
@@ -84,7 +79,7 @@ class GattServerActivity : AppCompatActivity() {
             binding.mtuStatus.text = "Ⓜ️${it.mtu ?: "20?"}"
         }
 
-        ScreenLogger.logLines
+        logSubscription = ScreenLogger.logLines
             .observeOn(AndroidSchedulers.mainThread())
             .subscribe { logLine ->
                 updateTimeView() //TODO mebbe run on a timer
@@ -100,17 +95,9 @@ class GattServerActivity : AppCompatActivity() {
     }
 
 
-    /** Defines callbacks for service binding, passed to bindService()  */
-    private val connection = object : ServiceConnection {
-
-        override fun onServiceConnected(className: ComponentName, service: IBinder) {
-            // We've bound to LocalService, cast the IBinder and get LocalService instance
-            val binder = service as BeatLinkDataConsumerServerService.ServerBinder
-
-        }
-
-        override fun onServiceDisconnected(arg0: ComponentName) {
-        }
+    override fun onDestroy() {
+        logSubscription?.dispose()
+        super.onDestroy()
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {

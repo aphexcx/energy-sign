@@ -30,7 +30,11 @@ internal class SignStartup(private val warn: (String) -> Unit) {
             action()
         } catch (failure: Throwable) {
             // Library exception messages can contain user data. Report only the type.
-            runCatching { warn("$step failed (${failure.javaClass.name}), sign link continues") }
+            failed(step, failure.javaClass.name)
             null
         }
+
+    fun failed(step: String, reason: String) {
+        runCatching { warn("$step failed ($reason), sign link continues") }
+    }
 }

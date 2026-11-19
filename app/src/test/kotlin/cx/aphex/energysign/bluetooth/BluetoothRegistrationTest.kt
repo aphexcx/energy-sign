@@ -4,7 +4,6 @@ import android.bluetooth.BluetoothGatt
 import cx.aphex.energysign.SignStartup
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /** Android has separate return values and callbacks for the same registration attempt. */
@@ -69,7 +68,7 @@ class BluetoothRegistrationTest {
         session.adapterOn()
         assertEquals(3, registrations.size)
         assertEquals(2, closed)
-        assertTrue(warnings.isEmpty() || warnings.all { "pending" in it })
+        assertTrue(warnings.isEmpty())
     }
 
     @Test

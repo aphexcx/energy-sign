@@ -14,40 +14,43 @@ data class BluetoothStatusUpdate(val btDevice: BluetoothDevice?, val mtu: Int?)
 /** Gatt Server, plus callbacks to handle incoming requests to the GATT server.
  * All read/write requests for characteristics and descriptors are handled here.
  */
-class EnergySignBluetoothGattServer(
+internal class EnergySignBluetoothGattServer(
     val context: Context,
     val bluetoothManager: BluetoothManager,
-    val viewModel: MainViewModel
+    val viewModel: MainViewModel,
+    internal val writes: PublishRelay<GattWrite> = PublishRelay.create(),
+    private val serviceAdded: (Int) -> Unit = {},
 ) : BluetoothGattServerCallback() {
 
     @Volatile
     private var gattServer: BluetoothGattServer? = null
-    internal val writes: PublishRelay<GattWrite> = PublishRelay.create()
-
-    val bluetoothStatusUpdates: PublishRelay<BluetoothStatusUpdate> = PublishRelay.create()
+    @Volatile
+    private var closed = false
 
     /* Collection of notification subscribers */
     private val registeredDevices = mutableSetOf<BluetoothDevice>()
 
-    fun start() {
-        gattServer = bluetoothManager.openGattServer(context, this)
-        checkNotNull(gattServer) { "Bluetooth GATT server unavailable" }.let { server ->
-            check(server.addService(NordicUartServiceProfile.createNordicUartService())) {
-                "Bluetooth GATT service registration refused"
-            }
-        }
+    fun start(): Boolean {
+        val server = checkNotNull(bluetoothManager.openGattServer(context, this)) { "Bluetooth GATT server unavailable" }
+        gattServer = server
+        return server.addService(NordicUartServiceProfile.createNordicUartService())
+    }
+
+    override fun onServiceAdded(status: Int, service: BluetoothGattService) {
+        if (!closed && service.uuid == NordicUartServiceProfile.NORDIC_UART_SERVICE_UUID) serviceAdded(status)
     }
 
     fun stop() {
+        closed = true
         val server = gattServer
         gattServer = null
         server?.close()
     }
 
     override fun onMtuChanged(device: BluetoothDevice?, mtu: Int) {
+        if (closed) return
         logD("MTU Changed! New MTU: $mtu")
-//        viewModel.onBtStatusUpdate(it)
-        bluetoothStatusUpdates.accept(
+        viewModel.onBtStatusUpdate(
             BluetoothStatusUpdate(
                 btDevice = device,
                 mtu = mtu
@@ -60,6 +63,7 @@ class EnergySignBluetoothGattServer(
         status: Int,
         newState: Int
     ) {
+        if (closed) return
         when (newState) {
             BluetoothProfile.STATE_CONNECTED -> {
                 logD("BluetoothDevice CONNECTED: $bluetoothDevice")
@@ -97,7 +101,7 @@ class EnergySignBluetoothGattServer(
                                 }
                             }
                         })
-                bluetoothStatusUpdates.accept(
+                viewModel.onBtStatusUpdate(
                     BluetoothStatusUpdate(
                         btDevice = bluetoothDevice,
                         mtu = null
@@ -108,7 +112,7 @@ class EnergySignBluetoothGattServer(
                 logD("BluetoothDevice DISCONNECTED: $bluetoothDevice")
                 //Remove bluetoothDevice from any active subscriptions
                 registeredDevices.remove(bluetoothDevice)
-                bluetoothStatusUpdates.accept(
+                viewModel.onBtStatusUpdate(
                     BluetoothStatusUpdate(
                         btDevice = bluetoothDevice,
                         mtu = null
@@ -127,6 +131,7 @@ class EnergySignBluetoothGattServer(
         offset: Int,
         value: ByteArray
     ) {
+        if (closed) return
         val server = gattServer
         val status = if (characteristic.uuid == NordicUartServiceProfile.NORDIC_UART_TX_UUID) {
             logD("Uart TX characteristic write: [${String(value)}]")
@@ -155,6 +160,7 @@ class EnergySignBluetoothGattServer(
         device: BluetoothDevice, requestId: Int, offset: Int,
         characteristic: BluetoothGattCharacteristic
     ) {
+        if (closed) return
         when (characteristic.uuid) {
             StringServiceProfile.CHARACTERISTIC_READER_UUID -> {
                 logD("Read String")
@@ -205,6 +211,7 @@ class EnergySignBluetoothGattServer(
         device: BluetoothDevice, requestId: Int, offset: Int,
         descriptor: BluetoothGattDescriptor
     ) {
+        if (closed) return
         when (descriptor.uuid) {
             CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR -> {
                 logD("Config descriptor read")
@@ -257,6 +264,7 @@ class EnergySignBluetoothGattServer(
         offset: Int,
         value: ByteArray
     ) {
+        if (closed) return
         if (descriptor.uuid == CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR) {
             if (Arrays.equals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE, value)) {
                 logD("Subscribe device to notifications: $device")
