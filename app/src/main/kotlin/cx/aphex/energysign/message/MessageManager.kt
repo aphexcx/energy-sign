@@ -41,7 +41,7 @@ class MessageManager(
     private var nowPlayingTrack: Message.NowPlayingTrackMessage? = null
 
     private val currentIdx = atomic<Int>(0)
-    private class StoredSelection(var message: Message.Marquee, val lastFollowUpNumber: Long) {
+    private class StoredSelection(var message: Message.Marquee, var attemptIndex: Int, val lastFollowUpNumber: Long) {
         // The busy start lost three consecutive writes. A fourth failure yields to the next slot.
         var retriesLeft = 3
     }
@@ -313,7 +313,7 @@ class MessageManager(
             } else if (!msgRepo.hasNewerOneTimeAtFront(retry.lastFollowUpNumber)) {
                 // The queue is empty or its front is an effect of this selection. Anything
                 // pushed ahead of that effect gets the normal one-time path below.
-                getIdxAndAdvance()
+                retry.attemptIndex = getIdxAndAdvance()
                 retry.retriesLeft--
                 retryStored = null
                 takenFromList = retry
@@ -418,7 +418,7 @@ class MessageManager(
         }
         // We took this from the list with an empty one-time queue. Every item queued since
         // then belongs to this first selection. The retry must not generate those effects again.
-        takenFromList = StoredSelection(currentMsg, msgRepo.lastOneTimeNumber())
+        takenFromList = StoredSelection(currentMsg, idx, msgRepo.lastOneTimeNumber())
         return currentMsg
 
     }
@@ -476,12 +476,11 @@ class MessageManager(
     fun returnUnsent(message: Message) {
         val selection = takenFromList
         if (selection != null && message === selection.message) {
-            if (selection.retriesLeft > 0) {
-                val place = msgRepo.marqueeMessages.indexOfFirst { it === message }
-                if (place >= 0) {
-                    currentIdx.value = place
-                    retryStored = selection
-                }
+            // The owner reports this write before running another event. Between attempts
+            // an insertion can move the message, so each attempt records its own slot.
+            if (selection.retriesLeft > 0 && msgRepo.marqueeMessages.getOrNull(selection.attemptIndex) === message) {
+                currentIdx.value = selection.attemptIndex
+                retryStored = selection
             }
             return
         }

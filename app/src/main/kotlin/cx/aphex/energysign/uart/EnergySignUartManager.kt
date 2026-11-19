@@ -71,7 +71,9 @@ class EnergySignUartManager(
         wire = wire,
         baud = UART_BAUD_RATE,
         name = UART_DEVICE_NAME,
-        events = { owner.drain { error -> logW("A change to the messages failed: $error", error) } },
+        events = { stopped ->
+            owner.drain(stopped = stopped) { error -> logW("A change to the messages failed: $error", error) }
+        },
         answer = ::answer,
         chooserFrame = { viewModel.chooserFrame() },
         pushed = { viewModel.onChooserPushed() },
