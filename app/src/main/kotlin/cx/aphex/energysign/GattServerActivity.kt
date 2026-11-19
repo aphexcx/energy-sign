@@ -119,7 +119,7 @@ class GattServerActivity : AppCompatActivity() {
     }
 
     private fun BluetoothDevice?.toUiString(): String {
-        return this?.let { "📲${it.name ?: ""}${it}" } ?: "📴"
+        return this?.let { "📲${runCatching { it.name }.getOrNull().orEmpty()}$it" } ?: "📴"
     }
 
     private lateinit var timeFormat: SimpleDateFormat

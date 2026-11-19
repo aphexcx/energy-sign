@@ -86,39 +86,16 @@ class EnergySignBluetoothManager(
     private val bondStateReceiver = object : BroadcastReceiver() {
 
         override fun onReceive(context: Context, intent: Intent) {
-
-            val bluetoothDevice: BluetoothDevice =
-                intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE) ?: return
-            val type =
-                intent.getIntExtra(BluetoothDevice.EXTRA_PAIRING_VARIANT, BluetoothDevice.ERROR)
-            // type appears to be 3 which is [PAIRING_VARIANT_CONSENT]
-
-            when (intent.action) {
-                BluetoothDevice.ACTION_PAIRING_REQUEST -> {
-                    val pinHasBeenSet = startup.optional("Bluetooth pairing PIN") { bluetoothDevice.setPin(BLE_PIN.toByteArray()) }
-//                    abortBroadcast()
-//                    val bondingWillBegin = bluetoothDevice.createBond()
-//                    logD("Starting bond=$bondingWillBegin")
-                    logD("PIN entered result: $pinHasBeenSet")
-                }
-                BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
-                    when (bluetoothDevice.bondState) {
-                        BluetoothDevice.BOND_BONDING -> {
-                            logD("Bonding with remote device ${bluetoothDevice.address}...")
-                        }
-                        BluetoothDevice.BOND_BONDED -> {
-                            logD("BONDED with remote device ${bluetoothDevice.address}!")
-                        }
-                        BluetoothDevice.BOND_NONE -> {
-                            logD("Remote device ${bluetoothDevice.address} is no longer bonded.")
-                        }
+            startup.optional("Bluetooth pairing broadcast") {
+                val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
+                    ?: return@optional
+                when (intent.action) {
+                    BluetoothDevice.ACTION_PAIRING_REQUEST -> {
+                        check(device.setPin(BLE_PIN.toByteArray()))
+                        logD("Pairing PIN submitted")
                     }
-                }
-                BluetoothDevice.ACTION_FOUND -> {
-                    // MAC address
-                    logD("Bluetooth device found!")
-                    logD("Device Name: >${bluetoothDevice.name}<")
-                    logD("deviceHardwareAddress >${bluetoothDevice.address}<")
+                    BluetoothDevice.ACTION_BOND_STATE_CHANGED -> logD("Bluetooth bond state: ${device.bondState}")
+                    BluetoothDevice.ACTION_FOUND -> logD("Bluetooth device found: ${device.name.orEmpty()}")
                 }
             }
         }

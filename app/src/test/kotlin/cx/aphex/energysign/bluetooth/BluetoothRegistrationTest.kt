@@ -1,6 +1,12 @@
 package cx.aphex.energysign.bluetooth
 
 import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattService
+import android.bluetooth.BluetoothManager
+import android.content.ContextWrapper
+import cx.aphex.energysign.MainViewModel
+import org.objenesis.ObjenesisStd
+import java.util.UUID
 import cx.aphex.energysign.SignStartup
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
@@ -115,6 +121,51 @@ class BluetoothRegistrationTest {
         advertisements.last()(0)
         session.adapterOn()
         assertEquals(0, closed)
+        assertEquals(1, registrations.size)
+    }
+
+    @Test
+    fun `only the UART result from the current Android server can start advertising`() {
+        val android = ObjenesisStd()
+        val manager = android.newInstance(BluetoothManager::class.java)
+        val model = android.newInstance(MainViewModel::class.java)
+        val servers = mutableListOf<EnergySignBluetoothGattServer>()
+        fun service(id: UUID) = object : BluetoothGattService(id, SERVICE_TYPE_PRIMARY) {
+            override fun getUuid() = id
+        }
+        val uart = service(NordicUartServiceProfile.NORDIC_UART_SERVICE_UUID)
+        val session = BluetoothSession(SignStartup(warnings::add), {}, {}, { true }, { false },
+            openGatt = { added ->
+                servers += EnergySignBluetoothGattServer(ContextWrapper(null), manager, model, serviceAdded = added)
+                true
+            },
+            advertise = { _, done -> advertisements += done },
+            closeServices = { servers.last().stop() },
+        )
+        session.start()
+        val original = servers.single()
+        original.onServiceAdded(0, service(UUID.randomUUID()))
+        assertTrue(advertisements.isEmpty())
+        original.onServiceAdded(BluetoothGatt.GATT_FAILURE, uart)
+        session.adapterOn()
+        original.onServiceAdded(0, uart)
+        assertTrue(advertisements.isEmpty())
+        servers.last().onServiceAdded(0, uart)
+        assertEquals(1, advertisements.size)
+    }
+
+    @Test
+    fun `accepted enable waits for the ON broadcast and an absent broadcast cannot publish GATT`() {
+        var enableCalls = 0
+        val session = BluetoothSession(SignStartup(warnings::add), {}, {}, { false }, { enableCalls++; true },
+            openGatt = { added -> registrations += added; true },
+            advertise = { _, done -> advertisements += done }, closeServices = {},
+        )
+        session.start()
+        assertEquals(1, enableCalls)
+        assertTrue(registrations.isEmpty())
+        assertTrue(advertisements.isEmpty())
+        session.adapterOn()
         assertEquals(1, registrations.size)
     }
 }

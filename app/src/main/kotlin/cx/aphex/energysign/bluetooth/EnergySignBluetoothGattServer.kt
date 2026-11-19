@@ -1,9 +1,12 @@
 package cx.aphex.energysign.bluetooth
 
 import android.bluetooth.*
+import android.os.Handler
+import android.os.Looper
 import android.content.Context
 import com.jakewharton.rxrelay3.PublishRelay
 import cx.aphex.energysign.MainViewModel
+import cx.aphex.energysign.SignStartup
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
 import java.util.*
@@ -27,8 +30,12 @@ internal class EnergySignBluetoothGattServer(
     @Volatile
     private var closed = false
 
+    private val startup = SignStartup { logW(it) }
+    private val mainThread = Handler(Looper.getMainLooper())
+    private val mtuClients = mutableMapOf<BluetoothDevice, PeerMtu>()
+
     /* Collection of notification subscribers */
-    private val registeredDevices = mutableSetOf<BluetoothDevice>()
+    private val registeredDevices = Collections.synchronizedSet(mutableSetOf<BluetoothDevice>())
 
     fun start(): Boolean {
         val server = checkNotNull(bluetoothManager.openGattServer(context, this)) { "Bluetooth GATT server unavailable" }
@@ -42,6 +49,9 @@ internal class EnergySignBluetoothGattServer(
 
     fun stop() {
         closed = true
+        mtuClients.values.forEach { it.stop() }
+        mtuClients.clear()
+        registeredDevices.clear()
         val server = gattServer
         gattServer = null
         server?.close()
@@ -63,61 +73,24 @@ internal class EnergySignBluetoothGattServer(
         status: Int,
         newState: Int
     ) {
-        if (closed) return
-        when (newState) {
-            BluetoothProfile.STATE_CONNECTED -> {
-                logD("BluetoothDevice CONNECTED: $bluetoothDevice")
-                bluetoothDevice
-                    .connectGatt(
-                        context,
-                        true,
-                        object : BluetoothGattCallback() {
-                            override fun onMtuChanged(
-                                gatt: BluetoothGatt?,
-                                mtu: Int,
-                                status: Int
-                            ) {
-                                super.onMtuChanged(gatt, mtu, status)
-                                this@EnergySignBluetoothGattServer.onMtuChanged(
-                                    bluetoothDevice,
-                                    mtu
-                                )
-                            }
-
-                            override fun onConnectionStateChange(
-                                gatt: BluetoothGatt?,
-                                status: Int,
-                                newState: Int
-                            ) {
-                                super.onConnectionStateChange(gatt, status, newState)
-                                when (newState) {
-                                    BluetoothProfile.STATE_CONNECTED -> {
-                                        logD(
-                                            "Connected to remote device ${gatt?.device?.name
-                                                ?: ""}, requesting MTU=512..."
-                                        )
-                                        gatt?.requestMtu(512)
-                                    }
-                                }
-                            }
-                        })
-                viewModel.onBtStatusUpdate(
-                    BluetoothStatusUpdate(
-                        btDevice = bluetoothDevice,
-                        mtu = null
+        mainThread.post {
+            if (closed) return@post
+            when (newState) {
+                BluetoothProfile.STATE_CONNECTED -> {
+                    if (status != BluetoothGatt.GATT_SUCCESS || bluetoothDevice in mtuClients) return@post
+                    val peer = PeerMtu(startup,
+                        post = { action -> mainThread.post(action) },
+                        changed = { mtu -> onMtuChanged(bluetoothDevice, mtu) },
                     )
-                )
-            }
-            BluetoothProfile.STATE_DISCONNECTED -> {
-                logD("BluetoothDevice DISCONNECTED: $bluetoothDevice")
-                //Remove bluetoothDevice from any active subscriptions
-                registeredDevices.remove(bluetoothDevice)
-                viewModel.onBtStatusUpdate(
-                    BluetoothStatusUpdate(
-                        btDevice = bluetoothDevice,
-                        mtu = null
-                    )
-                )
+                    mtuClients[bluetoothDevice] = peer
+                    viewModel.onBtStatusUpdate(BluetoothStatusUpdate(bluetoothDevice, null))
+                    peer.start { callback -> bluetoothDevice.connectGatt(context, true, callback) }
+                }
+                BluetoothProfile.STATE_DISCONNECTED -> {
+                    mtuClients.remove(bluetoothDevice)?.stop()
+                    registeredDevices.remove(bluetoothDevice)
+                    viewModel.onBtStatusUpdate(BluetoothStatusUpdate(null, null))
+                }
             }
         }
     }
@@ -215,7 +188,7 @@ internal class EnergySignBluetoothGattServer(
         when (descriptor.uuid) {
             CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR -> {
                 logD("Config descriptor read")
-                val result = device.createBond()
+                val result = startup.optional("Bluetooth bonding") { device.createBond() } == true
                 if (result) {
                     logD("Creating bond with remote device ${device.address}...")
                 } else {
@@ -265,39 +238,22 @@ internal class EnergySignBluetoothGattServer(
         value: ByteArray
     ) {
         if (closed) return
-        if (descriptor.uuid == CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR) {
-            if (Arrays.equals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE, value)) {
-                logD("Subscribe device to notifications: $device")
+        val status = when {
+            descriptor.uuid != CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR -> BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED
+            preparedWrite -> BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED
+            offset != 0 -> BluetoothGatt.GATT_INVALID_OFFSET
+            value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) -> {
                 registeredDevices.add(device)
-            } else if (Arrays.equals(
-                    BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE,
-                    value
-                )
-            ) {
-                logD("Unsubscribe device from notifications: $device")
+                BluetoothGatt.GATT_SUCCESS
+            }
+            value.contentEquals(BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE) -> {
                 registeredDevices.remove(device)
+                BluetoothGatt.GATT_SUCCESS
             }
-
-            if (responseNeeded) {
-                gattServer?.sendResponse(
-                    device,
-                    requestId,
-                    BluetoothGatt.GATT_SUCCESS,
-                    0, value
-                ) //TODO Right response here?
-            }
-        } else {
-            logW("Unknown descriptor write request")
-            if (responseNeeded) {
-                gattServer?.sendResponse(
-                    device,
-                    requestId,
-                    BluetoothGatt.GATT_FAILURE,
-                    0, null
-                )
-            }
+            else -> BluetoothGatt.GATT_FAILURE
+        }
+        if (responseNeeded) {
+            gattServer?.sendResponse(device, requestId, status, 0, if (status == BluetoothGatt.GATT_SUCCESS) value else null)
         }
     }
-
 }
-
