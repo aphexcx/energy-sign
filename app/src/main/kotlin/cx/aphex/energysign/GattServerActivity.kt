@@ -122,6 +122,8 @@ class GattServerActivity : AppCompatActivity() {
                 event.keyCode == KeyEvent.KEYCODE_ENTER -> keyboardManager.submitKeyboardInput()
                 event.keyCode == KeyEvent.KEYCODE_DEL -> keyboardManager.deleteKey()
                 event.keyCode == KeyEvent.KEYCODE_ESCAPE -> keyboardManager.escapeKey()
+                // (a key that is held down is one press: no jump after jump, no game after game)
+                event.keyCode == KeyEvent.KEYCODE_DPAD_UP -> if (event.repeatCount == 0) keyboardManager.upArrow()
                 event.keyCode == KeyEvent.KEYCODE_SPACE -> keyboardManager.processNewKeyboardKey(' ')
                 event.isPrintingKey -> keyboardManager.processNewKeyboardKey(key)
                 else -> return true // super.dispatchKeyEvent(event)

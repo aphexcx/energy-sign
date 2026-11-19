@@ -671,7 +671,10 @@ class MessageManagerOwnerTest {
         typedAt: Boolean = false,
         /** Track updates come on the owner's own thread, which is answered at once: for the tables of many cells. */
         private val fromTheOwner: Boolean = false,
+        /** The app's clock is [now], which the test moves: for the game. */
+        clocked: Boolean = false,
     ) {
+        var now = 1_000L
         val unsaved = mutableListOf<Runnable>()
         val repo = if (typedAt) this@MessageManagerOwnerTest.repo else MessageRepository(saver = Executor { unsaved += it })
         val manager: MessageManager
@@ -679,14 +682,18 @@ class MessageManagerOwnerTest {
         init {
             // (a MessageManager takes the keyboard's Enter for itself; the one of this test keeps it)
             val submitted = KeyboardManager.onSubmitted
-            manager = MessageManager(
-                object : ContextWrapper(null) {
-                    override fun getFilesDir(): File = home
-                },
-                repo,
-                owner,
-            )
+            val upArrow = KeyboardManager.onUpArrow
+            val taken = KeyboardManager.takenByTheGame
+            val files = object : ContextWrapper(null) {
+                override fun getFilesDir(): File = home
+            }
+            manager = if (clocked) MessageManager(files, repo, owner, nowMs = { now }) else MessageManager(files, repo, owner)
             KeyboardManager.onSubmitted = submitted
+            // (and the keys of the game are those of the app the keyboard types at)
+            if (!typedAt) {
+                KeyboardManager.onUpArrow = upArrow
+                KeyboardManager.takenByTheGame = taken
+            }
         }
 
         fun phone(command: String) = manager.processNewBytes(command.toByteArray())
@@ -2196,6 +2203,240 @@ class MessageManagerOwnerTest {
             running.post(stopOfTheTrack)
             assertEquals(listOf("SECOND", "FIRST", "SECOND"), running.repo.oneTimeMessages.map { it.str })
         }
+    }
+
+    // ---- THE JUMP GAME ON THE SIGN (es-1jr): the game answers the sign's requests itself and
+    // never takes from the queue, so what arrives during a game waits and is shown once.
+
+    private val INTRO = listOf("D", "READY?", "JUMP!")
+    private val GAME_OVER = listOf("X", "GAME${Message.VT}OVER", "SCORE 0", "BEST 0", "")
+    private val STORED = "(a stored message)"
+
+    /** An app the test's keyboard types at, with the test's clock, one stored message and nothing queued. */
+    private fun gameApp(home: File = newFilesDir()): App {
+        repo.marqueeMessages.clear()
+        repo.marqueeMessages.add(Message.Marquee.User("A MESSAGE"))
+        repo.oneTimeMessages.clear()
+        return App(home, typedAt = true, clocked = true)
+    }
+
+    /** One request of the sign, [ms] after the last: what it gets, in a word. */
+    private fun asks(app: App, ms: Long = 50): String {
+        app.now += ms
+        return when (val answer = app.manager.getNextMessage()) {
+            is Message.GameFrame -> if (answer.str[0] != '0') "frame, in the air" else "frame"
+            is Message.KeyboardEcho -> "echo ${answer.str}"
+            is Message.Chooser -> "chooser"
+            is Message.Marquee -> STORED
+            else -> answer.str
+        }
+    }
+
+    /** The sign goes on asking, nobody plays: everything it gets up to the next stored message, frames that follow each other as one word. */
+    private fun untilStored(app: App): List<String> {
+        val got = mutableListOf<String>()
+        repeat(80) {
+            val answer = asks(app, 400).removeSuffix(", in the air")
+            if (answer != "frame" || got.lastOrNull() != "frame") got += answer
+            if (answer == STORED) return got
+        }
+        return got + "(and no end)"
+    }
+
+    private fun command(app: App, text: String) {
+        app.phone(text)
+        ownerRuns()
+    }
+
+    /** !game, the intro's three messages, the runner running in, and the first frame of the game itself. */
+    private fun intoPlay(app: App) {
+        command(app, "!game")
+        check((1..3).map { asks(app) } == INTRO)
+        check(asks(app) == "frame") // the runner runs in
+        check(asks(app, 600) == "frame") // and the game is on
+    }
+
+    /** The states a game can be in when something happens, and how to get an app there. */
+    private val gameStates: Map<String, (App) -> Unit> = linkedMapOf(
+        "no game" to { _ -> },
+        "the intro" to { app -> command(app, "!game"); check(asks(app) == "D") },
+        "a game, on the ground" to { app -> intoPlay(app) },
+        "a game, in the air" to { app -> intoPlay(app); command(app, "!jump"); check(asks(app, 100) == "frame, in the air") },
+        // nobody plays: the hit, its picture for a moment, then the show's first message
+        "the closing show" to { app -> intoPlay(app); check(asks(app, 10_000) == "frame"); check(asks(app, 800) == "X") },
+        "the game switched off" to { app -> command(app, "!game off") },
+        "the chooser" to { app -> command(app, "!choose") },
+        "somebody typing" to { _ -> KeyboardManager.processNewKeyboardKey('x'); ownerRuns() },
+    )
+
+    private fun afterAGameCell() {
+        typingOver()
+        ownerRuns()
+    }
+
+    @Test
+    fun `the button and the start, in every state of the game`() {
+        val presses: Map<String, (App) -> Unit> = linkedMapOf(
+            "!game" to { app -> command(app, "!game") },
+            "!jump" to { app -> command(app, "!jump") },
+            "!j" to { app -> command(app, "!j") },
+            "the up arrow" to { _ -> KeyboardManager.upArrow(); ownerRuns() },
+            "the space bar" to { _ -> KeyboardManager.processNewKeyboardKey(' '); ownerRuns() },
+        )
+        // what the sign's next request gets, for !game, !jump, !j, the up arrow, the space bar
+        val jumps = "frame, in the air"
+        val expected = mapOf(
+            // !game and the up arrow start a game; a jump without a game is nothing; a space is typed
+            "no game" to listOf("D", STORED, STORED, "D", "echo  _"),
+            // nothing starts twice and nobody jumps before the game: the intro goes on, whatever is pressed
+            "the intro" to listOf("READY?", "READY?", "READY?", "READY?", "READY?"),
+            // a second !game is nothing; the space bar is the button while a game is on, and types nothing
+            "a game, on the ground" to listOf("frame", jumps, jumps, jumps, jumps),
+            "a game, in the air" to listOf(jumps, jumps, jumps, jumps, jumps),
+            // !game is the next game at once; a jump that comes a moment after the hit is nothing, on any key
+            "the closing show" to listOf("D", GAME_OVER[1], GAME_OVER[1], GAME_OVER[1], GAME_OVER[1]),
+            "the game switched off" to listOf(STORED, STORED, STORED, STORED, "echo  _"),
+            // the sign is somebody else's: no game begins behind it, not later either
+            "the chooser" to listOf(STORED, STORED, STORED, STORED, "echo  _"),
+            "somebody typing" to listOf("", "", "", "", "echo x _"),
+        )
+        val wrong = mutableListOf<String>()
+        for ((state, reach) in gameStates) presses.entries.forEachIndexed { i, (press, pressed) ->
+            val app = gameApp()
+            try {
+                reach(app)
+                pressed(app)
+                // what was taken by somebody else is given back first: was a game started behind it?
+                if (state == "the chooser") command(app, "!endchoose")
+                if (state == "somebody typing" && press != "the space bar") endTyping()
+                val got = asks(app)
+                if (got != expected.getValue(state)[i]) wrong += "$state, $press: the sign gets '$got', not '${expected.getValue(state)[i]}'"
+            } finally {
+                afterAGameCell()
+            }
+        }
+
+        assertEquals(emptyList(), wrong)
+    }
+
+    @Test
+    fun `what arrives during a game either takes the sign and ends the game, or waits and is shown once after it`() {
+        class Arrives(
+            val what: String,
+            /** Null: the game goes on, and [then] is shown after it. Otherwise what the next request gets in place of the game. */
+            val takesTheSign: String? = null,
+            /** What the sign gets after the game (or after the sign was given back), before the next stored message. */
+            val then: List<String> = emptyList(),
+            /** For what took the sign: it is given back. */
+            val givenBack: (App) -> Unit = {},
+            val happens: (App) -> Unit,
+        )
+        val newMessage = "NEW${Message.VT}MSG${Message.VT}"
+        val arrivals = listOf(
+            Arrives("the chooser", takesTheSign = "chooser", givenBack = { command(it, "!endchoose") }) { command(it, "!choose") },
+            // (the stars are the keyboard's own, at the end of typing)
+            Arrives("a typed key", takesTheSign = "echo x_", then = listOf(""), givenBack = { endTyping() }) { KeyboardManager.processNewKeyboardKey('x'); ownerRuns() },
+            Arrives("!game off", takesTheSign = STORED) { command(it, "!game off") },
+            Arrives("an ad command", then = listOf("AD")) { command(it, "!$A\n${O}AD") },
+            Arrives("!pause") { command(it, "!pause") },
+            Arrives("a new message", then = listOf(newMessage)) { command(it, "HELLO") },
+            Arrives("a new message, then the space bar", then = listOf(newMessage)) { command(it, "HELLO"); KeyboardManager.processNewKeyboardKey(' '); ownerRuns() },
+            Arrives("a message that is a query for the AI", then = listOf(newMessage)) { command(it, "ravegpt are you there") },
+            Arrives("a track", then = listOf("NOW${Message.VT}PLAYING", "DJ - Song", "")) { it.post(song) },
+            Arrives("an answer to the sign that could not be written") { app -> failedWrite(app) },
+        )
+        // in each state: what the next request gets when the game goes on, and what follows it to the end of the game
+        val goesOn = mapOf(
+            "the intro" to (listOf("READY?", "JUMP!", "frame") + GAME_OVER),
+            "a game, on the ground" to (listOf("frame", "frame") + GAME_OVER),
+            "the closing show" to GAME_OVER.drop(1),
+        )
+        val wrong = mutableListOf<String>()
+        for ((state, rest) in goesOn) for (arrival in arrivals) {
+            val app = gameApp()
+            try {
+                gameStates.getValue(state)(app)
+                arrival.happens(app)
+                val first = asks(app).removeSuffix(", in the air")
+                if (arrival.takesTheSign != null) arrival.givenBack(app)
+                val got = listOf(first) + (if (first == STORED) emptyList() else untilStored(app))
+                val expected = when (arrival.takesTheSign) {
+                    null -> rest + arrival.then + STORED
+                    STORED -> listOf(STORED)
+                    else -> listOf(arrival.takesTheSign) + arrival.then + STORED
+                }
+                if (got != expected) wrong += "$state, ${arrival.what}: the sign gets $got, not $expected"
+            } finally {
+                afterAGameCell()
+            }
+        }
+
+        assertEquals(emptyList(), wrong)
+    }
+
+    @Test
+    fun `the game's switch and its best are there again after a restart, and a game is not`() {
+        val home = newFilesDir()
+        /** A game from !game to the next stored message, nobody playing: its score and its best as the sign showed them. */
+        fun scoreAndBest(app: App): List<String> {
+            command(app, "!game")
+            return untilStored(app).filter { it.startsWith("SCORE") || it.startsWith("BEST") }
+        }
+        val rows = mutableListOf<Pair<String, Any?>>()
+        var app = gameApp(home)
+        intoPlay(app)
+        app = gameApp(home) // a restart in the middle of a game
+        rows += "after a restart in the middle of a game the sign gets" to asks(app)
+        // a game with a score: the player clears the first obstacle and no more
+        intoPlay(app)
+        var jumped = false
+        var shown = false // the show is over at the first stored message after it
+        val show = mutableListOf<String>()
+        repeat(900) { // nine seconds: the first obstacle is cleared, the second ends the game, the show follows
+            val answer = app.manager.getNextMessage().also { app.now += 10 }
+            if (answer is Message.GameFrame) {
+                val column = Regex("[abc](-?\\d+)").find(answer.str)?.groupValues?.get(1)?.toInt()
+                if (!jumped && column != null && column <= 23) {
+                    command(app, "!jump")
+                    jumped = true
+                }
+            } else if (answer is Message.Marquee) shown = show.isNotEmpty() else if (!shown) show += answer.str
+        }
+        rows += "a first score of 1 is a new best, with its own show" to show
+        saveAll()
+        command(app, "!game off")
+        saveAll()
+        app = gameApp(home)
+        command(app, "!game")
+        rows += "switched off before the restart, !game after it" to asks(app)
+        command(app, "!game on")
+        saveAll()
+        app = gameApp(home)
+        rows += "switched on again, a game without a score after the restart" to scoreAndBest(app)
+        command(app, "!game reset")
+        rows += "!game reset, and a game without a score" to scoreAndBest(app)
+        saveAll()
+        app = gameApp(home)
+        rows += "and after a restart" to scoreAndBest(app)
+
+        assertEquals(
+            listOf<Pair<String, Any?>>(
+                "after a restart in the middle of a game the sign gets" to STORED,
+                "a first score of 1 is a new best, with its own show" to listOf("X", "NEW${Message.VT}BEST!", "  1   ", ""),
+                "switched off before the restart, !game after it" to STORED,
+                "switched on again, a game without a score after the restart" to listOf("SCORE 0", "BEST 1"),
+                "!game reset, and a game without a score" to listOf("SCORE 0", "BEST 0"),
+                "and after a restart" to listOf("SCORE 0", "BEST 0"),
+            ),
+            rows,
+        )
+        afterAGameCell()
+    }
+
+    /** The saver of the test's own repository gets through what it was given. */
+    private fun saveAll() {
+        unsaved.toList().forEach { it.run() }
+        unsaved.clear()
     }
 
     /** The real route on a real server (Netty, a free port) for the time of [block], which gets the port. */

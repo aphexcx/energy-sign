@@ -243,6 +243,71 @@ class MessageManager(
 
     private var usrMsgCount: Int = 0
 
+    /** The jump game's switch and its best score, kept across a restart. */
+    private val gameStore = GameStore(filesDir, warn = { logW(it) })
+
+    /**
+     * The jump game. It answers the sign's requests before the queue and the list are looked
+     * at ([getNextMessage]) and takes from neither; the chooser and a typist take the sign from
+     * it. Owner thread only, like everything here.
+     */
+    private val game = GameOnTheSign(
+        GameShows(
+            runnerColour = context.getColor(R.color.icon_defaultblue),
+            crashColour = context.getColor(R.color.instahandle),
+            scoreColour = context.getColor(R.color.chonkyslide_defaultpink),
+        ),
+        best = gameStore.loadBest(),
+        on = gameStore.loadOn(),
+        say = { logD(it) },
+        bestIs = { best -> saveOfTheGame("the best score") { gameStore.saveBest(best) } },
+    )
+
+    init {
+        logD("Game: switched ${if (game.on) "on" else "off"} at the start.")
+        // The up arrow comes on the main thread, like a command from the phone on its own: it is posted.
+        keyboardManager.onUpArrow = {
+            val arrived = nowMs()
+            change { gameButton(arrived) }
+        }
+        // On the owner thread, before a key is typed: while anything of a game is on, the
+        // space bar is the game's and types nothing. It jumps while the game is played; in the
+        // intro and in a closing show it does nothing (a press that comes a moment after the
+        // hit must not take the score off the sign). Any other typing takes the sign from the game.
+        keyboardManager.takenByTheGame = { key ->
+            if (key == ' ' && game.busy) {
+                game.jump(nowMs())
+                true
+            } else {
+                game.end("somebody is typing")
+                false
+            }
+        }
+    }
+
+    /**
+     * The one button there is on the keyboard: it starts a game when nothing of one is on, and
+     * jumps while one is played. In the intro and in a closing show it does nothing: a jump
+     * that comes a moment after the hit is not a new game. (!game is one at any time.)
+     */
+    private fun gameButton(arrivedAt: Long) {
+        if (game.busy) game.jump(nowMs(), arrivedAt) else startGame()
+    }
+
+    /** Not while the sign is somebody else's: a game behind the chooser or the echo would be played by nobody. */
+    private fun startGame() {
+        if (isInChooserMode || keyboardManager.typing) logD("Game: not started, the sign is taken (the chooser, or somebody typing).")
+        else game.start()
+    }
+
+    private fun saveOfTheGame(what: String, write: () -> Unit) = msgRepo.saveLater {
+        try {
+            write()
+        } catch (e: Throwable) {
+            logW("Exception when saving $what of the game! ${e.message}")
+        }
+    }
+
     /** Pushes a new user message onto the top of the messages list. Returns when it is there. */
     fun processNewUserMessage(str: String, isQuery: Boolean = false): Unit =
         changeAndWait { addNewUserMessage(str, isQuery) }
@@ -303,6 +368,9 @@ class MessageManager(
             return getNextChooserMessage()
         }
         keyboardManager.handleKeyboardInput()?.let {
+            return it
+        }
+        game.answer(nowMs())?.let {
             return it
         }
 
@@ -482,6 +550,7 @@ class MessageManager(
      * place in the list. Owner thread only.
      */
     fun returnUnsent(message: Message) {
+        if (game.notWritten(message)) return
         val selection = takenFromList
         if (selection != null && message === selection.message) {
             // The owner reports this write before running another event. Between attempts
@@ -554,10 +623,25 @@ class MessageManager(
         }
     }
 
-    private fun processUartCommand(value: ByteArray) {
+    private fun processUartCommand(value: ByteArray, arrivedAt: Long = nowMs()) {
         when (val cmd = String(value)) {
+            "!game" -> startGame()
+
+            "!j",
+            "!jump" -> game.jump(nowMs(), arrivedAt)
+
+            "!game reset" -> game.forgetBest()
+
+            "!game on",
+            "!game off" -> {
+                game.switch(cmd == "!game on")
+                val on = game.on
+                saveOfTheGame("the switch") { gameStore.saveOn(on) }
+            }
+
             "!c",
             "!choose" -> {
+                game.end("the chooser takes the sign")
                 isInChooserMode = true
             }
 
@@ -796,7 +880,8 @@ class MessageManager(
         } else if (cmd.startsWith("!")) {
             // logged here, by the caller: the owner has the sign to answer
             logD("Procesing Uart command $cmd")
-            ({ processUartCommand(value) })
+            val arrived = nowMs() // (a press of the game's button is timed from here)
+            ({ processUartCommand(value, arrived) })
         } else {
             ({ addNewUserMessage(cmd, isQuery = false) })
         }

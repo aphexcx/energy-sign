@@ -24,6 +24,25 @@ object KeyboardManager : KoinComponent {
     var onSubmitted: (String) -> Unit = {}
 
 
+    /**
+     * The up arrow, the button of the jump game: it types nothing and starts no input. Called
+     * on the main thread, like every key; whoever owns the game posts what the press does.
+     */
+    @Volatile
+    var onUpArrow: () -> Unit = {}
+
+    fun upArrow(): Unit = onUpArrow()
+
+    /**
+     * Asked on the owner thread for every key that would be typed, before it is: true when the
+     * game took the key for itself, and then nothing is typed.
+     */
+    @Volatile
+    var takenByTheGame: (Char) -> Boolean = { false }
+
+    /** Whether somebody is typing (the echo is on the sign). Owner thread only. */
+    val typing: Boolean get() = isInKeyboardInputMode
+
     private var keyboardInputStartedAtMs: Long = 0
     private var lastKeyboardInputReceivedAtMs: Long = 0
     private var showAsWarning: Boolean = false
@@ -39,6 +58,7 @@ object KeyboardManager : KoinComponent {
             logD("Invalid key!")
             return@post
         }
+        if (takenByTheGame(key)) return@post
         isInKeyboardInputMode = true
         isMessageSubmitted = false
         msgRepo.oneTimeMessages.clear()
