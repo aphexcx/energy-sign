@@ -80,6 +80,10 @@ class SignLinkPushTest {
     /** Every write call that takes bytes returns this much AFTER the line saw them. */
     private var callLastsNs = 0L
 
+    /** The write call with this number (the first is 1) stalls this long BEFORE the line sees it. */
+    private val stallAtWrite = mutableMapOf<Int, Long>()
+    private var writeCalls = 0
+
     private val wire = object : SignWire {
         override fun read(buffer: ByteArray, length: Int): Int {
             reads++
@@ -106,6 +110,7 @@ class SignLinkPushTest {
             }
             now += stallNs
             stallNs = 0
+            now += stallAtWrite.remove(++writeCalls) ?: 0L
             if (now >= stuckUntilNs) takesBeforeStuck = Int.MAX_VALUE
             val take = minOf(length, takesPerWrite, takesBeforeStuck)
             if (take == 0) return 0
@@ -188,6 +193,7 @@ class SignLinkPushTest {
             }
             framesMade++
             now += frameCostNs
+            if (now >= stopAtNs) stop()
             chooser?.let { "H:$it" }
         },
         pushed = {
@@ -497,6 +503,111 @@ class SignLinkPushTest {
         assertEquals(58, reply.sumOf { it.bytes.size })
         assertTrue(txs.first { it.zeros }.atNs >= reply.last().goneAtNs)
         assertEquals("H:Y", txs.last().text)
+    }
+
+    // ================= the sign is left alone while it gets over what the app tore (gate round 1, major 1)
+
+    @Test
+    fun `a push waits until the sign has got over a reply it was sent only the start of, and the link reads on meanwhile`() {
+        // the gate's case: the transmitter takes the first byte of a reply and no more; the writer gives the rest up at 52
+        takesBeforeStuck = 1
+        stuckUntilNs = 60 * ms
+        arrives(0, "~")
+        command(10, "B")
+        var ranAt = -1L
+        posted.getOrPut(500 * ms) { mutableListOf() } += { ranAt = now }
+        runUntil(2_500)
+        val start = txs[0]
+        assertEquals("H", start.text)
+        val zeros = txs.first { it.zeros }
+        // the sign waits up to a second for the next byte of an answer: an attention into that is thrown away with it
+        assertTrue(zeros.atNs - start.goneAtNs >= 1_010 * ms, "zeros ${(zeros.atNs - start.goneAtNs) / ms} ms behind the torn reply")
+        assertEquals("H:B", txs.last().text)
+        assertEquals(listOf("B"), told)
+        // held back in the loop, not in a sleep: a change posted at 500 was made at 500
+        assertTrue(ranAt in 500 * ms..502 * ms, "ran at ${ranAt / ms} ms")
+    }
+
+    @Test
+    fun `the sign that asks again while a push is held back for it is answered at once, and that answer is the push`() {
+        takesBeforeStuck = 1
+        stuckUntilNs = 60 * ms
+        arrives(0, "~")
+        command(10, "B")
+        arrives(300, "~") // the sign gave the torn answer up and asks again
+        runUntil(2_500)
+        assertEquals(listOf("tx[H]@0", "tx[H:B]@300"), wire())
+        assertEquals(emptyList(), drops())
+    }
+
+    @Test
+    fun `a reply whose write threw may be on the line in part, a push waits for the sign to get over that too`() {
+        failWrites = 1
+        arrives(0, "~")
+        command(10, "B")
+        runUntil(2_500)
+        val zeros = txs.first { it.zeros }
+        // the three bytes of the reply would have left by 2 ms
+        assertTrue(zeros.atNs >= 1_012 * ms, "zeros at ${zeros.atNs / ms} ms")
+        assertEquals(listOf("B"), told)
+    }
+
+    @Test
+    fun `a poll report of which only the start went out holds a push back the same way`() {
+        takesBeforeStuck = 2
+        stuckUntilNs = 60 * ms
+        arrives(0, "?")
+        command(10, "B")
+        runUntil(2_500)
+        assertEquals("{c", txs[0].text)
+        val zeros = txs.first { it.zeros }
+        assertTrue(zeros.atNs - txs[0].goneAtNs >= 1_010 * ms, "zeros ${(zeros.atNs - txs[0].goneAtNs) / ms} ms behind the torn report")
+    }
+
+    @Test
+    fun `a reply of which nothing went out tears nothing, the push that follows is what the sign reads behind its request`() {
+        takesBeforeStuck = 0
+        stuckUntilNs = 60 * ms
+        arrives(0, "~")
+        command(10, "B")
+        runUntil(500)
+        assertEquals(listOf("tx[00x72]@60", "tx[H:B]@130"), wire())
+    }
+
+    // ================= what is on the line is judged by when bytes leave (gate round 1, major 2)
+
+    @Test
+    fun `a piece of the zeros that the transmitter takes late, inside a write that was called in time, leaves a hole, and that is no attention`() {
+        // the gate's case: 36 zeros have left after 25 ms; the second write is called at 2 ms and hands its 36 over at 37
+        takesPerWrite = 36
+        stallAtWrite[2] = 35 * ms
+        command(0, "B")
+        runUntil(250)
+        assertEquals(listOf("tx[00x36]@0", "tx[00x36]@37"), wire())
+        assertTrue(txs[1].leavesFromNs > txs[0].goneAtNs) // the hole on the line
+        assertEquals(emptyList(), told)
+        assertTrue(warnings().single().contains("not taken in one run"), warnings().toString())
+        runUntil(1_000)
+        assertEquals(listOf("B"), told)
+        val again = txs.drop(2).first { it.zeros }
+        assertTrue(again.atNs - txs[1].goneAtNs >= SignLink.PUSH_SPACING_MS * ms)
+    }
+
+    @Test
+    fun `a pushed frame whose second piece is taken late may have stood still too long for the sign, it is a failed push`() {
+        val long = "L".repeat(100) // a frame of 102 bytes
+        takesPerWrite = 72
+        // the writes: 1 the zeros, 2 the first 72 bytes of the frame (at 70, gone at 120), 3 the rest: called at 72, handed over at 182
+        stallAtWrite[3] = 110 * ms
+        command(0, long)
+        runUntil(600)
+        assertEquals(emptyList(), told)
+        assertTrue(warnings().single().contains("the frame was not taken in one piece"), warnings().toString())
+        runUntil(3_000)
+        assertEquals(listOf(long), told)
+        // and the next try waits until the sign has got over the torn frame
+        val again = txs.drop(3).first { it.zeros }
+        assertTrue(again.atNs - txs[2].goneAtNs >= 1_010 * ms, "again ${(again.atNs - txs[2].goneAtNs) / ms} ms behind the torn frame")
     }
 
     // ================= a push takes nothing
@@ -1093,6 +1204,28 @@ class SignLinkPushTest {
         repeat(5) { link.step() }
         assertEquals(emptyList(), wire())
         assertEquals(0, framesMade)
+    }
+
+    @Test
+    fun `stopped while the frame is being made, the break is not asked for`() {
+        // the gate's case: stop() while chooserFrame() runs
+        mode = Attention.BREAK
+        frameCostNs = 10 * ms
+        stopAtNs = 5 * ms
+        command(0, "B")
+        link.step()
+        assertEquals(emptyList(), wire())
+        assertEquals(emptyList(), warnings())
+    }
+
+    @Test
+    fun `stopped while the frame is being made, no zeros are offered and nothing is called a failure`() {
+        frameCostNs = 10 * ms
+        stopAtNs = 5 * ms
+        command(0, "B")
+        link.step()
+        assertEquals(emptyList(), wire())
+        assertEquals(emptyList(), warnings())
     }
 
     @Test
