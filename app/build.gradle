@@ -153,11 +153,10 @@ dependencies {
 //    implementation "io.insert-koin:koin-logger-slf4j:$koin_version"
 
     // Add the Firebase Crashlytics SDK.
-    implementation platform('com.google.firebase:firebase-bom:33.13.0')
+    implementation platform('com.google.firebase:firebase-bom:35.2.0')
 
     implementation 'com.google.firebase:firebase-crashlytics'
     implementation 'com.google.firebase:firebase-analytics'
-    implementation 'com.google.firebase:firebase-analytics-ktx'
 
     // Memoization: replaced deprecated Funktionale library with Arrow's memoize extension
     ext.arrow_version = '2.1.1'
