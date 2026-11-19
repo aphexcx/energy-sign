@@ -2,13 +2,42 @@ package cx.aphex.energysign.beatlinkdata
 
 import android.content.ContextWrapper
 import java.util.concurrent.Executor
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import io.ktor.server.engine.ApplicationEngine
 import java.net.BindException
 import org.junit.jupiter.api.Test
 import org.mockito.Mockito.*
+import kotlin.test.assertTrue
 import kotlin.test.assertEquals
 
 class BeatLinkListenerTest {
+    @Test fun expiredBlockedBindAllowsReplacementBeforeItReturns() {
+        val executor = Executors.newSingleThreadExecutor()
+        lateinit var expire: () -> Unit
+        val listener = BeatLinkListener(ContextWrapper(null), executor) { action -> expire = action; {} }
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val replacement = CountDownLatch(1)
+        val first = mock(ApplicationEngine::class.java)
+        val next = mock(ApplicationEngine::class.java)
+        `when`(first.start(false)).thenAnswer { entered.countDown(); release.await(); first }
+        `when`(next.start(false)).thenAnswer { replacement.countDown(); next }
+        try {
+            listener.ensureListening { first }
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            expire()
+            listener.ensureListening { next }
+            assertTrue(replacement.await(1, TimeUnit.SECONDS), "replacement blocked behind the old bind")
+        } finally {
+            release.countDown()
+            listener.close()
+            executor.shutdown()
+            executor.awaitTermination(3, TimeUnit.SECONDS)
+        }
+    }
+
     @Test
     fun `a refused port releases the partial engine and a later bind starts exactly one listener`() {
         val service = BeatLinkListener(ContextWrapper(null), Executor { it.run() })
