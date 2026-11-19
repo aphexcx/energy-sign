@@ -92,7 +92,6 @@ class GattServerActivity : AppCompatActivity() {
         super.onStart()
         val app = application as MainApplication
         app.signViewModel().onActivityStart()
-        app.bindBeatLink()
         appStartTime = System.currentTimeMillis()
     }
 

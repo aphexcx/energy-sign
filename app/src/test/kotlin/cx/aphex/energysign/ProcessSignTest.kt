@@ -18,7 +18,7 @@ class ProcessSignTest {
                 opens++
                 SignStartup { error(it) }.start(
                     prepareMessages = {},
-                    startBluetooth = {}, startDnsSd = {}, startLink = { starts++ },
+                    startBluetooth = {}, startBeatLink = {}, startLink = { starts++ },
                 )
                 // Android Things opens UART6 in the real model constructor. Stand in only for that model.
                 return ObjenesisStd().newInstance(modelClass)

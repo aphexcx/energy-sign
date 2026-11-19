@@ -11,7 +11,7 @@ import kotlin.test.assertSame
 class SignStartupTest {
     private val order = listOf(
         "messages", "Bluetooth construction", "Bluetooth writes",
-        "Bluetooth start", "DNS-SD construction", "DNS-SD start", "UART",
+        "Bluetooth start", "BeatLink construction", "BeatLink start", "UART",
     )
 
     private class Run(val failAt: String? = null, val failure: Throwable = IllegalStateException()) {
@@ -30,7 +30,7 @@ class SignStartupTest {
             startup.start(
                 prepareMessages = { step("messages") },
                 startBluetooth = bluetooth::start,
-                startDnsSd = { step("DNS-SD construction"); step("DNS-SD start") },
+                startBeatLink = { step("BeatLink construction"); step("BeatLink start") },
                 startLink = { step("UART") },
             )
         }
@@ -54,7 +54,7 @@ class SignStartupTest {
                     val skipped = when (step) {
                         "Bluetooth construction" -> listOf("Bluetooth start", "Bluetooth writes")
                         "Bluetooth writes" -> listOf("Bluetooth start")
-                        "DNS-SD construction" -> listOf("DNS-SD start")
+                        "BeatLink construction" -> listOf("BeatLink start")
                         else -> emptyList()
                     }
                     assertEquals(order - skipped.toSet(), run.calls)

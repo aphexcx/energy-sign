@@ -52,7 +52,7 @@ class MessageStartupTest {
                         SignStartup { error(it) }.start(
                             prepareMessages = { messages = MessageManager(context, MessageRepository(), OwnerQueue()) },
                              startBluetooth = {},
-                            startDnsSd = {}, startLink = { sent += messages.getNextMessage().str },
+                            startBeatLink = {}, startLink = { sent += messages.getNextMessage().str },
                         )
                         assertEquals(listOf("SAVED"), sent)
                         assertContains(warnings.single(), stage, ignoreCase = true)

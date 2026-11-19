@@ -123,7 +123,7 @@ class SignLink(
             // a request buffered during preparation may already be too old to answer.
             try {
                 if (!stopped) prepareAnswers()
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 // An adapter can still be built on demand. Keep the port serving requests.
                 complain("preparing answers", e)
             }

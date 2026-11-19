@@ -56,7 +56,7 @@ class BluetoothRecoveryTest {
         startup.start(
             prepareMessages = {},
             startBluetooth = BluetoothStartup(startup, { session }, { subscribe() }, { it.start() }, { it.stop() })::start,
-            startDnsSd = {}, startLink = { uartStarts++ },
+            startBeatLink = {}, startLink = { uartStarts++ },
         )
     }
 
@@ -94,7 +94,7 @@ class BluetoothRecoveryTest {
         startup.start(
             prepareMessages = {},
             startBluetooth = BluetoothStartup(startup, { gatt }, { throw IllegalStateException("subscription refused") },
-                { opened = true }, {})::start, startDnsSd = {}, startLink = { uartStarts++ },
+                { opened = true }, {})::start, startBeatLink = {}, startLink = { uartStarts++ },
         )
         val status = gatt.uartWriteStatus("!delete".toByteArray())
         assertEquals(BluetoothGatt.GATT_FAILURE, status)
@@ -136,7 +136,8 @@ class BluetoothRecoveryTest {
         gatt.onMtuChanged(a, 64)
         gatt.onConnectionStateChange(b, 0, 2)
         gatt.onConnectionStateChange(b, 0, 0)
-        assertEquals(BluetoothStatusUpdate(a, 64), updates.last())
+        kotlin.test.assertSame(a, updates.last().btDevice)
+        assertEquals(64, updates.last().mtu)
         gatt.onConnectionStateChange(a, 0, 0)
         assertEquals(BluetoothStatusUpdate(null, null), updates.last())
     }

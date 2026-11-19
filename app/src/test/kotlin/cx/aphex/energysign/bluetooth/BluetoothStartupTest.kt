@@ -33,7 +33,7 @@ class BluetoothStartupTest {
             override fun onReceive(context: Context, intent: Intent) = Unit
         }
         var advertised = 0
-        val session = BluetoothSession(cx.aphex.energysign.SignStartup {}, { receivers.register(receiver(), receiver()) },
+        val session = BluetoothSession(cx.aphex.energysign.SignStartup {}, { receivers.registerAdapter(receiver()); receivers.ensurePairing(receiver()) },
             receivers::clear, { true }, { false }, { added -> added(0); true },
             { _, result -> advertised++; result(0) }, {})
         session.start()

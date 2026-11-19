@@ -2,8 +2,8 @@ package cx.aphex.energysign
 
 import android.app.Application
 import android.os.Looper
+import cx.aphex.energysign.beatlinkdata.BeatLinkListener
 import androidx.lifecycle.AndroidViewModel
-import cx.aphex.energysign.beatlinkdata.DnsSdAnnouncer
 import cx.aphex.energysign.bluetooth.BluetoothStatusUpdate
 import cx.aphex.energysign.bluetooth.EnergySignBluetoothManager
 import cx.aphex.energysign.ext.NonNullMutableLiveData
@@ -39,6 +39,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
         startManager = EnergySignBluetoothManager::start,
         stopManager = EnergySignBluetoothManager::stop,
     )
+    private val beatLink = lazy { BeatLinkListener(application.applicationContext) }
     private var firstForeground = true
     private val energySignUartManager: EnergySignUartManager = EnergySignUartManager(this, owner)
 
@@ -60,7 +61,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
                 checkNotNull(messageManager)
             },
             startBluetooth = bluetooth::start,
-            startDnsSd = { DnsSdAnnouncer(application.applicationContext).start() },
+            startBeatLink = { beatLink.value.ensureListening() },
             startLink = energySignUartManager::start,
         )
     }
@@ -69,6 +70,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
         if (firstForeground) {
             firstForeground = false // init already attempted setup for this launch.
         } else {
+            startup.optional("BeatLink startup") { beatLink.value.ensureListening() }
             val manager = bluetooth.manager
             if (manager == null) bluetooth.start() else manager.onForeground()
         }
@@ -78,6 +80,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
         super.onCleared()
         // Who brings changes stops first, then who carries them out
         try {
+            if (beatLink.isInitialized()) startup.optional("BeatLink cleanup") { beatLink.value.close() }
             bluetooth.manager?.stop()
         } finally {
             energySignUartManager.stop()

@@ -11,12 +11,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
-import android.os.Handler
-import android.os.Looper
 import android.os.ParcelUuid
 import com.jakewharton.rxrelay3.PublishRelay
 import cx.aphex.energysign.MainViewModel
 import cx.aphex.energysign.SignStartup
+import cx.aphex.energysign.BoundedStart
+import cx.aphex.energysign.serialWorker
+import java.util.concurrent.RejectedExecutionException
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
 import cx.aphex.energysign.message.MessageManager
@@ -29,7 +30,17 @@ class EnergySignBluetoothManager(
 
     private val startup = SignStartup { logW(it) }
     private val receivers = BluetoothReceivers(context)
-    private val mainThread = Handler(Looper.getMainLooper())
+    private val worker = serialWorker("sign-bluetooth")
+    private val registration = BoundedStart()
+    private var listening = false
+
+    private fun post(action: () -> Unit) {
+        try {
+            worker.execute(action)
+        } catch (failure: RejectedExecutionException) {
+            if (!worker.isShutdown) throw failure
+        }
+    }
     private val writes = PublishRelay.create<GattWrite>()
     private var server: EnergySignBluetoothGattServer? = null
     private var cancelAdvertising: (() -> Unit)? = null
@@ -51,8 +62,9 @@ class EnergySignBluetoothManager(
     private fun registerService(added: (Int) -> Unit): Boolean {
         // A callback belongs to this server alone, even if Android delivers it after close().
         val attempt = EnergySignBluetoothGattServer(context, bluetoothManager, viewModel, writes) { status ->
-            mainThread.post { added(status) }
+            post { added(status) }
         }
+        attempt.postPeer = ::post
         server = attempt
         return attempt.start()
     }
@@ -68,11 +80,11 @@ class EnergySignBluetoothManager(
             when (state) {
                 BluetoothAdapter.STATE_ON -> {
                     logD("bluetoothReceiver: STATE_ON")
-                    session.adapterOn()
+                    post { session.adapterOn() }
                 }
                 BluetoothAdapter.STATE_TURNING_OFF, BluetoothAdapter.STATE_OFF -> {
                     logD("bluetoothReceiver: STATE_OFF")
-                    session.adapterOff()
+                    post { session.adapterOff() }
                 }
             }
         }
@@ -86,6 +98,10 @@ class EnergySignBluetoothManager(
     private val bondStateReceiver = object : BroadcastReceiver() {
 
         override fun onReceive(context: Context, intent: Intent) {
+            post { handlePairing(intent) }
+        }
+
+        private fun handlePairing(intent: Intent) {
             startup.optional("Bluetooth pairing broadcast") {
                 val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
                     ?: return@optional
@@ -94,7 +110,7 @@ class EnergySignBluetoothManager(
                         check(device.setPin(BLE_PIN.toByteArray()))
                         logD("Pairing PIN submitted")
                     }
-                    BluetoothDevice.ACTION_BOND_STATE_CHANGED -> logD("Bluetooth bond state: ${device.bondState}")
+                    BluetoothDevice.ACTION_BOND_STATE_CHANGED -> server?.bondState(device, device.bondState)
                     BluetoothDevice.ACTION_FOUND -> logD("Bluetooth device found: ${device.name.orEmpty()}")
                 }
             }
@@ -107,7 +123,7 @@ class EnergySignBluetoothManager(
             if (!context.packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE)) {
                 throw UnsupportedOperationException("Bluetooth LE unavailable")
             }
-            receivers.register(bluetoothReceiver, bondStateReceiver)
+            receivers.registerAdapter(bluetoothReceiver)
         },
         unregister = receivers::clear,
         enabled = { bluetoothAdapter.isEnabled },
@@ -116,25 +132,41 @@ class EnergySignBluetoothManager(
         advertise = ::startAdvertising,
         closeServices = ::stopServices,
         showAdvertiseResult = ::showAdvertiseResult,
+        post = ::post,
     )
 
-    fun start() {
+    fun start() = post { ensureRegistered() }
+
+    private fun ensureRegistered() {
+        val ticket = registration.begin { startup.failed("Bluetooth receivers", "registration deadline") } ?: return
         try {
-            session.start()
+            session.start {
+                listening = ticket.done()
+                listening
+            }
+            if (listening) receivers.ensurePairing(bondStateReceiver)
         } catch (failure: Throwable) {
-            detachWrites()
-            throw failure
+            ticket.fail()
+            startup.failed("Bluetooth start", failure.javaClass.name)
         }
     }
 
-    internal fun onForeground() {
-        receivers.ensurePairing(bondStateReceiver)
-        session.checkAdapter()
+    internal fun onForeground() = post {
+        if (!listening) ensureRegistered() else {
+            receivers.ensurePairing(bondStateReceiver)
+            session.checkAdapter()
+            server?.retryPeerMtu()
+        }
     }
 
     fun stop() {
         detachWrites()
-        session.stop()
+        post {
+            registration.reset()
+            listening = false
+            session.stop()
+        }
+        worker.shutdown()
     }
 
     private fun detachWrites() {
@@ -154,6 +186,7 @@ class EnergySignBluetoothManager(
 
     private fun showAdvertiseResult(errorCode: Int) {
         if (errorCode == 0) {
+            logD("Nordic UART advertising started")
             viewModel.updateAdvertiseStatus("💚${bluetoothAdapter.name}")
         } else {
             val error = when (errorCode) {
@@ -184,11 +217,11 @@ class EnergySignBluetoothManager(
         val advertiser = checkNotNull(bluetoothAdapter.bluetoothLeAdvertiser) { "Bluetooth advertiser unavailable" }
         val callback = object : AdvertiseCallback() {
             override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
-                mainThread.post { result(0) }
+                post { result(0) }
             }
 
             override fun onStartFailure(errorCode: Int) {
-                mainThread.post { result(errorCode) }
+                post { result(errorCode) }
             }
         }
         val settings = AdvertiseSettings.Builder()

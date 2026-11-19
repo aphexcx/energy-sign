@@ -772,6 +772,15 @@ class SignLinkTest {
 
     @Test
     fun `failure to prewarm a writer still lets the link answer requests`() {
+        verifyFailedPreparation(IllegalStateException("adapter unavailable"))
+    }
+
+    @Test
+    fun linkageErrorDuringPreparationLeavesThePortServingRequests() {
+        verifyFailedPreparation(LinkageError("adapter unavailable"))
+    }
+
+    private fun verifyFailedPreparation(failure: Throwable) {
         val quiet = object : QuietWire() {
             override fun read(buffer: ByteArray, length: Int): Int {
                 buffer[0] = '~'.code.toByte()
@@ -786,7 +795,7 @@ class SignLinkTest {
                 wrote = real.send("FIRST", Reply.MESSAGE)
                 real.stop()
             },
-            prepareAnswers = { throw IllegalStateException("adapter unavailable") },
+            prepareAnswers = { throw failure },
             timing = UartTimingLog(isEnabled = { false }, emit = {}),
             nanoTime = { now }, warn = { line += it },
         )

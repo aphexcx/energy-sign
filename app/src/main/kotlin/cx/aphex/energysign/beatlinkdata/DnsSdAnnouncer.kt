@@ -3,79 +3,75 @@ package cx.aphex.energysign.beatlinkdata
 import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
-import android.util.Log
-import java.net.ServerSocket
+import cx.aphex.energysign.BoundedStart
+import cx.aphex.energysign.SignStartup
+import cx.aphex.energysign.StartAlarm
+import cx.aphex.energysign.ext.logD
+import cx.aphex.energysign.ext.logW
+import cx.aphex.energysign.startupAlarm
+import java.util.concurrent.Executor
 
-/**
- * Announces that we are a beat-link data consumer and want to get POSTED updates
- * from any beat-link data providers on the network.
- */
-class DnsSdAnnouncer(val context: Context) : NsdManager.RegistrationListener {
-
-    private lateinit var nsdManager: NsdManager
-    var localPort: Int = -1
-    private lateinit var serviceName: String
-    private lateinit var serverSocket: ServerSocket
-    private lateinit var serviceInfo: NsdServiceInfo
-
-    internal var submit: (NsdManager.RegistrationListener) -> Unit = { registerService(localPort) }
-
-    fun start() {
-        initializeServerSocket()
-        submit(this)
-    }
-
-    private fun registerService(port: Int) {
-        // Create the NsdServiceInfo object, and populate it.
-        serviceInfo = NsdServiceInfo().apply {
-            // The name is subject to change based on conflicts
-            // with other services advertised on the same network.
+/** The HTTP worker owns registrations. Each NSD request gets a distinct listener. */
+internal class DnsSdAnnouncer(
+    private val context: Context,
+    private val worker: Executor,
+    private val arm: StartAlarm = ::startupAlarm,
+) {
+    private val startup = SignStartup { logW(it) }
+    private val operation = BoundedStart(arm)
+    private var current: NsdManager.RegistrationListener? = null
+    private val manager get() = context.getSystemService(Context.NSD_SERVICE) as NsdManager
+    internal var submit: (NsdManager.RegistrationListener) -> Unit = { listener ->
+        val info = NsdServiceInfo().apply {
             serviceName = "BeatLinkDataConsumer"
             serviceType = "_beatlinkdata._tcp"
-//            host = serverSocket.inetAddress
-            setPort(port)
-
+            port = BEATLINK_PORT
         }
+        manager.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
+    }
+    internal var unregister: (NsdManager.RegistrationListener) -> Unit = { manager.unregisterService(it) }
 
-        nsdManager = (context.getSystemService(Context.NSD_SERVICE) as NsdManager).apply {
-            registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, this@DnsSdAnnouncer)
+    fun start() {
+        val ticket = operation.begin { expired ->
+            startup.failed("DNS-SD registration", "callback deadline")
+            worker.execute { if (activeTicket === expired) release() }
+        } ?: return
+        release()
+        val listener = object : NsdManager.RegistrationListener {
+            override fun onServiceRegistered(info: NsdServiceInfo) {
+                if (ticket.done()) logD("DNS-SD registered on port $BEATLINK_PORT")
+            }
+
+            override fun onRegistrationFailed(info: NsdServiceInfo, code: Int) {
+                if (ticket.fail()) startup.failed("DNS-SD registration", "Android status $code")
+                // Android removes the listener after a failed registration.
+                worker.execute { if (current === this) current = null }
+            }
+
+            override fun onServiceUnregistered(info: NsdServiceInfo) { ticket.fail() }
+            override fun onUnregistrationFailed(info: NsdServiceInfo, code: Int) {
+                startup.failed("DNS-SD removal", "Android status $code")
+            }
+        }
+        current = listener
+        activeTicket = ticket
+        if (startup.optional("DNS-SD submission") { submit(listener) } == null) {
+            ticket.fail()
+            release()
         }
     }
 
-    private fun initializeServerSocket() {
-        // Initialize a server socket on the next available port.
-        serverSocket = ServerSocket(0).also { socket ->
-            // Store the chosen port.
-            localPort = socket.localPort
-            socket.close()
+    private var activeTicket: BoundedStart.Ticket? = null
 
-            //TODO use this port for server
-        }
+    private fun release() {
+        val old = current
+        current = null
+        activeTicket = null
+        if (old != null) startup.optional("DNS-SD removal") { unregister(old) }
     }
 
-    override fun onServiceRegistered(NsdServiceInfo: NsdServiceInfo) {
-        // Save the service name. Android may have changed it in order to
-        // resolve a conflict, so update the name you initially requested
-        // with the name Android actually used.
-        serviceName = NsdServiceInfo.serviceName
-        Log.d("DnsSdAnnouncerService", "Service registered: $serviceInfo")
+    fun stop() {
+        operation.reset()
+        release()
     }
-
-    override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
-        // Registration failed! Put debugging code here to determine why.
-        Log.d(
-            "DnsSdAnnouncerService",
-            "Service registration failed: $serviceInfo error code: $errorCode"
-        )
-    }
-
-    override fun onServiceUnregistered(arg0: NsdServiceInfo) {
-        // Service has been unregistered. This only happens when you call
-        // NsdManager.unregisterService() and pass in this listener.
-    }
-
-    override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
-        // Unregistration failed. Put debugging code here to determine why.
-    }
-
 }

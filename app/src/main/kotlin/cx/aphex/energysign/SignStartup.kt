@@ -5,12 +5,12 @@ internal class SignStartup(private val warn: (String) -> Unit) {
     fun start(
         prepareMessages: () -> Unit,
         startBluetooth: () -> Unit,
-        startDnsSd: () -> Unit,
+        startBeatLink: () -> Unit,
         startLink: () -> Unit,
     ) {
         prepareMessages()
         startBluetooth()
-        optional("DNS-SD startup", startDnsSd)
+        optional("BeatLink startup", startBeatLink)
         startLink()
     }
 

@@ -10,7 +10,7 @@ import kotlin.test.assertNotSame
 class DnsSdRecoveryTest {
     @Test
     fun foregroundRetriesFailedRegistrationAndKeepsConfirmedRegistration() {
-        val dns = DnsSdAnnouncer(ContextWrapper(null))
+        val dns = DnsSdAnnouncer(ContextWrapper(null), java.util.concurrent.Executor { it.run() })
         val calls = mutableListOf<NsdManager.RegistrationListener>()
         dns.submit = { calls += it }
         dns.start()
