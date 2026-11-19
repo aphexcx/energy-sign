@@ -820,6 +820,25 @@ class SignLinkPushTest {
     }
 
     @Test
+    fun `a poll that comes behind a pushed frame is answered and opens nothing again`() {
+        command(0, "B")
+        arrives(90, "?") // the frame had left at 72
+        runUntil(1_500)
+        assertEquals(listOf("tx[00x72]@0", "tx[H:B]@70", "tx[{c:B}]@90"), wire())
+    }
+
+    @Test
+    fun `switched off while a push waits its turn, the loop is at once the loop without pushes, no pause is cut to the push's turn`() {
+        chooser = "X".repeat(56) // a reply of 40 ms keeps the push waiting
+        arrives(0, "~")
+        command(1, "Y")
+        posted.getOrPut(2 * ms) { mutableListOf() } += { mode = Attention.OFF }
+        runUntil(200)
+        assertEquals(1, wire().size)
+        assertTrue(sleeps.all { it == SignLink.ACTIVE_PAUSE_MS * ms }, sleeps.distinct().toString())
+    }
+
+    @Test
     fun `the attention alone proves nothing and is given once, with no new change the loop goes back to its long pause`() {
         command(0, null)
         runUntil(5_000)
