@@ -170,12 +170,16 @@ dependencies {
 
     implementation "org.jetbrains.kotlinx:atomicfu:0.33.0"
 
-    ext.ktor_version = "2.3.12"
+    ext.ktor_version = "3.6.1"
+    // one Ktor for the listener and for the OpenAI client under it (the client's own BOM names an older one)
+    implementation platform("io.ktor:ktor-bom:$ktor_version")
     implementation "io.ktor:ktor-server-core:$ktor_version"
     implementation "io.ktor:ktor-server-netty:$ktor_version"
     implementation "io.ktor:ktor-server-content-negotiation:$ktor_version"
     implementation "io.ktor:ktor-serialization-gson:$ktor_version"
     implementation 'io.ktor:ktor-client-okhttp'
+    // the OpenAI client's own sign-in layer: the app tells it not to repeat a request after HTTP 401
+    implementation 'io.ktor:ktor-client-auth'
 //    implementation "io.ktor:ktor-gson:$ktor_version"
 
     ext.ver_rxjava = '3.1.10'
@@ -188,7 +192,7 @@ dependencies {
 
     implementation 'com.vdurmont:emoji-java:5.1.1'
 
-    implementation platform('com.aallam.openai:openai-client-bom:3.8.2')
+    implementation platform('com.aallam.openai:openai-client-bom:4.2.0')
     implementation 'com.aallam.openai:openai-client'
 
     // The official Anthropic SDK (Kotlin uses the Java SDK).
@@ -209,5 +213,11 @@ dependencies {
     testImplementation 'org.objenesis:objenesis:3.3'
 
     // A local stand-in for the Messages API: the SDK client is tested over real HTTP, never against the live service.
-    testImplementation 'com.squareup.okhttp3:mockwebserver:4.12.0'
+    testImplementation 'com.squareup.okhttp3:mockwebserver:5.5.1'
+}
+
+// Ktor's Netty engine brings Netty's HTTP/3 support, and that brings machine code for Linux, macOS and
+// Windows desktops (five jars that also collide when the APK is packed). The listener speaks HTTP/1.1.
+configurations.configureEach {
+    exclude group: 'io.netty', module: 'netty-codec-native-quic'
 }

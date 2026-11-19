@@ -4,7 +4,7 @@ import android.content.ContextWrapper
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import cx.aphex.energysign.TestStartWorker
-import io.ktor.server.engine.ApplicationEngine
+import io.ktor.server.engine.EmbeddedServer
 import java.net.BindException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
@@ -18,8 +18,8 @@ class BeatLinkListenerTest {
         val worker = TestStartWorker()
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
-        val stale = mock(ApplicationEngine::class.java)
-        val healthy = mock(ApplicationEngine::class.java)
+        val stale = mock(EmbeddedServer::class.java)
+        val healthy = mock(EmbeddedServer::class.java)
         `when`(stale.start(false)).thenAnswer { entered.countDown(); release.await(); stale }
         `when`(healthy.start(false)).thenReturn(healthy)
         val tasks = ArrayDeque<Runnable>()
@@ -51,8 +51,8 @@ class BeatLinkListenerTest {
     @Test fun bindFailureCleansUpOffWorkerAndHealthyForegroundReusesServer() {
         val worker = TestStartWorker()
         val tasks = ArrayDeque<Runnable>()
-        val first = mock(ApplicationEngine::class.java)
-        val next = mock(ApplicationEngine::class.java)
+        val first = mock(EmbeddedServer::class.java)
+        val next = mock(EmbeddedServer::class.java)
         `when`(first.start(false)).thenAnswer { throw BindException() }
         `when`(next.start(false)).thenReturn(next)
         var builds = 0

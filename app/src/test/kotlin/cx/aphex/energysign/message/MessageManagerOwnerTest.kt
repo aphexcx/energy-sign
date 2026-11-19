@@ -2205,7 +2205,7 @@ class MessageManagerOwnerTest {
             routing { currentTrack(app.manager) }
         }.start(wait = false)
         try {
-            return block(kotlinx.coroutines.runBlocking { server.resolvedConnectors().first().port })
+            return block(kotlinx.coroutines.runBlocking { server.engine.resolvedConnectors().first().port })
         } finally {
             server.stop(100, 500)
         }
@@ -2328,7 +2328,7 @@ class MessageManagerOwnerTest {
             routing { currentTrack(app.manager) }
         }.start(wait = false)
         try {
-            val port = kotlinx.coroutines.runBlocking { server.resolvedConnectors().first().port }
+            val port = kotlinx.coroutines.runBlocking { server.engine.resolvedConnectors().first().port }
             val trackJson = """{"id":9,"title":"${"C".repeat(750)}","artist":"DJ"}"""
             val stopJson = """{"id":0,"title":"","artist":"","isEmpty":true}"""
 

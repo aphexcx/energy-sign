@@ -17,6 +17,7 @@ import com.aallam.openai.client.OpenAIConfig
 import com.aallam.openai.client.OpenAIHost
 import com.aallam.openai.client.RetryStrategy
 import io.ktor.client.plugins.HttpResponseValidator
+import io.ktor.client.plugins.auth.Auth
 import io.ktor.client.plugins.ResponseException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -91,6 +92,9 @@ class OpenAIReplyGenerator(
         host = baseUrl?.let { OpenAIHost(baseUrl = it) } ?: OpenAIHost.OpenAI,
         retry = RetryStrategy(maxRetries = 0),
         httpClientConfig = {
+            // A rejected key is asked once. The client would send a request that got HTTP 401 a second
+            // time with the same key (its key cannot be renewed), and the answer would be the same.
+            install(Auth) { reAuthorizeOnResponse { false } }
             HttpResponseValidator {
                 handleResponseExceptionWithRequest { failure, _ ->
                     (failure as? ResponseException)?.let { failedWithStatus.set(it.response.status.value) }
@@ -121,8 +125,9 @@ class OpenAIReplyGenerator(
             val stream = Stream()
             val ended = try {
                 withTimeoutOrNull(limitMs) { collect(client, request, stream) } != null
-            } catch (e: OpenAITimeoutException) {
+            } catch (e: OpenAIIOException) {
                 // A limit of the HTTP client ended it after all: what has come is read the same way.
+                if (e !is OpenAITimeoutException && !e.isSocketTimeout()) throw e
                 false
             }
             stream.read(ended, limitMs)
@@ -131,7 +136,8 @@ class OpenAIReplyGenerator(
         } catch (e: OpenAITimeoutException) {
             noReply(NoReplyReason.TIMEOUT, e.javaClass.simpleName)
         } catch (e: OpenAIIOException) {
-            noReply(NoReplyReason.NETWORK, e.javaClass.simpleName)
+            if (e.isSocketTimeout()) noReply(NoReplyReason.TIMEOUT, "SocketTimeoutException")
+            else noReply(NoReplyReason.NETWORK, e.javaClass.simpleName)
         } catch (e: OpenAIAPIException) {
             // Every HTTP status with an error body, whatever class the client makes of it.
             noReply(NoReplyReason.forHttpStatus(e.statusCode), summary(e))
@@ -147,6 +153,14 @@ class OpenAIReplyGenerator(
             else noReply(NoReplyReason.PROVIDER_ERROR, e.javaClass.simpleName)
         }
     }
+
+    /**
+     * The HTTP client's socket limit ran out while the answer was being read. Since Ktor 3 that
+     * arrives as a failure of the stream with the timeout as its cause, which the OpenAI client
+     * takes for a network failure, not for the timeout it is.
+     */
+    private fun OpenAIIOException.isSocketTimeout(): Boolean =
+        generateSequence(cause) { it.cause }.take(16).any { it is java.net.SocketTimeoutException }
 
     override fun syncClock(limit: Duration) {
         timeFrom?.syncClock(limit)
