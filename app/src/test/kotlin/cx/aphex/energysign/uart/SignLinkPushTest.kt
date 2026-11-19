@@ -1663,6 +1663,7 @@ class SignLinkPushTest {
         link.step()
         assertEquals(emptyList(), wire())
         assertEquals(emptyList(), taken)
+        assertEquals(0, answers) // not asked for at all: taking a message and handing it back is not nothing
     }
 
     @Test
