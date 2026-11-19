@@ -22,6 +22,7 @@ import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertSame
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
@@ -753,7 +754,7 @@ class MessageManagerRepliesTest {
     // ---- added for the guard table of these fixes
 
     @Test
-    fun `a reply that comes round again later, as a stored message, is not put back when it could not be written`() {
+    fun `a reply taken from the stored list retries in place without replaying its heading`() {
         aHeadingStartsWhileACallIsOut()
         restOfHeading()
         assertEquals("AN ANSWER FROM THE LAPTOP.", next().str)
@@ -764,7 +765,8 @@ class MessageManagerRepliesTest {
         assertIs<Message.Marquee.Chonky>(again)
         manager.returnUnsent(again!!)
 
-        assertEquals("MIDDLE", next().str, "a stored message comes round by itself: it is not queued a second time")
+        assertSame(again, next())
+        assertEquals("MIDDLE", next().str, "a stored retry advances once, without another heading")
     }
 
     @Test

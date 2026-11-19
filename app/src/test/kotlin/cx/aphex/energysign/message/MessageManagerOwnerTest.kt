@@ -8,6 +8,9 @@ import cx.aphex.energysign.beatlinkdata.BeatLinkTrack
 import cx.aphex.energysign.ai.AIReplySource
 import cx.aphex.energysign.ai.PostedAIAnswer
 import cx.aphex.energysign.keyboard.KeyboardManager
+import cx.aphex.energysign.uart.SignLink
+import cx.aphex.energysign.uart.SignWire
+import cx.aphex.energysign.uart.UartTimingLog
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
@@ -251,7 +254,7 @@ class MessageManagerOwnerTest {
     // ---- a message that could not be written (class D)
 
     @Test
-    fun `a one-time message that could not be written goes back to the front, a stored one comes round by itself`() {
+    fun `a one-time message that could not be written goes back to the front and a stored one retries at its place`() {
         phone("!micOff")
         ownerRuns()
         repo.enqueueOneTimeMessage(Message.Starfield())
@@ -270,6 +273,94 @@ class MessageManagerOwnerTest {
         manager.returnUnsent(stored)
         assertEquals(0, repo.oneTimeMessages.size)
         assertEquals(5, repo.marqueeMessages.size)
+        assertSame(stored, manager.getNextMessage())
+        assertSame(repo.marqueeMessages[1], manager.getNextMessage())
+    }
+
+    @Test
+    fun `a failed last stored message retries before the ads it triggered, even after repeated failures`() {
+        val app = App(newFilesDir())
+        val repo = app.repo
+        val manager = app.manager
+        repo.marqueeMessages.addAll(listOf(Message.Marquee.User("FIRST"), Message.Marquee.User("LAST")))
+        app.phone("!A1")
+        app.phone("!last")
+        ownerRuns()
+        repo.oneTimeMessages.clear()
+        val last = repo.marqueeMessages.last()
+        assertSame(last, manager.getNextMessage())
+        val ads = repo.oneTimeMessages.toList()
+        assertTrue(ads.isNotEmpty())
+
+        repeat(2) {
+            manager.returnUnsent(last)
+            assertSame(last, manager.getNextMessage())
+            assertEquals(ads, repo.oneTimeMessages.toList())
+        }
+        ads.forEach { assertSame(it, manager.getNextMessage()) }
+        assertSame(repo.marqueeMessages.first(), manager.getNextMessage())
+    }
+
+    @Test
+    fun `a link starting with main busy for five seconds writes the first stored frame whole`() {
+        var clock = 0L
+        var preparedOn: Thread? = null
+        var firstReadOn: Thread? = null
+        var preparedBeforeRead = false
+        val frames = mutableListOf<String>()
+        var writeAt = Long.MAX_VALUE
+        val wire = object : SignWire {
+            override fun read(buffer: ByteArray, length: Int): Int {
+                if (firstReadOn == null) {
+                    firstReadOn = Thread.currentThread()
+                    preparedBeforeRead = preparedOn === firstReadOn
+                    return 0 // an empty read establishes freshness after the cold start
+                }
+                buffer[0] = '~'.code.toByte()
+                return 1
+            }
+            override fun write(buffer: ByteArray, length: Int): Int {
+                frames += String(buffer, 0, length)
+                writeAt = System.nanoTime()
+                return length
+            }
+            override fun close() {}
+        }
+        val home = newFilesDir()
+        File(home, "signstrings.bin").writeText("DEFAULT\u000bMESSAGE 2\nDEFAULT\u000bMESSAGE 1\n")
+        val manager = App(home).manager
+        lateinit var link: SignLink
+        val responder = SignResponder(manager::getNextMessage, { frame, reply -> link.send(frame, reply) }, manager::returnUnsent)
+        link = SignLink(
+            wire = wire, baud = 14400, name = "test", events = ::ownerRuns,
+            prepareAnswers = {
+                SignResponder.warmUp()
+                preparedOn = Thread.currentThread()
+                clock += 611_000_000L // the measured cold Gson cost
+            },
+            answer = { buffer, count ->
+                if (preparedOn !== Thread.currentThread()) clock += 611_000_000L
+                responder.onRequest(buffer, count)
+                link.stop()
+            },
+            timing = UartTimingLog(isEnabled = { false }, emit = {}),
+            nanoTime = { clock }, sleepNanos = { clock += it },
+        )
+
+        val thread = Thread(link, "test-sign-link")
+        val mainBusyFrom = System.nanoTime()
+        try {
+            thread.start()
+            Thread.sleep(5_000) // this thread built the manager and cannot run a callback
+        } finally {
+            link.stop()
+            thread.join(2_000)
+        }
+        assertFalse(thread.isAlive)
+        assertEquals(listOf(SignResponder.GSON.toJson(Message.Marquee.User("MESSAGE 1"))), frames)
+        assertTrue(preparedBeforeRead)
+        assertSame(thread, preparedOn)
+        assertTrue(writeAt - mainBusyFrom < 5_000_000_000L)
     }
 
     // ---- the real commands

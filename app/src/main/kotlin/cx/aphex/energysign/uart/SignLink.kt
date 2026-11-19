@@ -72,6 +72,7 @@ class SignLink(
     /** What was read and written, after it was written: the log must not hold up a reply. */
     private val log: (line: String) -> Unit = {},
     private val warn: (line: String) -> Unit = {},
+    private val prepareAnswers: () -> Unit = {},
 ) : Runnable {
     @Volatile
     private var stopped = false
