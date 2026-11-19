@@ -124,4 +124,49 @@ class AdbCommandTest {
         assertEquals("ok 6 bytes (the last one is a line break)", AdbCommand.accepted(withBreak))
         assertEquals("ok 5 bytes", AdbCommand.accepted("!next".toByteArray(Charsets.UTF_8)))
     }
+
+    // ---- every extra: a value of the wrong type is refused, it is not taken for absent (gate round 3)
+
+    private val notStrings: List<Any?> = listOf(1, 1L, 1.5f, true, null, arrayOf("!delete"), intArrayOf(1), listOf("!delete"), "x".toByteArray())
+
+    @Test
+    fun `a b64 extra that is not a string is refused - the text beside it is not carried out in its place`() {
+        // The gate's example: am broadcast ... --ei b64 1 --es text '!delete'
+        val gates = AdbCommand.fromExtras(mapOf("b64" to 1, "text" to "!delete"))
+        assertTrue(refusal(gates).contains("b64"), refusal(gates))
+
+        for (wrong in notStrings) {
+            val why = refusal(AdbCommand.fromExtras(mapOf("b64" to wrong, "text" to "!delete")))
+            assertTrue(why.contains("the extra b64 is there but is not a string"), "b64 = $wrong: $why")
+        }
+    }
+
+    @Test
+    fun `a text extra that is not a string is refused too, alone and beside a good b64`() {
+        for (wrong in notStrings) {
+            val alone = refusal(AdbCommand.fromExtras(mapOf("text" to wrong)))
+            assertTrue(alone.contains("the extra text is there but is not a string"), "text = $wrong: $alone")
+            val beside = refusal(AdbCommand.fromExtras(mapOf("text" to wrong, "b64" to b64("!next"))))
+            assertTrue(beside.contains("the extra text is there but is not a string"), "text = $wrong beside b64: $beside")
+        }
+    }
+
+    @Test
+    fun `an extra the hook does not know is refused by name - a misspelt b64 does not let the text through`() {
+        val misspelt = refusal(AdbCommand.fromExtras(mapOf("b46" to b64("!next"), "text" to "!delete")))
+        assertTrue(misspelt.contains("b46"), misspelt)
+
+        val extra = refusal(AdbCommand.fromExtras(mapOf("text" to "!next", "Text" to "!delete")))
+        assertTrue(extra.contains("Text"), extra)
+    }
+
+    @Test
+    fun `extras of the right kind are read as before - text, b64, both with b64 winning, and none`() {
+        assertContentEquals("!next".toByteArray(), bytesOf(AdbCommand.fromExtras(mapOf("text" to "!next"))))
+        assertContentEquals("!prev".toByteArray(), bytesOf(AdbCommand.fromExtras(mapOf("b64" to b64("!prev")))))
+        assertContentEquals("!prev".toByteArray(), bytesOf(AdbCommand.fromExtras(mapOf("text" to "!next", "b64" to b64("!prev")))))
+        assertTrue(refusal(AdbCommand.fromExtras(emptyMap())).startsWith("no extra"))
+        assertTrue(refusal(AdbCommand.fromExtras(mapOf("text" to ""))).startsWith("empty"))
+        assertTrue(refusal(AdbCommand.fromExtras(mapOf("b64" to "not base64!", "text" to "!next"))).startsWith("bad base64"))
+    }
 }

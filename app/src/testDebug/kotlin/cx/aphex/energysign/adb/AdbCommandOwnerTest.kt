@@ -32,7 +32,7 @@ import kotlin.test.assertTrue
 
 /**
  * The hook's way into the app, with the REAL MessageManager and OwnerQueue: the bytes go to
- * MessageManager.processNewBytesAndWait, the entry beside the one a Bluetooth write takes
+ * MessageManager.processNewBytesAndTell, the entry beside the one a Bluetooth write takes
  * (processNewBytes; both hand the same change to the owner), and the answer is what the owner
  * did with them.
  *
@@ -62,12 +62,12 @@ class AdbCommandOwnerTest {
     private var saveWaitsFor: CountDownLatch? = null
 
     @Volatile
-    private var saveThrows = false
+    private var saveThrows: Exception? = null
     private val repo = MessageRepository(saver = Executor {
         saveReached?.countDown()
         saveWaitsFor?.await(30, TimeUnit.SECONDS)
         it.run()
-        if (saveThrows) throw IllegalStateException("the card failed")
+        saveThrows?.let { failure -> throw failure }
     })
     private val owner = OwnerQueue()
     private lateinit var manager: MessageManager
@@ -122,7 +122,7 @@ class AdbCommandOwnerTest {
     fun fresh() {
         saveReached = null
         saveWaitsFor = null
-        saveThrows = false
+        saveThrows = null
         linkRuns = true
         owner.neverWaitsOn(Thread({}, "nobody"))
         hook("!endchoose")
@@ -137,9 +137,13 @@ class AdbCommandOwnerTest {
     }
 
     /** What the receiver does with the bytes of a broadcast, word for word; the outcome is waited for here. */
-    private fun hookStarts(command: String): LinkedBlockingQueue<AdbCommand.Outcome> {
+    private fun hookStarts(
+        command: String,
+        answerWithinMs: Long = AdbCommand.ANSWER_WITHIN_MS,
+        late: (AdbCommand.Outcome) -> Unit = {},
+    ): LinkedBlockingQueue<AdbCommand.Outcome> {
         val outcomes = LinkedBlockingQueue<AdbCommand.Outcome>()
-        AdbCommand.aside(command.toByteArray(Charsets.UTF_8), manager) { outcomes.put(it) }
+        AdbCommand.aside(command.toByteArray(Charsets.UTF_8), manager, answerWithinMs, late) { outcomes.put(it) }
         return outcomes
     }
 
@@ -227,7 +231,8 @@ class AdbCommandOwnerTest {
         saveReached = reached
         saveWaitsFor = release
 
-        val outcomes = hookStarts("!delete")
+        // (With a limit for the answer that this test does not reach: "underway" has its own test.)
+        val outcomes = hookStarts("!delete", answerWithinMs = 60_000)
 
         assertTrue(reached.await(5, TimeUnit.SECONDS), "the owner has started the delete: the message is out of the list")
         // The owner is held in the middle of the command, for longer than the hook waits for a
@@ -245,13 +250,51 @@ class AdbCommandOwnerTest {
 
     @Test
     fun `a command that throws when part of it is done is not called refused - the answer says it may have happened`() {
-        saveThrows = true
+        saveThrows = IllegalStateException("the card failed")
 
         val answer = hook("!delete")
 
-        saveThrows = false
+        saveThrows = null
         assertEquals("failed: the app threw IllegalStateException (the card failed); the command may have been carried out in part", answer)
         assertEquals(4, stored().size, "the message was deleted before the throw: 'refused' would invite a second delete")
+    }
+
+    // ---- gate round 3
+
+    @Test
+    fun `a command that changed the messages and then threw a TimeoutException of its own is not called refused`() {
+        saveThrows = java.util.concurrent.TimeoutException("the card timed out")
+
+        val answer = hook("!delete")
+
+        saveThrows = null
+        // "refused" would say: nothing happened, send it again. The message is gone already.
+        assertEquals("failed: the app threw TimeoutException (the card timed out); the command may have been carried out in part", answer)
+        assertEquals(4, stored().size)
+    }
+
+    @Test
+    fun `a command the owner is still at when the hook's time is up is answered underway, and its end is handed over when it comes`() {
+        val reached = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        saveReached = reached
+        saveWaitsFor = release
+        val late = LinkedBlockingQueue<AdbCommand.Outcome>()
+
+        val outcomes = hookStarts("!delete", answerWithinMs = 600, late = { late.put(it) })
+
+        assertTrue(reached.await(5, TimeUnit.SECONDS), "the owner has started the delete")
+        val answer = outcomes.poll(5, TimeUnit.SECONDS)
+        assertEquals(AdbCommand.Kind.UNDERWAY, answer?.kind, "the broadcast is answered while the owner is still at it: ${answer?.answer}")
+        assertNull(late.poll(100, TimeUnit.MILLISECONDS))
+
+        saveReached = null
+        saveWaitsFor = null
+        release.countDown()
+
+        assertEquals("ok 7 bytes", late.poll(5, TimeUnit.SECONDS)?.answer)
+        assertEquals(listOf("MESSAGE 2", "MESSAGE 3", "MESSAGE 4", "MESSAGE 5"), stored(), "one delete")
+        assertNull(outcomes.poll(100, TimeUnit.MILLISECONDS), "one answer")
     }
 
     @Test
@@ -262,8 +305,8 @@ class AdbCommandOwnerTest {
         assertEquals("ok 7 bytes", hook("!delete"))
 
         // What it must not do: the owner refuses to be waited for here, and says so.
-        val onMain = AdbCommand.carriedOut("!delete".toByteArray(), manager::processNewBytesAndWait).answer
-        assertTrue(onMain.startsWith("failed: the app threw IllegalStateException"), onMain)
+        val onMain = AdbCommand.carriedOut("!delete".toByteArray(), manager::processNewBytesAndTell).answer
+        assertTrue(onMain.startsWith("failed: the call threw IllegalStateException"), onMain)
 
         owner.neverWaitsOn(Thread({}, "nobody"))
         assertEquals(4, stored().size, "one delete was carried out, the one that waited aside")

@@ -686,6 +686,13 @@ class MessageManager(
     /** The same, for a caller that says "done" to someone: returns when the owner has carried it out. Not from the main thread. */
     fun processNewBytesAndWait(value: ByteArray): Unit = changeAndWait(bytesChange(value))
 
+    /**
+     * The same, for a caller that has to say which of three things happened (the adb hook): the
+     * owner carried it out, the owner threw on it, or the owner never took it up and it was
+     * withdrawn. See OwnerQueue.askFor. Not from the main thread.
+     */
+    fun processNewBytesAndTell(value: ByteArray): OwnerQueue.Asked<Unit> = owner.askFor(change = bytesChange(value))
+
     /** What [value] asks for, as a change for the owner. What can be done here, on the caller's thread, is done here. */
     private fun bytesChange(value: ByteArray): () -> Unit {
         val cmd = String(value)
