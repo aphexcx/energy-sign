@@ -642,12 +642,16 @@ class SignLinkPushTest {
 
     @Test
     fun `a reply of which nothing went out tears nothing, the push that follows is what the sign reads behind its request`() {
-        takesBeforeStuck = 0
-        stuckUntilNs = 60 * ms
-        arrives(0, "~")
-        command(10, "B")
-        runUntil(500)
-        assertEquals(listOf("tx[00x72]@60", "tx[H:B]@130"), wire())
+        // the line was in use a moment ago (a poll report at 0): a hold for a torn frame would count from there
+        arrives(0, "?")
+        posted.getOrPut(50 * ms) { mutableListOf() } += {
+            takesBeforeStuck = 0
+            stuckUntilNs = 160 * ms
+        }
+        arrives(100, "~") // not a byte of its answer is taken; the link gives up at 148
+        command(110, "B")
+        runUntil(600)
+        assertEquals(listOf("tx[{c:A}]@0", "tx[00x72]@160", "tx[H:B]@230"), wire())
     }
 
     // ================= what is on the line is judged by when bytes leave (gate round 1, major 2)
@@ -1649,6 +1653,16 @@ class SignLinkPushTest {
         link.step()
         assertEquals(emptyList(), wire())
         assertEquals(0, framesMade)
+    }
+
+    @Test
+    fun `stopped while the wire is being read, the request that read finds takes no message`() {
+        chooser = null // an answer would take M1
+        arrives(0, "~")
+        duringRead = { stop() }
+        link.step()
+        assertEquals(emptyList(), wire())
+        assertEquals(emptyList(), taken)
     }
 
     @Test
