@@ -116,9 +116,9 @@ class BluetoothPublicationTest {
         var refused = false
         val app = object : ContextWrapper(null) {
             override fun getPackageManager() = pm
-            override fun registerReceiver(receiver: BroadcastReceiver, filter: IntentFilter): Intent? {
+            override fun registerReceiver(receiver: BroadcastReceiver?, filter: IntentFilter): Intent? {
                 if (registered.size == 1 && !refused) { refused = true; throw SecurityException() }
-                registered += receiver
+                registered += checkNotNull(receiver)
                 return null
             }
         }
