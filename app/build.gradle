@@ -196,7 +196,7 @@ dependencies {
     implementation 'com.aallam.openai:openai-client'
 
     // The official Anthropic SDK (Kotlin uses the Java SDK).
-    implementation 'com.anthropic:anthropic-java:3.3.0'
+    implementation 'com.anthropic:anthropic-java:3.10.0'
 
     // JUnit 5
     testImplementation 'org.junit.jupiter:junit-jupiter-api:5.11.3'
