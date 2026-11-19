@@ -181,11 +181,11 @@ dependencies {
     implementation 'io.ktor:ktor-client-auth'
 //    implementation "io.ktor:ktor-gson:$ktor_version"
 
-    ext.ver_rxjava = '3.1.10'
+    ext.ver_rxjava = '3.1.12'
     ext.ver_rxandroid = "3.0.2"
     implementation "io.reactivex.rxjava3:rxjava:$ver_rxjava"
     implementation "io.reactivex.rxjava3:rxandroid:$ver_rxandroid"
-    implementation 'com.jakewharton.rxrelay3:rxrelay:3.0.0'
+    implementation 'com.jakewharton.rxrelay3:rxrelay:3.0.1'
 
 //    implementation "org.jetbrains.kotlinx:atomicfu-common:0.14.3"
 
