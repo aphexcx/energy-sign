@@ -93,6 +93,7 @@ class BluetoothWriteEntryTest {
             ContextWrapper(null),
             objenesis.newInstance(BluetoothManager::class.java),
             objenesis.newInstance(MainViewModel::class.java),
+            cx.aphex.energysign.TestStartWorker(),
         )
         // The call MainViewModel makes. That line itself is run by no test: the view model
         // cannot be built on the JVM.

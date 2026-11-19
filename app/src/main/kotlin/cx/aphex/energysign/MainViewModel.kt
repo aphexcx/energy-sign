@@ -34,7 +34,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
     private val messageManager: MessageManager by inject()
     private val startup = SignStartup { logW(it) }
     private val bluetooth = BluetoothStartup(startup,
-        create = { EnergySignBluetoothManager(application.applicationContext, this) },
+        create = { EnergySignBluetoothManager(application.applicationContext, this, worker) },
         subscribe = { it.subscribeToWrites(messageManager) },
         startManager = EnergySignBluetoothManager::start,
         stopManager = EnergySignBluetoothManager::stop,

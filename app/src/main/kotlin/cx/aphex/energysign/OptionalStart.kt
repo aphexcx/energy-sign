@@ -55,6 +55,7 @@ internal class OptionalStart(
 
     inner class Attempt internal constructor() {
         private val began = worker.nowMs()
+        val confirmed get() = live && up
         val live get() = current === this
         fun pending(): Boolean {
             if (!live || up) return false

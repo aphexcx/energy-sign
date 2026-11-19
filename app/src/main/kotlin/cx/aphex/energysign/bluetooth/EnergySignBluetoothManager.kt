@@ -16,31 +16,24 @@ import com.jakewharton.rxrelay3.PublishRelay
 import cx.aphex.energysign.MainViewModel
 import cx.aphex.energysign.SignStartup
 import cx.aphex.energysign.BoundedStart
-import cx.aphex.energysign.serialWorker
-import java.util.concurrent.RejectedExecutionException
+import cx.aphex.energysign.StartWorker
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
 import cx.aphex.energysign.message.MessageManager
 import io.reactivex.rxjava3.disposables.Disposable
 
-class EnergySignBluetoothManager(
+internal class EnergySignBluetoothManager(
     val context: Context,
-    val viewModel: MainViewModel
+    val viewModel: MainViewModel,
+    private val worker: StartWorker,
 ) {
 
     private val startup = SignStartup { logW(it) }
     private val receivers = BluetoothReceivers(context)
-    private val worker = serialWorker("sign-bluetooth")
     private val registration = BoundedStart()
     private var listening = false
 
-    private fun post(action: () -> Unit) {
-        try {
-            worker.execute { startup.optional("Bluetooth worker", action) }
-        } catch (failure: RejectedExecutionException) {
-            if (!worker.isShutdown) throw failure
-        }
-    }
+    private fun post(action: () -> Unit) = worker.post(action)
     private val writes = PublishRelay.create<GattWrite>()
     private var server: EnergySignBluetoothGattServer? = null
     private var cancelAdvertising: (() -> Unit)? = null
@@ -61,10 +54,9 @@ class EnergySignBluetoothManager(
 
     private fun registerService(added: (Int) -> Unit): Boolean {
         // A callback belongs to this server alone, even if Android delivers it after close().
-        val attempt = EnergySignBluetoothGattServer(context, bluetoothManager, viewModel, writes) { status ->
+        val attempt = EnergySignBluetoothGattServer(context, bluetoothManager, viewModel, worker, writes) { status ->
             post { added(status) }
         }
-        attempt.postPeer = ::post
         server = attempt
         return attempt.start()
     }
@@ -166,7 +158,6 @@ class EnergySignBluetoothManager(
             listening = false
             session.stop()
         }
-        worker.shutdown()
     }
 
     private fun detachWrites() {

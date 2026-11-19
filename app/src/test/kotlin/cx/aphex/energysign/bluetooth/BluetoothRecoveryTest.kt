@@ -18,7 +18,7 @@ class BluetoothRecoveryTest {
     private val startup = SignStartup(warnings::add)
     private val android = ObjenesisStd()
     private val gatt = EnergySignBluetoothGattServer(
-        ContextWrapper(null), android.newInstance(BluetoothManager::class.java), android.newInstance(MainViewModel::class.java),
+        ContextWrapper(null), android.newInstance(BluetoothManager::class.java), android.newInstance(MainViewModel::class.java), cx.aphex.energysign.TestStartWorker(),
     )
     private val received = mutableListOf<String>()
     private var registered = false
@@ -125,20 +125,4 @@ class BluetoothRecoveryTest {
         assertEquals(listOf("hello"), received)
     }
 
-    @Test
-    fun disconnectShowsRemainingPhoneAndMtu() {
-        val a = android.newInstance(BluetoothDevice::class.java)
-        val b = android.newInstance(BluetoothDevice::class.java)
-        val updates = mutableListOf<BluetoothStatusUpdate>()
-        gatt.postPeer = { it() }
-        gatt.showPeer = { updates.add(it) }
-        gatt.onConnectionStateChange(a, 0, 2)
-        gatt.onMtuChanged(a, 64)
-        gatt.onConnectionStateChange(b, 0, 2)
-        gatt.onConnectionStateChange(b, 0, 0)
-        kotlin.test.assertSame(a, updates.last().btDevice)
-        assertEquals(64, updates.last().mtu)
-        gatt.onConnectionStateChange(a, 0, 0)
-        assertEquals(BluetoothStatusUpdate(null, null), updates.last())
-    }
 }

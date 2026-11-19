@@ -1,13 +1,12 @@
 package cx.aphex.energysign.bluetooth
 
 import android.bluetooth.*
-import android.os.Handler
-import android.os.Looper
 import android.content.Context
 import com.jakewharton.rxrelay3.PublishRelay
 import cx.aphex.energysign.MainViewModel
-import cx.aphex.energysign.SignStartup
-import cx.aphex.energysign.BoundedStart
+import cx.aphex.energysign.OptionalStart
+import cx.aphex.energysign.StartWorker
+import cx.aphex.energysign.optional
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
 import java.util.*
@@ -26,6 +25,7 @@ internal class EnergySignBluetoothGattServer(
     val context: Context,
     val bluetoothManager: BluetoothManager,
     val viewModel: MainViewModel,
+    private val worker: StartWorker,
     internal val writes: PublishRelay<GattWrite> = PublishRelay.create(),
     private val serviceAdded: (Int) -> Unit = {},
 ) : BluetoothGattServerCallback() {
@@ -35,15 +35,60 @@ internal class EnergySignBluetoothGattServer(
     @Volatile
     private var closed = false
 
-    private val startup = SignStartup { logW(it) }
-    private val mainThread = Handler(Looper.getMainLooper())
-    private val mtuClients = linkedMapOf<BluetoothDevice, PeerMtu>()
-    private val requestedBonds = mutableMapOf<BluetoothDevice, BoundedStart>()
+    private val peers = linkedMapOf<BluetoothDevice, Peer>()
 
-    /* Collection of notification subscribers */
+    /** Worker-owned resources of one connected phone. The callbacks also belong to this attempt. */
+    private inner class Peer(private val device: BluetoothDevice) {
+        var mtu: Int? = null
+        private var client: BluetoothGatt? = null
+        private var wantsBond = false
+        private val negotiation = OptionalStart("Bluetooth MTU", worker, { logW(it) }, release = {
+            val old = client
+            client = null
+            old?.close()
+        }) { attempt ->
+            val callback = object : BluetoothGattCallback() {
+                override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) = worker.post {
+                    if (client !== gatt || !attempt.live) return@post
+                    if (status != BluetoothGatt.GATT_SUCCESS || newState == BluetoothProfile.STATE_DISCONNECTED) {
+                        attempt.fail("connection status $status/$newState")
+                    } else if (newState == BluetoothProfile.STATE_CONNECTED && attempt.pending()) {
+                        try {
+                            if (!gatt.requestMtu(512)) attempt.fail("request refused")
+                        } catch (failure: Throwable) { attempt.fail(failure.javaClass.name) }
+                    }
+                }
+                override fun onMtuChanged(gatt: BluetoothGatt, value: Int, status: Int) = worker.post {
+                    if (client !== gatt || !attempt.live) return@post
+                    if (status != BluetoothGatt.GATT_SUCCESS) attempt.fail("Android status $status")
+                    else if (attempt.done() || attempt.confirmed) recordMtu(device, value)
+                }
+            }
+            client = checkNotNull(device.connectGatt(context, true, callback))
+            attempt.pending() // A synchronous platform return can itself be late.
+        }
+
+        private val bond = OptionalStart("Bluetooth bonding", worker, { logW(it) }) { attempt ->
+            when (device.bondState) {
+                BluetoothDevice.BOND_BONDED -> attempt.done()
+                BluetoothDevice.BOND_BONDING -> Unit
+                else -> check(device.createBond())
+            }
+        }
+
+        fun requestBond() { wantsBond = true; bond.ensure() }
+        fun bondChanged(state: Int) {
+            if (state == BluetoothDevice.BOND_BONDED) wantsBond = false
+            if (state != BluetoothDevice.BOND_BONDING) bond.reset()
+        }
+        fun ensure() {
+            negotiation.ensure()
+            if (wantsBond) bond.ensure()
+        }
+        fun release() { negotiation.reset(); bond.reset() }
+    }
+
     private val registeredDevices = Collections.synchronizedSet(mutableSetOf<BluetoothDevice>())
-
-    internal var postPeer: (() -> Unit) -> Unit = { mainThread.post(it) }
     internal var showPeer: (BluetoothStatusUpdate) -> Unit = viewModel::onBtStatusUpdate
 
     fun start(): Boolean {
@@ -60,83 +105,44 @@ internal class EnergySignBluetoothGattServer(
 
     fun stop() {
         closed = true
-        mtuClients.values.forEach { it.stop() }
-        mtuClients.clear()
-        requestedBonds.values.forEach { it.reset() }
-        requestedBonds.clear()
-        if (gattServer != null) startup.optional("Bluetooth status display") { showPeer(BluetoothStatusUpdate(null, null)) }
-        registeredDevices.clear()
+        peers.values.forEach { it.release() }
+        peers.clear()
         val server = gattServer
         gattServer = null
+        registeredDevices.clear()
+        if (server != null) optional("Bluetooth status display", { logW(it) }) { showPeer(BluetoothStatusUpdate(null, null)) }
         server?.close()
     }
 
-    override fun onMtuChanged(device: BluetoothDevice?, mtu: Int) {
-        postPeer {
-            if (!closed && device != null) recordMtu(device, mtu)
-        }
+    override fun onMtuChanged(device: BluetoothDevice?, mtu: Int) = worker.post {
+        if (!closed && device != null) recordMtu(device, mtu)
     }
 
     private fun recordMtu(device: BluetoothDevice, mtu: Int) {
-        val peer = mtuClients[device] ?: return
+        val peer = peers[device] ?: return
         peer.mtu = mtu
         showPeer(BluetoothStatusUpdate(device, mtu))
     }
 
-    fun retryPeerSetup() {
-        mtuClients.forEach { (device, peer) -> connectMtu(device, peer) }
-        requestedBonds.keys.forEach(::ensureBond)
-    }
+    fun retryPeerSetup() = peers.values.forEach { it.ensure() }
+    fun bondState(device: BluetoothDevice, state: Int) { peers[device]?.bondChanged(state) }
 
-    private fun connectMtu(device: BluetoothDevice, peer: PeerMtu) {
-        peer.start { callback -> device.connectGatt(context, true, callback) }
-    }
-
-    private fun ensureBond(device: BluetoothDevice) {
-        val operation = requestedBonds[device] ?: return
-        val ticket = operation.begin { startup.failed("Bluetooth bonding", "bond-state deadline") } ?: return
-        val result = startup.optional("Bluetooth bonding") {
-            when (device.bondState) {
-                BluetoothDevice.BOND_BONDED -> ticket.done()
-                BluetoothDevice.BOND_BONDING -> Unit
-                else -> check(device.createBond())
-            }
-        }
-        if (result == null) ticket.fail()
-    }
-
-    fun bondState(device: BluetoothDevice, state: Int) {
-        val operation = requestedBonds[device] ?: return
-        if (state == BluetoothDevice.BOND_NONE) operation.reset()
-        if (state == BluetoothDevice.BOND_BONDED) {
-            operation.reset()
-            requestedBonds.remove(device)
-        }
-    }
-
-    override fun onConnectionStateChange(
-        bluetoothDevice: BluetoothDevice,
-        status: Int,
-        newState: Int
-    ) {
-        postPeer post@{
+    override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
+        // Descriptor writes and disconnects arrive on the GATT callback path. A deferred removal
+        // could erase a subscription acknowledged after this phone reconnects.
+        if (newState == BluetoothProfile.STATE_DISCONNECTED) registeredDevices.remove(device)
+        worker.post {
             if (closed) return@post
             when (newState) {
-                BluetoothProfile.STATE_CONNECTED -> {
-                    if (status != BluetoothGatt.GATT_SUCCESS || bluetoothDevice in mtuClients) return@post
-                    val peer = PeerMtu(startup,
-                        post = postPeer,
-                        changed = { mtu -> recordMtu(bluetoothDevice, mtu) },
-                    )
-                    mtuClients[bluetoothDevice] = peer
-                    showPeer(BluetoothStatusUpdate(bluetoothDevice, null))
-                    connectMtu(bluetoothDevice, peer)
+                BluetoothProfile.STATE_CONNECTED -> if (status == BluetoothGatt.GATT_SUCCESS && device !in peers) {
+                    val peer = Peer(device)
+                    peers[device] = peer
+                    showPeer(BluetoothStatusUpdate(device, null))
+                    peer.ensure()
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
-                    mtuClients.remove(bluetoothDevice)?.stop()
-                    registeredDevices.remove(bluetoothDevice)
-                    requestedBonds.remove(bluetoothDevice)?.reset()
-                    val remaining = mtuClients.entries.lastOrNull()
+                    peers.remove(device)?.release()
+                    val remaining = peers.entries.lastOrNull()
                     showPeer(BluetoothStatusUpdate(remaining?.key, remaining?.value?.mtu))
                 }
             }
@@ -236,15 +242,9 @@ internal class EnergySignBluetoothGattServer(
         when (descriptor.uuid) {
             CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR -> {
                 logD("Config descriptor read")
-                postPeer {
-                    if (!closed && device in mtuClients) {
-                        requestedBonds.getOrPut(device) { BoundedStart() }
-                        ensureBond(device)
-                    }
-                }
+                worker.post { if (!closed) peers[device]?.requestBond() }
 
                 val returnValue =
-//                            NOTIFICATIONS_ON
                     if (registeredDevices.contains(device)) {
                         NOTIFICATIONS_ON
                     } else {

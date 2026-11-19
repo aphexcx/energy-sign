@@ -136,7 +136,7 @@ class BluetoothRegistrationTest {
         val uart = service(NordicUartServiceProfile.NORDIC_UART_SERVICE_UUID)
         val session = BluetoothSession(SignStartup(warnings::add), {}, {}, { true }, { false },
             openGatt = { added ->
-                servers += EnergySignBluetoothGattServer(ContextWrapper(null), manager, model, serviceAdded = added)
+                servers += EnergySignBluetoothGattServer(ContextWrapper(null), manager, model, cx.aphex.energysign.TestStartWorker(), serviceAdded = added)
                 true
             },
             advertise = { _, done -> advertisements += done },
