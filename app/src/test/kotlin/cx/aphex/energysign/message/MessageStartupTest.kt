@@ -49,7 +49,7 @@ class MessageStartupTest {
                         val sent = mutableListOf<String>()
                         SignStartup { error(it) }.start(
                             prepareMessages = { messages = MessageManager(context, MessageRepository(), OwnerQueue()) },
-                            launchWarmUp = {}, warmUp = {}, startBluetooth = {}, subscribeToWrites = {},
+                            launchWarmUp = {}, warmUp = {}, createBluetooth = {}, startBluetooth = {}, subscribeToWrites = {},
                             startDnsSd = {}, startLink = { sent += messages.getNextMessage().str },
                         )
                         assertEquals(listOf("SAVED"), sent)

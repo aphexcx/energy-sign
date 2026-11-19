@@ -35,7 +35,9 @@ class EnergySignBluetoothGattServer(
     }
 
     fun stop() {
-        gattServer?.close()
+        val server = gattServer
+        gattServer = null
+        server?.close()
     }
 
     override fun onMtuChanged(device: BluetoothDevice?, mtu: Int) {

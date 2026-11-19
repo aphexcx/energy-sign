@@ -8,8 +8,8 @@ import cx.aphex.energysign.bluetooth.BluetoothStatusUpdate
 import cx.aphex.energysign.bluetooth.EnergySignBluetoothManager
 import cx.aphex.energysign.bluetooth.deliverEachWrite
 import cx.aphex.energysign.ext.NonNullMutableLiveData
-import cx.aphex.energysign.ext.logW
 import cx.aphex.energysign.ext.logE
+import cx.aphex.energysign.ext.logW
 import cx.aphex.energysign.message.ChooserProtocol
 import cx.aphex.energysign.message.Message
 import cx.aphex.energysign.message.MessageManager
@@ -33,7 +33,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
 
     private val owner: OwnerQueue by inject()
     private val messageManager: MessageManager by inject()
-    private lateinit var energySignBluetoothManager: EnergySignBluetoothManager
+    private val energySignBluetoothManager: EnergySignBluetoothManager?
     private val energySignUartManager: EnergySignUartManager = EnergySignUartManager(this, owner)
 
     /** The answer to a REQUEST of the sign, and the only way to MessageManager.getNextMessage. */
@@ -45,8 +45,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
             logE("Not sent: a message of $bytes bytes is more than the sign can take (${ChooserProtocol.MAX_FRAME_BYTES}): ${message.str.take(40)}...")
         },
     )
+
     init {
-        SignStartup { logW(it) }.start(
+        energySignBluetoothManager = SignStartup { logW(it) }.start(
             prepareMessages = {
                 // Resolve MessageManager on the main thread, before commands or UART requests arrive.
                 owner.neverWaitsOn(Looper.getMainLooper().thread)
@@ -60,13 +61,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
                 }
             },
             warmUp = { SignResponder.warmUp() },
-            startBluetooth = {
-                energySignBluetoothManager = EnergySignBluetoothManager(application.applicationContext, this)
-                energySignBluetoothManager.start()
-            },
-            subscribeToWrites = {
-                energySignBluetoothManager.receivedBytes.deliverEachWrite(messageManager::processNewBytes)
-            },
+            createBluetooth = { EnergySignBluetoothManager(application.applicationContext, this) },
+            startBluetooth = { it.start() },
+            subscribeToWrites = { it.receivedBytes.deliverEachWrite(messageManager::processNewBytes) },
             startDnsSd = { DnsSdAnnouncer(application.applicationContext).start() },
             startLink = energySignUartManager::start,
         )
@@ -75,9 +72,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
     override fun onCleared() {
         super.onCleared()
         // Who brings changes stops first, then who carries them out
-        energySignBluetoothManager.stop()
-
-        energySignUartManager.stop()
+        try {
+            energySignBluetoothManager?.stop()
+        } finally {
+            energySignUartManager.stop()
+        }
     }
 
     /**

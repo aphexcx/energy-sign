@@ -61,6 +61,7 @@ class AdStore(
         try {
             if (periodFile.exists()) periodFile.readText().trim().toIntOrNull()?.takeIf(::isValidPeriod) else null
         } catch (e: Throwable) {
+            runCatching { warn("Saved ad period failed (${e.javaClass.name}), sign link continues with the default period") }
             null
         }
 

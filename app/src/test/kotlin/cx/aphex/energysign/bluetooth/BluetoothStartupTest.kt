@@ -29,8 +29,7 @@ class BluetoothStartupTest {
         fun receiver() = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) = Unit
         }
-        receivers.register(receiver(), IntentFilter())
-        assertFailsWith<SecurityException> { receivers.register(receiver(), IntentFilter()) }
+        assertFailsWith<SecurityException> { receivers.register(receiver(), receiver()) }
         receivers.clear()
         receivers.clear()
         assertEquals(acquired, removed)

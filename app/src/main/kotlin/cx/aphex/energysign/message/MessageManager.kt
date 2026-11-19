@@ -2,6 +2,7 @@ package cx.aphex.energysign.message
 
 import android.content.Context
 import cx.aphex.energysign.R
+import cx.aphex.energysign.SignStartup
 import cx.aphex.energysign.ai.AIQueryDesk
 import cx.aphex.energysign.ai.AIReplyResult
 import cx.aphex.energysign.ai.AIReplySource
@@ -62,10 +63,11 @@ class MessageManager(
     //How often to advertise, e.g. every 5 user messages
     private var advertiseEvery: Int = 8
 
-    private val DEFAULT_ADS = listOf(
-        Message.ColorMessage.IconInvaders.Enemy1(context.getColor(R.color.icon_defaultblue)),
-        Message.ColorMessage.IconInvaders.Enemy2(context.getColor(R.color.icon_defaultblue))
-    )
+    private val startup = SignStartup { logW(it) }
+    private val defaultAds = startup.optional("Default ads") {
+        val blue = context.getColor(R.color.icon_defaultblue)
+        listOf(Message.ColorMessage.IconInvaders.Enemy1(blue), Message.ColorMessage.IconInvaders.Enemy2(blue))
+    }.orEmpty()
 
     private val replies: AIReplySource by inject()
     private val keyboardManager = KeyboardManager
@@ -125,7 +127,7 @@ class MessageManager(
             seenAt.keys
         },
         log = { logD(it) },
-        warmingUp = replies.warmUp { change { warmUpEnded() } },
+        warmingUp = startup.optional("AI reply warm-up") { replies.warmUp { change { warmUpEnded() } } } ?: false,
     )
 
     /**
@@ -154,43 +156,7 @@ class MessageManager(
 
         msgRepo.marqueeMessages.addAll(msgRepo.loadUserMessages(filesDir))
         adStore.loadPeriod()?.let { advertiseEvery = it }
-
-        advertisements.addAll(
-            loadAds()
-//            listOf(
-//                Message.ColorMessage.ChonkySlide("QUARAN", context.getColor(R.color.instagram)),
-//                Message.ColorMessage.ChonkySlide("TRANCE", context.getColor(R.color.instagram)),
-//                Message.ColorMessage.ChonkySlide(" LIVE ", context.getColor(R.color.instagram)),
-//                Message.ColorMessage.ChonkySlide(" LEDS ", context.getColor(R.color.instagram)),
-//                Message.NowPlayingTrackMessage(""),
-//                Message.ColorMessage.OneByOneMessage(
-//                    "INSTAGRAM:",
-//                    context.getColor(R.color.instagram)
-//                ),
-//                Message.ColorMessage.OneByOneMessage(
-//                    "@APHEXCX",
-//                    context.getColor(R.color.instahandle),
-//                    delayMs = 1000
-//                ),
-//                Message.ColorMessage.OneByOneMessage("TWITTER:", context.getColor(R.color.twitter)),
-//                Message.ColorMessage.OneByOneMessage(
-//                    "@APHEX",
-//                    context.getColor(R.color.twitter),
-//                    delayMs = 1000
-//                ),
-//                Message.ColorMessage.OneByOneMessage(
-//                    "SOUNDCLOUD",
-//                    context.getColor(R.color.soundcloud)
-//                ),
-//                Message.ColorMessage.OneByOneMessage(
-//                    "@APHEXCX",
-//                    context.getColor(R.color.soundcloud),
-//                    delayMs = 1000
-//                ),
-//                Message.Icon.Invaders
-//            )
-        )
-//        pushAdvertisements()
+        advertisements.addAll(startup.optional("Saved ads", ::loadAds) ?: defaultAds)
 
         // On the owner thread, in the same step that took the text and ended the input
         keyboardManager.onSubmitted = { msg ->
@@ -636,7 +602,7 @@ class MessageManager(
 
             AdStore.SavedAds.NoFile -> {
                 logD("${AdStore.ADS_FILE_NAME} does not exist yet; showing the default ad of <Invaders>.")
-                DEFAULT_ADS
+                defaultAds
             }
 
             is AdStore.SavedAds.Unreadable -> {
@@ -644,7 +610,7 @@ class MessageManager(
                     "Could not load ${AdStore.ADS_FILE_NAME} (${saved.why}); showing the default ads for this run. " +
                             "The file is left as it is until the next ad command."
                 )
-                DEFAULT_ADS
+                defaultAds
             }
         }
 

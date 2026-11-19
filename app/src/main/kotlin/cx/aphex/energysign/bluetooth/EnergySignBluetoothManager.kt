@@ -6,13 +6,14 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
+import android.bluetooth.le.BluetoothLeAdvertiser
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.ParcelUuid
 import cx.aphex.energysign.MainViewModel
+import cx.aphex.energysign.SignStartup
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
 import io.reactivex.rxjava3.core.Observable
@@ -21,6 +22,10 @@ class EnergySignBluetoothManager(
     val context: Context,
     val viewModel: MainViewModel
 ) {
+
+    private val startup = SignStartup { logW(it) }
+    private val receivers = BluetoothReceivers(context)
+    private var advertiser: BluetoothLeAdvertiser? = null
 
     val bluetoothManager: BluetoothManager =
         context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -65,13 +70,11 @@ class EnergySignBluetoothManager(
             when (state) {
                 BluetoothAdapter.STATE_ON -> {
                     logD("bluetoothReceiver: STATE_ON")
-                    startAdvertising()
-                    startServer()
+                    if (startup.optional("Bluetooth startup", ::startServices) == null) stop()
                 }
                 BluetoothAdapter.STATE_OFF -> {
                     logD("bluetoothReceiver: STATE_OFF")
-                    stopServer()
-                    stopAdvertising()
+                    stopServices()
                 }
             }
         }
@@ -124,45 +127,45 @@ class EnergySignBluetoothManager(
         }
     }
 
+    private fun startServices() {
+        startAdvertising()
+        startServer()
+    }
+
     fun start() {
+        try {
+            registerAndStart()
+        } catch (failure: Throwable) {
+            stop()
+            throw failure
+        }
+    }
+
+    private fun registerAndStart() {
         // We can't continue without proper Bluetooth support
         if (!context.checkBluetoothSupport(bluetoothAdapter)) {
-            logD("No bluetooth support, exiting")
             throw RuntimeException("No bluetooth support, exiting")
         }
 
-        // Register for system Bluetooth events
-        context.registerReceiver(
-            bluetoothReceiver,
-            IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
-        )
-
-        context.registerReceiver(bondStateReceiver,
-            IntentFilter().apply {
-                addAction(BluetoothDevice.ACTION_PAIRING_REQUEST)
-                addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
-                addAction(BluetoothDevice.ACTION_FOUND) //when new devices are discovered
-                priority = IntentFilter.SYSTEM_HIGH_PRIORITY
-            })
+        receivers.register(bluetoothReceiver, bondStateReceiver)
 
         if (!bluetoothAdapter.isEnabled) {
             logD("Bluetooth is currently disabled...enabling")
-            bluetoothAdapter.enable()
+            check(bluetoothAdapter.enable()) { "Bluetooth adapter refused to enable" }
         } else {
             logD("Bluetooth enabled...starting services")
-            startAdvertising()
-            startServer()
+            startServices()
         }
     }
 
     fun stop() {
-        val bluetoothAdapter = bluetoothManager.adapter
-        if (bluetoothAdapter.isEnabled) {
-            stopServer()
-            stopAdvertising()
-        }
+        startup.optional("Bluetooth receiver cleanup") { receivers.clear() }
+        stopServices()
+    }
 
-        context.unregisterReceiver(bluetoothReceiver)
+    private fun stopServices() {
+        startup.optional("Bluetooth GATT cleanup", ::stopServer)
+        startup.optional("Bluetooth advertiser cleanup", ::stopAdvertising)
     }
 
     /**
@@ -220,6 +223,7 @@ class EnergySignBluetoothManager(
                 .addServiceUuid(ParcelUuid(NordicUartServiceProfile.NORDIC_UART_SERVICE_UUID))
                 .build()
 
+            advertiser = it
             it.startAdvertising(settings, data, advertiseCallback)
         } ?: logW("Failed to create advertiser")
     }
@@ -228,7 +232,9 @@ class EnergySignBluetoothManager(
      * Stop Bluetooth advertisements.
      */
     private fun stopAdvertising() {
-        bluetoothManager.adapter.bluetoothLeAdvertiser?.stopAdvertising(advertiseCallback)
+        val active = advertiser
+        advertiser = null
+        active?.stopAdvertising(advertiseCallback)
     }
 
 }
