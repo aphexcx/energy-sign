@@ -1605,6 +1605,33 @@ class SignLinkPushTest {
     }
 
     @Test
+    fun `stopped while a push is held back and tried again and again, the link ends and closes the port within the second its owner waits`() {
+        // a transmitter that takes nothing: every push fails, is held back, and is tried again
+        val closed = CountDownLatch(1)
+        val offered = CountDownLatch(3)
+        val stuck = object : SignWire {
+            override fun read(buffer: ByteArray, length: Int): Int = 0
+            override fun write(buffer: ByteArray, length: Int): Int = 0.also { offered.countDown() }
+            override fun sendBreak(millis: Int) {}
+            override fun close() = closed.countDown()
+        }
+        val held = SignLink(
+            wire = stuck, baud = baud, name = "UART", events = {}, answer = { _, _ -> },
+            chooserFrame = { "H:B" },
+            attention = { Attention.AUTO },
+            timing = UartTimingLog(isEnabled = { false }, emit = {}),
+        )
+        val thread = Thread(held, "sign-link-test").apply { isDaemon = true }
+        thread.start()
+        held.requestPush()
+        assertTrue(offered.await(5, TimeUnit.SECONDS), "no push was tried")
+        held.stop()
+        thread.join(1_000) // EnergySignUartManager.stop waits this long
+        assertFalse(thread.isAlive)
+        assertEquals(0, closed.count)
+    }
+
+    @Test
     fun `a push asked for by the link thread itself wakes nobody, the pause that follows is a whole one`() {
         val pauses = CopyOnWriteArrayList<Long>()
         val quiet = object : SignWire {
