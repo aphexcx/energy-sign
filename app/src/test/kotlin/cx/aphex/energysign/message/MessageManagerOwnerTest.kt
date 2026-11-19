@@ -322,6 +322,25 @@ class MessageManagerOwnerTest {
     }
 
     @Test
+    fun `failed writes near the end of a long history restore the slot used for each attempt`() {
+        val app = startWithTwoStoredMessages()
+        val history = app.repo.marqueeMessages
+        history.addAll((3..77).map { Message.Marquee.User("MESSAGE $it") })
+        val selected = history[75]
+        history[1] = selected // a search by identity would find the earlier occurrence
+        app.phone("!last")
+        app.phone("!prev")
+        ownerRuns()
+
+        repeat(3) {
+            assertSame(selected, app.manager.getNextMessage())
+            app.manager.returnUnsent(selected)
+        }
+        assertSame(selected, app.manager.getNextMessage())
+        assertSame(history.last(), app.manager.getNextMessage())
+    }
+
+    @Test
     fun `a failed last stored message retries before the ads it triggered, even after repeated failures`() {
         val app = startWithTwoStoredMessages()
         val repo = app.repo
@@ -466,7 +485,7 @@ class MessageManagerOwnerTest {
             unsent = manager::returnUnsent,
         )
         link = SignLink(
-            wire = wire, baud = 14400, name = "test", events = ::ownerRuns,
+            wire = wire, baud = 14400, name = "test", events = { ownerRuns() },
             prepareAnswers = {
                 SignResponder.warmUp()
                 preparedOn = Thread.currentThread()
