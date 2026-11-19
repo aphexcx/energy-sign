@@ -21,6 +21,7 @@ import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 import java.io.File
 import java.util.IdentityHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 
 class MessageManager(
@@ -61,6 +62,16 @@ class MessageManager(
 
     //How often to advertise, e.g. every 5 user messages
     private var advertiseEvery: Int = 8
+
+    /**
+     * The two lines an ad round shows before the line of the track that is playing. The same two
+     * objects in every ad round, so that they can be found in the queue again when the track
+     * changes (by what they ARE, not by what they say: an ad of the owner's may say the same).
+     */
+    private val trackHeading: List<Message> = listOf(
+        Message.ColorMessage.OneByOneMessage("CURRENT", context.getColor(R.color.twitch)),
+        Message.ColorMessage.OneByOneMessage("TRACK:", context.getColor(R.color.twitch)),
+    )
 
     private val DEFAULT_ADS = listOf(
         Message.ColorMessage.IconInvaders.Enemy1(context.getColor(R.color.icon_defaultblue)),
@@ -237,16 +248,7 @@ class MessageManager(
 
     // TODO deal with new usermessages coming in during advertisements
     private fun pushAdvertisements() {
-        val nowPlayingMsgs: List<Message> = nowPlayingTrack?.let {
-            listOf<Message>(
-                Message.ColorMessage.OneByOneMessage(
-                    "CURRENT",
-                    context.getColor(R.color.twitch)
-                ),
-                Message.ColorMessage.OneByOneMessage("TRACK:", context.getColor(R.color.twitch)),
-                it
-            )
-        } ?: emptyList()
+        val nowPlayingMsgs: List<Message> = nowPlayingTrack?.let { trackHeading + it } ?: emptyList()
 
         // Hack to avoid advertising back to back with another advertisement.
         if (!msgRepo.oneTimeMessages.any { it is Message.ColorMessage.IconInvaders }) {
@@ -702,35 +704,125 @@ class MessageManager(
         }
     }
 
-    /** Returns when the owner has taken the track in. */
-    fun processNowPlayingTrack(track: BeatLinkTrack) {
-        // Made here, on the caller's thread: fitting a long title to the sign serialises it more
-        // than once, and the owner has the sign to answer. The owner only stores the result.
-        val line = if (track.isEmpty) null else AdRules.nowPlaying(track.artist, track.title, note = { logW(it) })
-        changeAndWait { takeInTrack(track, line) }
+    /**
+     * The place of a track update in the order the updates came in. There is one way to get
+     * one, [acceptTrackUpdate], and no track update is taken without it.
+     */
+    class TrackTurn internal constructor(internal val number: Long)
+
+    /** Counts the track updates in the order they came in. From any thread. */
+    private val trackUpdates = AtomicLong()
+
+    /** How many track updates have been given their place in that order (a test waits for one). */
+    internal val trackTurnsTaken: Long get() = trackUpdates.get()
+
+    /** The number of the newest update the owner has taken in. Owner only. */
+    private var newestTrackUpdate: Long = 0
+
+    /** The track whose announcement was queued last. Owner only. */
+    private var lastAnnounced: BeatLinkTrack? = null
+
+    /**
+     * Gives a track update its place in the order. To be called the moment the update comes in,
+     * before anything else is done with it (see the route, POST /currentTrack): whatever is done
+     * between its coming in and this call is time in which a later update can get ahead of it.
+     */
+    fun acceptTrackUpdate(): TrackTurn = TrackTurn(trackUpdates.incrementAndGet())
+
+    /**
+     * Takes [track] in, at the place [turn] gives it: when a later update is in already, this
+     * one is left out. Returns when the owner has dealt with it. Not from the owner's thread
+     * with a long title, and never from the main thread: the caller does the slow part.
+     */
+    fun processNowPlayingTrack(track: BeatLinkTrack, turn: TrackTurn) {
+        val update = prepareTrack(track, turn)
+        changeAndWait { takeInTrack(update) }
     }
 
-    /** [line] is the track's line for the sign, made by the caller; null for an empty track. Owner only. */
-    private fun takeInTrack(track: BeatLinkTrack, line: Message.NowPlayingTrackMessage?) {
-        if (line == null) {
-            nowPlayingTrack = null
-            pushAdvertisements()
-        } else {
-            if (track !in playedTracks) {
-                nowPlayingTrack = line
-                msgRepo.oneTimeMessages.removeIf { it is NowPlayingAnnouncement || it is Message.NowPlayingTrackMessage }
+    /**
+     * A track as it goes to the owner: [number] is its place in the order, [line] its line for
+     * the sign (null for an empty track) and [notes] what there is to say about that line.
+     */
+    private class TrackUpdate(
+        val number: Long,
+        val track: BeatLinkTrack,
+        val line: Message.NowPlayingTrackMessage?,
+        val notes: List<String>,
+    )
 
-                msgRepo.enqueueOneTimeMessage(NowPlayingAnnouncement)
-                msgRepo.enqueueOneTimeMessage(line)
-                msgRepo.enqueueOneTimeMessage(Message.Starfield())
+    /**
+     * The caller's part of a track update, on the caller's thread: its line is made here.
+     * Fitting a long title to the sign serialises it more than once, and the owner has the sign
+     * to answer.
+     */
+    private fun prepareTrack(posted: BeatLinkTrack, turn: TrackTurn): TrackUpdate {
+        // The server fills a track with Gson, which does not look at Kotlin's types: an artist
+        // or a title the client left out is null in [posted], and such a track cannot even be
+        // compared with another. From here on it is a track whose missing parts are empty.
+        val artist: String? = posted.artist
+        val title: String? = posted.title
+        val track = posted.copy(artist = artist.orEmpty(), title = title.orEmpty())
+        val notes = mutableListOf<String>()
+        val line = if (track.isEmpty) null else AdRules.nowPlaying(track.artist, track.title, note = { notes += it })
+        logD(
+            "Track update ${turn.number}: " +
+                    if (line == null) "a stop." else "its line is made, ${line.str.length} characters."
+        )
+        return TrackUpdate(turn.number, track, line, notes)
+    }
 
-
-                while (playedTracks.size > MAX_PLAYED_TRACKS_MEMORY) {
-                    playedTracks.remove(playedTracks.first())
-                }
-                playedTracks.add(track)
-            }
+    /**
+     * Owner only. THE RULE: what is playing is decided by the update that was accepted last,
+     * alone: a track never played, a track played before, the track that is playing already, or
+     * a stop, and in whatever order the updates get here (one that a later one has overtaken
+     * is left out). Whether a track is ANNOUNCED is a second question ([playedTracks]) and never
+     * changes the first. A track without anything the sign can show has no line and is shown
+     * as nothing playing.
+     */
+    private fun takeInTrack(update: TrackUpdate) {
+        if (update.number < newestTrackUpdate) {
+            // A newer update is in already: this one was overtaken while its line was made.
+            logD("Track update ${update.number} is left out: update $newestTrackUpdate came after it and is in already.")
+            return
         }
+        newestTrackUpdate = update.number
+        val track = update.track
+        val line = update.line
+
+        // 1. What is playing. When that changes, nothing of the track before stays in the
+        //    queue: not its announcement, not its line in an ad round that is still waiting.
+        val changed = line != nowPlayingTrack
+        nowPlayingTrack = line
+        if (changed) {
+            // An announcement that is still waiting was never shown: its track does not count
+            // as played, so it is announced when it comes back.
+            if (msgRepo.oneTimeMessages.any { it === NowPlayingAnnouncement }) lastAnnounced?.let { playedTracks.remove(it) }
+            msgRepo.oneTimeMessages.removeIf { queued ->
+                queued is NowPlayingAnnouncement || queued is Message.NowPlayingTrackMessage || trackHeading.any { it === queued }
+            }
+            // (the track has ended: an ad round. Not for a stop when nothing was playing.)
+            if (line == null) pushAdvertisements()
+        }
+        if (line == null) return
+
+        // 2. Whether it is announced: when it changes what the sign shows, and was not played
+        //    lately. (Two tracks with the same line are one to the sign: no second announcement.)
+        if (changed && track !in playedTracks) {
+            // (what there is to say about the line is said for a track that is shown, once)
+            update.notes.forEach { logW(it) }
+
+            msgRepo.enqueueOneTimeMessage(NowPlayingAnnouncement)
+            msgRepo.enqueueOneTimeMessage(line)
+            msgRepo.enqueueOneTimeMessage(Message.Starfield())
+            lastAnnounced = track
+        }
+
+        // 3. It was played, and it is the newest of the played: the oldest are forgotten first.
+        playedTracks.remove(track)
+        while (playedTracks.size > MAX_PLAYED_TRACKS_MEMORY) {
+            playedTracks.remove(playedTracks.first())
+        }
+        playedTracks.add(track)
     }
 
     /* For replies generated by externally running models e.g. Llama running on my laptop */

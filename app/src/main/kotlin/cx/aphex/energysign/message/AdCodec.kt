@@ -38,6 +38,8 @@ class AdFileException(message: String) : Exception(message)
 object AdCodec {
     private val gson = Gson()
 
+    private const val OPAQUE: Int = 0xFF shl 24
+
     fun encode(ads: List<Message>): String = gson.toJson(ads)
 
     /**
@@ -142,7 +144,8 @@ object AdCodec {
         return text
     }
 
-    private fun JsonObject.colour(): Int = (channel("r") shl 16) or (channel("g") shl 8) or channel("b")
+    /** Opaque (alpha 0xFF), like the colours the app gets from its resources: so a restored ad equals the ad that was saved. */
+    private fun JsonObject.colour(): Int = OPAQUE or (channel("r") shl 16) or (channel("g") shl 8) or channel("b")
 
     private fun JsonObject.channel(key: String): Int {
         val value = wholeNumber(key) ?: throw AdFileException("\"$key\" is missing")

@@ -5,7 +5,6 @@ import cx.aphex.energysign.message.Message.ColorMessage.AIThinking
 import cx.aphex.energysign.message.Message.ColorMessage.ChonkySlide
 import cx.aphex.energysign.message.Message.ColorMessage.IconInvaders
 import cx.aphex.energysign.message.Message.ColorMessage.OneByOneMessage
-import org.junit.jupiter.api.Disabled
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
@@ -41,7 +40,6 @@ class MessageSerializationDetailedTest {
     }
 
     @Test
-    @Disabled("AdCodec restores 0xFF123456 as 0x00123456 on master. Re-enable with the opaque color fix in PR #6.")
     fun `restoring a one by one ad preserves the opaque Android color`() {
         val ad = OneByOneMessage("Test", 0xFF123456.toInt(), 2000)
         val restored = assertIs<OneByOneMessage>(AdCodec.decode(AdCodec.encode(listOf(ad))).single())
