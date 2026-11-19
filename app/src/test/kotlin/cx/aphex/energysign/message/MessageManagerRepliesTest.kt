@@ -730,6 +730,8 @@ class MessageManagerRepliesTest {
         manager.onNewPostedAIReply(PostedAIAnswer("For newest", inReplyTo = "NEWEST"))
         ownerRuns()
         assertSame(middle, next())
+        manager.returnUnsent(middle)
+        assertSame(middle, next(), "the second failure restores the slot after insertion")
         assertEquals("OLDEST", next().str)
     }
 
