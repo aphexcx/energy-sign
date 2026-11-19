@@ -20,6 +20,7 @@ import kotlinx.atomicfu.update
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 import java.io.File
+import java.util.Collections
 import java.util.IdentityHashMap
 import java.util.concurrent.atomic.AtomicLong
 
@@ -37,9 +38,22 @@ class MessageManager(
 ) :
     KoinComponent {
     private val advertisements: MutableList<Message> = mutableListOf()
+
     /**
-     * The lines of the tracks played lately, the newest last. By LINE, not by the track's id:
-     * two ids with one line are one track to the sign.
+     * The same ads, to be asked "is this one of them?" (the object itself, not one that looks
+     * like it) without a walk through the list. It changes with the list, in [setAds] alone.
+     */
+    private val adsOfNow: MutableSet<Message> = Collections.newSetFromMap(IdentityHashMap())
+
+    /**
+     * The lines whose ANNOUNCEMENT the sign was handed lately, the newest last. By LINE, not by
+     * the track's id: two ids with one line are one track to the sign.
+     *
+     * A line counts as played when it is in here, or when its announcement is waiting in the
+     * queue. For the second nothing is kept: the queue itself is asked ([takeInTrack]). So an
+     * announcement that leaves the queue unshown (a key press empties it, or whatever else does
+     * tomorrow) leaves no mark behind, and nobody who takes things out of the queue has to know
+     * of this. ONE place puts a line in here: [announcementHandedOver], where the sign takes it.
      */
     private val playedLines: LinkedHashSet<Message.NowPlayingTrackMessage> = linkedSetOf()
     private var nowPlayingTrack: Message.NowPlayingTrackMessage? = null
@@ -181,7 +195,7 @@ class MessageManager(
         msgRepo.marqueeMessages.addAll(msgRepo.loadUserMessages(filesDir))
         adStore.loadPeriod()?.let { advertiseEvery = it }
 
-        advertisements.addAll(
+        setAds(
             loadAds()
 //            listOf(
 //                Message.ColorMessage.ChonkySlide("QUARAN", context.getColor(R.color.instagram)),
@@ -374,6 +388,7 @@ class MessageManager(
 
         // Display one-time messages first
         msgRepo.oneTimeMessages.removeFirstOrNull()?.let { oneTime ->
+            if (oneTime === NowPlayingAnnouncement) announcementHandedOver()
             if (oneTime is Message.ColorMessage.AIThinking) {
                 logD("AI is still thinking, injecting another thinking notification")
                 msgRepo.pushOneTimeMessage(oneTime.thinkMore())
@@ -481,7 +496,29 @@ class MessageManager(
             message !is Message.ColorMessage.AIThinking
         ) {
             msgRepo.putBackOneTimeMessage(message)
+            if (message === NowPlayingAnnouncement) announcementNotWritten()
         }
+    }
+
+    /**
+     * The sign takes the announcement of a track: its line is played. THE ONE PLACE where a line
+     * becomes played. An announcement in the queue is always that of the track that is playing:
+     * when what is playing changes, the announcement of the track before leaves the queue
+     * ([takeInTrack]). Nothing is forgotten for it here: see [announcementNotWritten].
+     */
+    private fun announcementHandedOver() {
+        // (not among the played yet, or it would not have been announced: it is the newest)
+        nowPlayingTrack?.let { playedLines.add(it) }
+    }
+
+    /**
+     * The announcement that was taken could not be written, and is the first in the queue
+     * again: it was not handed over after all, and its line is "waiting" as before, no more.
+     * (That is why the memory is cut to its length only when a track is taken in: an
+     * announcement that was never written must not have cost an older line its place.)
+     */
+    private fun announcementNotWritten() {
+        nowPlayingTrack?.let { playedLines.remove(it) }
     }
 
     /**
@@ -664,9 +701,16 @@ class MessageManager(
         return AdLineParser.parse(adString, palette, warn = { logW(it) })
     }
 
-    private fun replaceAdsWith(ads: List<Message>) {
+    /** The ad list becomes [ads]: the one place where it changes, at the start and at an ad command. */
+    private fun setAds(ads: List<Message>) {
         advertisements.clear()
         advertisements.addAll(ads)
+        adsOfNow.clear()
+        adsOfNow.addAll(ads)
+    }
+
+    private fun replaceAdsWith(ads: List<Message>) {
+        setAds(ads)
         saveAds()
         pushAdvertisements()
     }
@@ -765,9 +809,6 @@ class MessageManager(
     /** The number of the newest update the owner has taken in. Owner only. */
     private var newestTrackUpdate: Long = 0
 
-    /** The line whose announcement was queued last. Owner only. */
-    private var lastAnnounced: Message.NowPlayingTrackMessage? = null
-
     /**
      * Gives a track update its place in the order. To be called the moment the update comes in,
      * before anything else is done with it (see the route, POST /currentTrack): whatever is done
@@ -835,45 +876,50 @@ class MessageManager(
         val line = update.line
 
         // 1. What is playing. WHAT IS QUEUED FOR A TRACK IS ONE PIECE: its announcement with
-        //    its line and its stars, its line with the heading in an ad round that is still
-        //    waiting, and its mark as "played". When what is playing changes, the piece of the
-        //    track before goes as one, so the queue does not grow with the number of changes.
+        //    its line and its stars, and its line with the heading in an ad round that is still
+        //    waiting. When what is playing changes, the piece of the track before goes as one,
+        //    so the queue does not grow with the number of changes. (Whether its line counts as
+        //    played goes with the announcement by itself: see [playedLines].)
         val changed = line != nowPlayingTrack
         nowPlayingTrack = line
+        val queue = msgRepo.oneTimeMessages
         if (changed) {
-            val queue = msgRepo.oneTimeMessages
-            // An announcement that is still waiting was never shown: its line does not count
-            // as played, so it is announced when it comes back (under whatever id).
-            if (queue.any { it === NowPlayingAnnouncement }) lastAnnounced?.let { playedLines.remove(it) }
             queue.removeIf { queued ->
                 queued is NowPlayingAnnouncement || queued is Message.NowPlayingTrackMessage ||
                         queued === announcementStars || trackHeading.any { it === queued }
             }
             // The track has ended: an ad round. Not for a stop when nothing was playing, and
             // not while an ad round is still waiting (stops do not pile them up).
-            if (line == null && queue.none { queued -> advertisements.any { it === queued } }) pushAdvertisements()
+            if (line == null && queue.none { it in adsOfNow }) pushAdvertisements()
         }
         if (line == null) return
 
-        // 2. Whether it is announced: when its line was not played lately. (The line that is
-        //    playing is among the played, so the same line again, under whatever id, is not
-        //    announced a second time.)
-        if (line !in playedLines) {
-            // (what there is to say about the line is said for a track that is shown, once)
-            update.notes.forEach { logW(it) }
-
-            msgRepo.enqueueOneTimeMessage(NowPlayingAnnouncement)
-            msgRepo.enqueueOneTimeMessage(line)
-            msgRepo.enqueueOneTimeMessage(announcementStars)
-            lastAnnounced = line
-        }
-
-        // 3. It was played, and it is the newest of the played: the oldest are forgotten first.
-        playedLines.remove(line)
-        while (playedLines.size > MAX_PLAYED_TRACKS_MEMORY) {
+        // 2. Whether it is announced: not when the sign was handed its announcement lately, and
+        //    not while its announcement is waiting (an announcement that is in the queue now is
+        //    this line's: the one of a track before left above). So the same line again, under
+        //    whatever id, is not announced a second time; and a line whose announcement left the
+        //    queue unshown is announced when it comes back.
+        while (playedLines.size > PLAYED_LINES_REMEMBERED) {
             playedLines.remove(playedLines.first())
         }
-        playedLines.add(line)
+        when {
+            // played again: it is the newest of the played, the oldest are forgotten first
+            line in playedLines -> {
+                playedLines.remove(line)
+                playedLines.add(line)
+            }
+
+            queue.any { it === NowPlayingAnnouncement } -> Unit
+
+            else -> {
+                // (what there is to say about the line is said for a track that is shown, once)
+                update.notes.forEach { logW(it) }
+
+                msgRepo.enqueueOneTimeMessage(NowPlayingAnnouncement)
+                msgRepo.enqueueOneTimeMessage(line)
+                msgRepo.enqueueOneTimeMessage(announcementStars)
+            }
+        }
     }
 
     /* For replies generated by externally running models e.g. Llama running on my laptop */
@@ -1022,7 +1068,8 @@ class MessageManager(
 //    }
 
     companion object {
-        private const val MAX_PLAYED_TRACKS_MEMORY: Int = 4
+        /** How many lines are remembered as played (see [playedLines]). */
+        private const val PLAYED_LINES_REMEMBERED: Int = 5
 
     }
 }

@@ -665,9 +665,15 @@ class MessageManagerOwnerTest {
      * lists and its own saver (run by hand), on the owner of this test. Building a second one
      * on the same directory is a restart.
      */
-    private inner class App(val home: File) {
+    private inner class App(
+        val home: File,
+        /** On the lists this test's keyboard types at: there is one keyboard, and it has one repository (the test's own). */
+        typedAt: Boolean = false,
+        /** Track updates come on the owner's own thread, which is answered at once: for the tables of many cells. */
+        private val fromTheOwner: Boolean = false,
+    ) {
         val unsaved = mutableListOf<Runnable>()
-        val repo = MessageRepository(saver = Executor { unsaved += it })
+        val repo = if (typedAt) this@MessageManagerOwnerTest.repo else MessageRepository(saver = Executor { unsaved += it })
         val manager: MessageManager
 
         init {
@@ -687,7 +693,8 @@ class MessageManagerOwnerTest {
 
         /** A track update as the route makes it: it takes its turn, then the public entry, on a thread of its own, while the owner (this thread) takes its turns. */
         fun post(track: BeatLinkTrack, turn: MessageManager.TrackTurn = manager.acceptTrackUpdate()) =
-            waitingCall("beatlink") { manager.processNowPlayingTrack(track, turn) }
+            if (fromTheOwner) manager.processNowPlayingTrack(track, turn)
+            else waitingCall("beatlink") { manager.processNowPlayingTrack(track, turn) }
 
         fun saverRuns() {
             while (unsaved.isNotEmpty()) unsaved.removeAt(0).run()
@@ -1216,17 +1223,26 @@ class MessageManagerOwnerTest {
         Kind.STOP -> stopOfTheTrack
     }
 
+    /** The sign asks until nothing is queued: everything that was queued has been handed to it. */
+    private fun signReadsTheQueue(app: App) {
+        var asked = 0
+        while (app.repo.oneTimeMessages.isNotEmpty()) {
+            app.manager.getNextMessage()
+            check(++asked < 100) { "the queue does not get shorter: ${app.repo.oneTimeMessages.map { it.str }}" }
+        }
+    }
+
     private fun lineOf(track: BeatLinkTrack): String? = if (track.isEmpty) null else "${track.artist} - ${track.title}"
 
     /** The start of every cell: "Old" was played, then "Current", which is playing; both were shown; nothing is queued. The ad list is the place of the track and one ad. */
-    private fun appWithCurrentPlaying(adRoundWaiting: Boolean = false): App {
-        val app = App(newFilesDir())
+    private fun appWithCurrentPlaying(adRoundWaiting: Boolean = false, typedAt: Boolean = false, fromTheOwner: Boolean = false): App {
+        val app = App(newFilesDir(), typedAt, fromTheOwner)
         app.phone(trackAds)
         ownerRuns()
         app.post(oldTrack)
-        app.repo.oneTimeMessages.clear() // the sign has shown its announcement
+        signReadsTheQueue(app) // the sign is handed its announcement: an emptied queue would not be that
         app.post(currentTrack)
-        app.repo.oneTimeMessages.clear() // and this one
+        signReadsTheQueue(app) // and this one
         if (adRoundWaiting) {
             app.phone(trackAds)
             ownerRuns()
@@ -1648,21 +1664,436 @@ class MessageManagerOwnerTest {
         ownerRuns()
         val tracks = (1..6).map { BeatLinkTrack(id = 400 + it, title = "T$it", artist = "DJ") }
         fun announcedWhenPosted(track: BeatLinkTrack): Boolean {
-            app.repo.oneTimeMessages.clear()
             app.post(track)
-            return announcements(app) == 1
+            return (announcements(app) == 1).also { signReadsTheQueue(app) } // what is announced is shown
         }
 
         // six tracks never played: each is announced
         assertEquals(List(6) { true }, tracks.map { announcedWhenPosted(it) })
-        // played: T1 is forgotten (five are remembered: T2..T6). T3 comes back: remembered, and now the newest
-        assertEquals(false, announcedWhenPosted(tracks[2]))
-        // T1 comes back: forgotten, so announced; the oldest by last play, T2, is forgotten for it
+        // played: T1 is forgotten (five are remembered: T2..T6). T2, the oldest, comes back: remembered, and now the newest
+        assertEquals(false, announcedWhenPosted(tracks[1]))
+        // T1 comes back: forgotten, so announced; the oldest by last play, which is T3 now, is forgotten for it
         assertEquals(true, announcedWhenPosted(tracks[0]))
-        // T4 and T3 are still remembered (T3 because it was played again), T2 is not
+        // T2 is still remembered (because it was played again), and T4; T3 is not
+        assertEquals(false, announcedWhenPosted(tracks[1]))
         assertEquals(false, announcedWhenPosted(tracks[3]))
-        assertEquals(false, announcedWhenPosted(tracks[2]))
-        assertEquals(true, announcedWhenPosted(tracks[1]))
+        assertEquals(true, announcedWhenPosted(tracks[2]))
+    }
+
+    // ---- WHAT LEAVES THE QUEUE UNSHOWN (gate r1 on the second follow-up).
+    // The rule: a line counts as played only if the sign was HANDED its announcement, or the
+    // announcement is still in the queue. Whatever takes an announcement out of the queue
+    // unshown takes the mark with it, whoever does it; and what only cuts something else out
+    // of the queue leaves both.
+
+    /** Something that takes messages out of the queue, or handles the queue, and is not the sign being handed one. */
+    private class Leaving(
+        val what: String,
+        /** Whether a waiting announcement is gone after it. */
+        val emptiesTheQueue: Boolean,
+        /** Whether it is the keyboard's doing (the app of the cell is then the one the keyboard types at). */
+        val typedAt: Boolean = false,
+        val happens: (App) -> Unit,
+    )
+
+    private val aKeyPress = Leaving("a key press", emptiesTheQueue = true, typedAt = true) {
+        KeyboardManager.processNewKeyboardKey('x')
+        ownerRuns()
+    }
+
+    /** Not a path of today: whoever empties the queue tomorrow, without a word to anybody. */
+    private val emptiedByAnyoneElse = Leaving("the queue emptied by anyone else", emptiesTheQueue = true) { app ->
+        app.repo.oneTimeMessages.clear()
+    }
+
+    /** The sign asks, and the answer cannot be written: the message that was taken goes back. */
+    private val aWriteThatFails = Leaving("a write to the sign that fails", emptiesTheQueue = false) { app ->
+        if (app.repo.oneTimeMessages.isNotEmpty()) failedWrite(app)
+    }
+
+    private val theThinkingNoticeEnding = Leaving("the thinking notice put up and taken down", emptiesTheQueue = false) { app ->
+        app.manager.togglePersistentThinkingMessage(true)
+        app.manager.togglePersistentThinkingMessage(false)
+    }
+
+    /** What `!delete` does to the queue when the deleted message is a reply waiting behind its heading. */
+    private val aDeletedReplysPiece = Leaving("the heading and the reply of a deleted reply dropped", emptiesTheQueue = false) { app ->
+        val reply = Message.Marquee.Chonky("A REPLY")
+        app.repo.pushInOnePiece(listOf(Message.ColorMessage.ChonkySlide("SAYS...", 0), reply))
+        app.repo.dropOnePieceOf(reply)
+    }
+
+    /** In chooser mode a request of the sign, for the next message or a poll, is answered and takes nothing out of the queue. */
+    private val requestsInTheChooser = Leaving("two requests of the sign in chooser mode, then a pause and its end", emptiesTheQueue = false) { app ->
+        app.phone("!choose")
+        ownerRuns()
+        for (request in "~?") {
+            val answered = SignResponder(nextMessage = { app.manager.getNextMessage() }, write = { _, _ -> true })
+                .onRequest(byteArrayOf(request.code.toByte()), 1)
+            check(answered == null || answered is Message.Chooser) { "in chooser mode the sign was sent ${answered?.str}" }
+        }
+        listOf("!endchoose", "!pause", "!unpause").forEach { app.phone(it) }
+        ownerRuns()
+    }
+
+    /** One request of the sign whose answer cannot be written: the write says so, or it throws [thrown]. Returns what was taken. */
+    private fun failedWrite(app: App, thrown: RuntimeException? = null): Message? {
+        var taken: Message? = null
+        val responder = SignResponder(
+            nextMessage = { app.manager.getNextMessage().also { taken = it } },
+            write = { _, _ -> if (thrown != null) throw thrown else false },
+            unsent = { app.manager.returnUnsent(it) },
+        )
+        try {
+            responder.onRequest(byteArrayOf('~'.code.toByte()), 1)
+        } catch (e: RuntimeException) {
+            if (e !== thrown) throw e
+        }
+        return taken
+    }
+
+    /** After a cell that typed: the input is ended (which leaves stars), and nothing is queued for the next cell. */
+    private fun typingOver() {
+        endTyping()
+        repo.oneTimeMessages.clear()
+    }
+
+    /**
+     * The table of ids against lines (every pair of updates, each posted under two ids, in all
+     * 24 orders of arrival) with [leaving] placed after the first, the second, the third or the
+     * fourth update to reach the owner. Then the lines come back, under ids of their own.
+     * The sign reads nothing in a cell, so no announcement of a cell is ever handed to it.
+     * Returns the cells that are wrong, as lines; 16 x 24 x 4 = 1536 cells.
+     */
+    private fun wrongCellsWith(leaving: Leaving): List<String> {
+        val wrong = mutableListOf<String>()
+        for (sequence in sequencesOf(2)) {
+            val updates = sequence.flatMapIndexed { i, kind ->
+                val update = updateOf(kind, i + 1)
+                listOf(update, if (update.isEmpty) update else update.copy(id = update.id + 1000))
+            }
+            val last = updates.last()
+            val lastIsNew = sequence.last() == Kind.NEW
+            for (arrival in permutations(updates.indices.toList())) for (after in arrival.indices) {
+                val savesWaiting = unsaved.size
+                val app = appWithCurrentPlaying(typedAt = leaving.typedAt, fromTheOwner = true)
+                val problems = mutableListOf<String>()
+                try {
+                    val turns = updates.map { app.manager.acceptTrackUpdate() }
+                    arrival.forEachIndexed { n, i ->
+                        app.post(updates[i], turns[i])
+                        if (n == after) leaving.happens(app)
+                    }
+                    // The announcement of the update accepted last is waiting when that is a new
+                    // track; not when the queue was emptied after that update reached the owner.
+                    val emptiedAfterTheLast = leaving.emptiesTheQueue && after >= arrival.indexOf(updates.lastIndex)
+                    val waiting = if (lastIsNew && !emptiedAfterTheLast) 1 else 0
+                    if (announcements(app) != waiting) problems += "${announcements(app)} announcement(s) waiting, not $waiting"
+                    // Its line comes back under another id: announced, or still announced, when it is new.
+                    if (!last.isEmpty) app.post(last.copy(id = last.id + 2000))
+                    problems += wrongOnTheSign(app, playing = lineOf(last), announced = lastIsNew)
+                    // And the line of the first update: no announcement of it was handed to the sign either.
+                    if (sequence.first() == Kind.NEW) {
+                        app.post(updates.first().copy(id = updates.first().id + 3000))
+                        val queue = app.repo.oneTimeMessages.toList()
+                        val at = queue.indexOfFirst { it === Message.FlashingAnnouncement.NowPlayingAnnouncement }
+                        if (announcements(app) != 1 || queue.getOrNull(at + 1)?.str != lineOf(updates.first())) {
+                            problems += "the first line came back and is not announced: ${queue.map { it.str }}"
+                        }
+                    }
+                } finally {
+                    if (leaving.typedAt) {
+                        typingOver()
+                        // The ad saves of the cell went to this test's own saver; they are for a
+                        // directory nobody reads again, and 3000 of them cost the next test a
+                        // quarter of a minute. (No cell changes a stored message: no save of the
+                        // list, of which the saver keeps one waiting, is among them.)
+                        unsaved.subList(savesWaiting, unsaved.size).clear()
+                    }
+                }
+                if (problems.isNotEmpty()) {
+                    wrong += sequence.joinToString(", then ") { it.short } + " | arriving " + arrival.map { it + 1 } +
+                            " | ${leaving.what} after the ${after + 1}. | " + problems.joinToString("; ")
+                }
+            }
+        }
+        return wrong
+    }
+
+    private fun assertNoWrongCells(leaving: Leaving) {
+        val wrong = wrongCellsWith(leaving)
+
+        assertEquals(emptyList(), wrong.take(12), "${wrong.size} wrong cells of 1536 with ${leaving.what} (the first twelve are shown)")
+    }
+
+    @Test
+    fun `the table of ids against lines with a key press between any two of its events`() = assertNoWrongCells(aKeyPress)
+
+    @Test
+    fun `the table of ids against lines with the queue emptied by anyone else between any two of its events`() = assertNoWrongCells(emptiedByAnyoneElse)
+
+    @Test
+    fun `the table of ids against lines with a failed write to the sign between any two of its events`() = assertNoWrongCells(aWriteThatFails)
+
+    @Test
+    fun `the table of ids against lines with the thinking notice put up and taken down between any two of its events`() = assertNoWrongCells(theThinkingNoticeEnding)
+
+    @Test
+    fun `the table of ids against lines with the piece of a deleted reply dropped between any two of its events`() = assertNoWrongCells(aDeletedReplysPiece)
+
+    @Test
+    fun `the table of ids against lines with requests of the sign in chooser mode between any two of its events`() = assertNoWrongCells(requestsInTheChooser)
+
+    private val song = BeatLinkTrack(id = 701, title = "Song", artist = "DJ")
+
+    @Test
+    fun `a track is queued, a key is pressed before the sign reads it, the track stops, the same line under a new id is announced`() {
+        // the sequence of gate r1
+        val app = appWithCurrentPlaying(typedAt = true)
+        app.post(song)
+        assertEquals(1, announcements(app))
+        KeyboardManager.processNewKeyboardKey('x')
+        ownerRuns()
+        assertEquals(0, announcements(app), "a key press empties the queue, and a waiting announcement with it")
+        app.post(stopOfTheTrack)
+
+        app.post(song.copy(id = 702))
+
+        assertEquals(emptyList(), wrongOnTheSign(app, playing = "DJ - Song", announced = true))
+    }
+
+    @Test
+    fun `a key press takes the announcement, and the same track posted again, with no stop, is announced`() {
+        val app = appWithCurrentPlaying(typedAt = true)
+        app.post(song)
+        KeyboardManager.processNewKeyboardKey('x')
+        ownerRuns()
+
+        app.post(song)
+
+        assertEquals(emptyList(), wrongOnTheSign(app, playing = "DJ - Song", announced = true))
+    }
+
+    @Test
+    fun `the sign was handed the announcement, a key press takes the rest, the line is played and not announced again`() {
+        val app = appWithCurrentPlaying(typedAt = true)
+        app.post(song)
+        assertSame(Message.FlashingAnnouncement.NowPlayingAnnouncement, app.manager.getNextMessage()) // the sign reads it
+        KeyboardManager.processNewKeyboardKey('x')
+        ownerRuns()
+        app.post(stopOfTheTrack)
+
+        app.post(song.copy(id = 702))
+
+        assertEquals(emptyList(), wrongOnTheSign(app, playing = "DJ - Song", announced = false))
+    }
+
+    @Test
+    fun `an announcement whose write failed is waiting again, it is not played, and a key press takes it like any other`() {
+        val app = appWithCurrentPlaying(typedAt = true)
+        app.post(song)
+        assertSame(Message.FlashingAnnouncement.NowPlayingAnnouncement, failedWrite(app))
+        assertEquals(listOf("NOW${Message.VT}PLAYING", "DJ - Song", ""), app.repo.oneTimeMessages.map { it.str }, "it is the first again")
+        app.post(song.copy(id = 702))
+        assertEquals(1, announcements(app), "and while it waits, the same line is not announced a second time")
+        KeyboardManager.processNewKeyboardKey('x')
+        ownerRuns()
+
+        app.post(song.copy(id = 703))
+
+        assertEquals(emptyList(), wrongOnTheSign(app, playing = "DJ - Song", announced = true))
+    }
+
+    @Test
+    fun `an announcement whose write throws is waiting again like one whose write failed`() {
+        val app = appWithCurrentPlaying(typedAt = true)
+        app.post(song)
+        assertSame(Message.FlashingAnnouncement.NowPlayingAnnouncement, failedWrite(app, thrown = IllegalStateException("the port is gone")))
+        assertEquals(listOf("NOW${Message.VT}PLAYING", "DJ - Song", ""), app.repo.oneTimeMessages.map { it.str }, "it is the first again")
+        KeyboardManager.processNewKeyboardKey('x')
+        ownerRuns()
+
+        app.post(song.copy(id = 702))
+
+        assertEquals(emptyList(), wrongOnTheSign(app, playing = "DJ - Song", announced = true))
+    }
+
+    @Test
+    fun `of six tracks played, the oldest is forgotten also when it is the very next to come`() {
+        val app = App(newFilesDir())
+        app.phone(trackAds)
+        ownerRuns()
+        val tracks = (1..6).map { BeatLinkTrack(id = 900 + it, title = "N$it", artist = "DJ") }
+        tracks.forEach { track ->
+            app.post(track)
+            signReadsTheQueue(app)
+        }
+
+        app.post(tracks[0])
+
+        assertEquals(1, announcements(app), "five are remembered, and it is the sixth back")
+    }
+
+    @Test
+    fun `an announcement whose write failed and that is written at the next request is played`() {
+        val app = appWithCurrentPlaying()
+        app.post(song)
+        assertSame(Message.FlashingAnnouncement.NowPlayingAnnouncement, failedWrite(app))
+        assertSame(Message.FlashingAnnouncement.NowPlayingAnnouncement, app.manager.getNextMessage())
+        app.post(stopOfTheTrack)
+
+        app.post(song.copy(id = 702))
+
+        assertEquals(emptyList(), wrongOnTheSign(app, playing = "DJ - Song", announced = false))
+    }
+
+    @Test
+    fun `an announcement that was never written costs the memory of the played tracks nothing`() {
+        val app = App(newFilesDir(), typedAt = true)
+        app.phone(trackAds)
+        ownerRuns()
+        val tracks = (1..6).map { BeatLinkTrack(id = 800 + it, title = "M$it", artist = "DJ") }
+        tracks.take(5).forEach { track ->
+            app.post(track)
+            signReadsTheQueue(app) // five announcements handed to the sign: the five that are remembered
+        }
+        app.post(tracks[5])
+        failedWrite(app) // the sixth: taken, not written, back in the queue
+        KeyboardManager.processNewKeyboardKey('x')
+        ownerRuns() // and gone with a key press
+
+        app.post(tracks[0]) // the oldest of the five
+
+        assertEquals(0, announcements(app), "the first of the five is still remembered: nothing was played after the five")
+    }
+
+    @Test
+    fun `the announcement was written and the write of the line behind it failed, the track is played all the same`() {
+        val app = appWithCurrentPlaying()
+        app.post(song)
+        assertSame(Message.FlashingAnnouncement.NowPlayingAnnouncement, app.manager.getNextMessage()) // the sign reads it
+        assertEquals("DJ - Song", failedWrite(app)?.str) // its line: taken, not written, the first again
+        app.post(stopOfTheTrack)
+
+        app.post(song.copy(id = 702))
+
+        assertEquals(emptyList(), wrongOnTheSign(app, playing = "DJ - Song", announced = false))
+    }
+
+    @Test
+    fun `the sign takes an ad that waits in front of an announcement, and the track is not played by that`() {
+        val app = appWithCurrentPlaying(typedAt = true)
+        app.post(stopOfTheTrack) // an ad round
+        app.post(song)           // and behind it the announcement
+        assertEquals(listOf("AD", "NOW${Message.VT}PLAYING", "DJ - Song", ""), app.repo.oneTimeMessages.map { it.str })
+        assertEquals("AD", app.manager.getNextMessage().str) // the sign reads the ad, not the announcement
+        KeyboardManager.processNewKeyboardKey('x')
+        ownerRuns()
+
+        app.post(song.copy(id = 702))
+
+        assertEquals(emptyList(), wrongOnTheSign(app, playing = "DJ - Song", announced = true))
+    }
+
+    @Test
+    fun `a reply deleted while its heading waits takes its heading with it and leaves the announcement behind them`() {
+        // the real command, in the chooser: the one cut out of the queue that is not a track's
+        val app = appWithCurrentPlaying()
+        app.repo.marqueeMessages.addAll(listOf(Message.Marquee.AIReply("AN ANSWER"), Message.Marquee.User("A MESSAGE")))
+        assertEquals("RAVEGPT", app.manager.getNextMessage().str) // the heading starts; the rest of it and the reply wait
+        app.post(song)
+        assertEquals(
+            listOf("SAYS.", "SAYS..", "SAYS...", "AN ANSWER", "NOW${Message.VT}PLAYING", "DJ - Song", ""),
+            app.repo.oneTimeMessages.map { it.str }
+        )
+
+        listOf("!choose", "!first", "!delete", "!endchoose").forEach { app.phone(it) }
+        ownerRuns()
+
+        assertEquals(listOf("NOW${Message.VT}PLAYING", "DJ - Song", ""), app.repo.oneTimeMessages.map { it.str })
+        app.post(song.copy(id = 702))
+        assertEquals(emptyList(), wrongOnTheSign(app, playing = "DJ - Song", announced = true))
+    }
+
+    @Test
+    fun `an ad command while an announcement waits puts its round in front and the announcement stays the only one`() {
+        val app = appWithCurrentPlaying()
+        app.post(song)
+
+        app.phone(trackAds)
+        ownerRuns()
+        app.post(song.copy(id = 702))
+
+        assertEquals(
+            listOf("CURRENT", "TRACK:", "DJ - Song", "AD", "NOW${Message.VT}PLAYING", "DJ - Song", ""),
+            app.repo.oneTimeMessages.map { it.str }
+        )
+    }
+
+    // ---- a stop looks for a waiting ad round (the minor of gate r1)
+
+    /** The ad list of [app], handed back to it wrapped so that every walk through it is counted. */
+    private class CountedWalks(private val ads: MutableList<Message>) : MutableList<Message> by ads {
+        var walks = 0
+        override fun iterator(): MutableIterator<Message> = ads.iterator().also { walks++ }
+        override fun listIterator(): MutableListIterator<Message> = ads.listIterator().also { walks++ }
+        override fun listIterator(index: Int): MutableListIterator<Message> = ads.listIterator(index).also { walks++ }
+        override fun contains(element: Message): Boolean = ads.contains(element).also { walks++ }
+        override fun indexOf(element: Message): Int = ads.indexOf(element).also { walks++ }
+        override fun get(index: Int): Message = ads[index].also { walks++ }
+    }
+
+    private fun countWalksOfTheAdList(app: App): CountedWalks {
+        val field = MessageManager::class.java.getDeclaredField("advertisements").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val counted = CountedWalks(field.get(app.manager) as MutableList<Message>)
+        field.set(app.manager, counted)
+        return counted
+    }
+
+    @Test
+    fun `a stop with a long queue in front of a waiting ad does not walk the ad list once for every queued message`() {
+        val app = appWithCurrentPlaying()
+        app.phone("!$A\n" + (1..30).joinToString("\n") { "${O}AD $it" })
+        ownerRuns() // thirty ads, and their round is waiting
+        repeat(200) { app.repo.pushOneTimeMessage(Message.UtilityMessage.EnableMic) } // 200 messages that are no ads, in front of it
+        assertEquals(230, app.repo.oneTimeMessages.size)
+        val adList = countWalksOfTheAdList(app)
+
+        app.post(stopOfTheTrack)
+
+        assertEquals(230, app.repo.oneTimeMessages.size, "an ad round is waiting: the stop asks for no second one")
+        assertTrue(adList.walks <= 1, "the ad list was walked ${adList.walks} times for a queue of 230")
+    }
+
+    @Test
+    fun `a stop asks for an ad round unless one of the ads of now is waiting, as they were set last and as a restart loads them`() {
+        val home = newFilesDir()
+        val app = App(home)
+        app.phone("!$A\n${O}FIRST")
+        ownerRuns()
+        val adOfBefore = app.repo.oneTimeMessages.single()
+        app.phone("!$A\n${O}SECOND")
+        ownerRuns()
+        app.saverRuns()
+        for (running in listOf(app, App(home))) { // as set, and as loaded from the file
+            running.repo.oneTimeMessages.clear()
+            running.post(song)
+            signReadsTheQueue(running)
+            running.post(stopOfTheTrack)
+            assertEquals(listOf("SECOND"), running.repo.oneTimeMessages.map { it.str }, "the stop's ad round")
+            val adOfNow = running.repo.oneTimeMessages.single() as Message.ColorMessage.OneByOneMessage
+            running.post(song)
+            running.post(stopOfTheTrack)
+            assertEquals(listOf("SECOND"), running.repo.oneTimeMessages.map { it.str }, "and no second one while it waits")
+            // what was an ad before, and what only looks like an ad of now, are no waiting ad round
+            running.repo.oneTimeMessages.clear()
+            running.repo.enqueueOneTimeMessage(adOfBefore)
+            running.repo.enqueueOneTimeMessage(adOfNow.copy())
+            running.post(song)
+            running.post(stopOfTheTrack)
+            assertEquals(listOf("SECOND", "FIRST", "SECOND"), running.repo.oneTimeMessages.map { it.str })
+        }
     }
 
     /** The real route on a real server (Netty, a free port) for the time of [block], which gets the port. */

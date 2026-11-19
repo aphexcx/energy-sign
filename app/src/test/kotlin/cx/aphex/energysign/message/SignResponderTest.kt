@@ -433,6 +433,23 @@ class SignResponderTest {
         assertEquals(0, source.ordinaryServed)
     }
 
+    @Test
+    fun `a message whose write throws is handed back like one whose write failed, and the error goes on to the caller`() {
+        val message = Message.Marquee.User("HELLO")
+        val error = IllegalStateException("the port is gone")
+        val throwing = SignResponder(nextMessage = { message }, write = { _, _ -> throw error }, unsent = { handedBack += it })
+
+        val thrown = try {
+            throwing.onRequest("~".toByteArray(), 1)
+            null
+        } catch (e: IllegalStateException) {
+            e
+        }
+
+        assertSame(error, thrown)
+        assertEquals(listOf<Message>(message), handedBack)
+    }
+
     // ---- a frame the sign cannot take
 
     @Test
