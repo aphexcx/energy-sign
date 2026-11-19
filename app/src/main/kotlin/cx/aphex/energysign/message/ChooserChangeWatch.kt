@@ -36,3 +36,29 @@ class ChooserChangeWatch(
     /** The two fields the sign draws, and the checksum covers. */
     private fun shown(): Pair<String, String>? = view()?.let { it.str to it.flashy }
 }
+
+/**
+ * THE ONLY DOOR from MessageManager to the owner of the message state. Whatever is handed over,
+ * and however the caller waits for it (not at all: [post]; for its result: [ask]; for which of
+ * three things became of it: [askFor]), the owner runs it under [watch], so that a push follows
+ * when what the chooser shows has changed.
+ *
+ * MessageManager holds this and not the owner's queue: it has no way to hand the owner a change
+ * past the watch, whatever entry point is added to it. (Before, each entry point wrapped its
+ * change itself, and one that did not, the adb hook's, said "ok" to a step in the chooser that
+ * no push followed.) What is handed over that changes nothing (a question about the list) is
+ * watched too; that costs two looks at what the chooser shows.
+ */
+internal class WatchedOwner(private val owner: OwnerQueue, private val watch: ChooserChangeWatch) {
+    /** The one place a change is put under the watch. */
+    private fun <T> watched(change: () -> T): () -> T = { watch.watch(change) }
+
+    /** See [OwnerQueue.post]. */
+    fun post(change: () -> Unit) = owner.post(watched(change))
+
+    /** See [OwnerQueue.ask]. The owner asking itself is answered at once, under the watch like everything else. */
+    fun <T> ask(change: () -> T): T = owner.ask(change = watched(change))
+
+    /** See [OwnerQueue.askFor]. */
+    fun <T> askFor(change: () -> T): OwnerQueue.Asked<T> = owner.askFor(change = watched(change))
+}
