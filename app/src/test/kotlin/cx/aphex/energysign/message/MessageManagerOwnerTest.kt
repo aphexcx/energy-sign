@@ -2401,6 +2401,8 @@ class MessageManagerOwnerTest {
         override fun get(index: Int): Message = list[index].also { walks++ }
         override fun add(index: Int, element: Message) = list.add(index, element).also { inserts++ }
         override fun addAll(index: Int, elements: Collection<Message>): Boolean = list.addAll(index, elements).also { inserts++ }
+        // (to the list itself, as the app's call goes: the walk of this interface's default would go round the queue's own removal)
+        override fun removeIf(filter: java.util.function.Predicate<in Message>): Boolean = list.removeIf(filter).also { walks++ }
     }
 
     @Suppress("UNCHECKED_CAST")
@@ -2427,6 +2429,9 @@ class MessageManagerOwnerTest {
             Cost("the track that is playing, again, announced long ago", 0, 0, 0, announced = 0) { app, _ -> app.post(currentTrack) },
             // one walk: the piece of the track before is taken out of the queue
             Cost("another track", 1, 0, 0, announced = 1) { app, _ -> app.post(song) },
+            // the announcement of the track before is taken out and counted out, in the one walk
+            Cost("another track while the announcement of the one before waits", 1, 0, 0, announced = 1,
+                before = { app, _ -> app.post(song) }) { app, _ -> app.post(trackA) },
             // the piece of the track; is an ad round waiting; (it is:) nothing more
             Cost("a stop while an ad round waits", 2, 0, 0, announced = 0,
                 before = { app, ads -> app.phone(adCommand(ads)); ownerRuns() }) { app, _ -> app.post(stopOfTheTrack) },
@@ -2434,6 +2439,12 @@ class MessageManagerOwnerTest {
             Cost("a stop that asks for an ad round", 3, 1, 1, announced = 0) { app, _ -> app.post(stopOfTheTrack) },
             // is an icon waiting; the ads are copied for the save and the round is made; the round is put in at once
             Cost("an ad command", 1, 2, 1, announced = 0) { app, ads -> app.phone(adCommand(ads)); ownerRuns() },
+            // nothing is put in, so whoever is reading the queue (the one walk) reads on
+            Cost("an ad round of nothing, put in while the queue is being read", 1, 0, 1, announced = 0) { app, _ ->
+                val reading = app.repo.oneTimeMessages.iterator()
+                app.repo.pushOneTimeMessages()
+                reading.next()
+            },
         )
         val wrong = mutableListOf<String>()
         for (row in rows) for ((queued, ads) in listOf(10 to 3, 200 to 30)) {
@@ -2446,7 +2457,8 @@ class MessageManagerOwnerTest {
             val queue = counted(app.repo, "oneTimeMessages")
             val adList = counted(app.manager, "advertisements")
 
-            row.event(app, ads)
+            val failed = runCatching { row.event(app, ads) }.exceptionOrNull()
+            if (failed != null) wrong += "${row.of}, $queued queued and $ads ads: $failed"
 
             val cost = listOf(queue.walks, adList.walks, queue.inserts, announcements(app))
             if (cost != listOf(row.queueWalks, row.adListWalks, row.inserts, row.announced)) {
