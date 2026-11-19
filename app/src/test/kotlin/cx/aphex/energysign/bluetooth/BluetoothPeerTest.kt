@@ -19,7 +19,7 @@ class BluetoothPeerTest {
     private val worker = TestStartWorker()
     private val shown = mutableListOf<BluetoothStatusUpdate>()
     private val registrations = mutableListOf<Int>()
-    private val gatt = EnergySignBluetoothGattServer(context, manager, model, worker, { _, _ -> true }) { registrations += it }
+    private val gatt = EnergySignBluetoothGattServer(context, manager, model, worker, { _, _, _ -> true }) { registrations += it }
 
     init {
         `when`(manager.openGattServer(context, gatt)).thenReturn(platform)

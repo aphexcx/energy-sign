@@ -150,7 +150,7 @@ class AdbCommandOwnerTest {
         val outcomes = LinkedBlockingQueue<AdbCommand.Outcome>()
         AdbCommand.receive(
             command = { AdbCommand.Bytes(command.toByteArray(Charsets.UTF_8)) },
-            app = { AdbCommand.entryWhenUp(GlobalContext.get()) },
+            app = { AdbCommand.entryWhenUp(GlobalContext.get(), 0) },
             answerWithinMs = answerWithinMs,
             late = { outcome, _ -> late(outcome) },
         ) { outcome, _ -> outcomes.put(outcome) }

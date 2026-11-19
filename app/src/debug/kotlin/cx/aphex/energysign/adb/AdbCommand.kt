@@ -374,9 +374,11 @@ sealed class AdbCommand {
          * is answered "refused"; only one handed over in the last two of the five seconds would
          * be answered "underway" first, with the withdrawal as its line.
          */
-        fun entryWhenUp(koin: Koin?): ((ByteArray) -> OwnerQueue.Asked<Unit>)? {
+        fun entryWhenUp(koin: Koin?, arrivedAt: Long): ((ByteArray) -> OwnerQueue.Asked<Unit>)? {
             if (koin == null || !koin.get<OwnerQueue>().ownerRuns) return null
-            return koin.get<MessageManager>()::processNewBytesAndTell
+            val manager = koin.get<MessageManager>()
+            // (the command counts from the moment its broadcast arrived, not from this hand-over)
+            return { bytes -> manager.processNewBytesAndTell(bytes, arrivedAt) }
         }
 
         /** The timer's refusal: it cannot know why the receiver's thread did not get to the hand-over. */

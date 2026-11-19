@@ -8,6 +8,7 @@ import cx.aphex.energysign.beatlinkdata.BeatLinkTrack
 import cx.aphex.energysign.ai.AIReplySource
 import cx.aphex.energysign.ai.PostedAIAnswer
 import cx.aphex.energysign.beatlinkdata.currentTrack
+import cx.aphex.energysign.bluetooth.takeWrite
 import cx.aphex.energysign.keyboard.KeyboardManager
 import cx.aphex.energysign.uart.SignLink
 import cx.aphex.energysign.uart.SignWire
@@ -2325,6 +2326,32 @@ class MessageManagerOwnerTest {
                 afterAGameCell()
             }
         }
+        // A KEY THE GAME TOOK IS THE GAME'S UNTIL IT IS PRESSED ANEW, whatever the game has become meanwhile: held
+        // from a game into the messages, its repeats type nothing and the queue is as it was.
+        val waited = "NEW${Message.VT}MSG${Message.VT}"
+        val keys: Map<String, (Boolean) -> Unit> = linkedMapOf(
+            "the up arrow" to { repeated -> KeyboardManager.upArrow(repeated); ownerRuns() },
+            "the space bar" to { repeated -> KeyboardManager.processNewKeyboardKey(' ', repeated); ownerRuns() },
+        )
+        for ((key, press) in keys) for (state in listOf("the intro", "a game, on the ground", "the closing show")) {
+            val app = gameApp()
+            try {
+                gameStates.getValue(state)(app)
+                press(false) // the key goes down, and stays down
+                untilStored(app) // the game and its show end, the messages are back
+                command(app, "HELLO") // and one waits in the queue
+                press(true)
+                val got = asks(app)
+                if (got != waited) wrong += "$key, held down from $state into the messages: the sign gets '$got', not the message that waited"
+                // let go and pressed anew it is an ordinary key again: the up arrow starts a game, a space is typed
+                press(false)
+                val anew = asks(app)
+                val ordinary = if (key == "the up arrow") "D" else "echo  _"
+                if (anew != ordinary) wrong += "$key, let go and pressed anew after $state: the sign gets '$anew', not '$ordinary'"
+            } finally {
+                afterAGameCell()
+            }
+        }
 
         assertEquals(emptyList(), wrong)
     }
@@ -2423,6 +2450,32 @@ class MessageManagerOwnerTest {
                 ownerRuns()
                 shown(app)
             }
+        }
+        // THE STAMP IS TAKEN WHERE THE EVENT ENTERS THE APP, one definition a source. The event is of 2,110 ms; what the
+        // app does before it hands it on (the dispatch, the log lines) takes 40 ms, which is past the hit at 2,140 ms.
+        val jump = "!jump".toByteArray()
+        val sources: Map<String, (App, Long) -> Unit> = linkedMapOf(
+            // a key: its event's own time, on the app's clock (the event is 40 ms old when it is dispatched)
+            "the up arrow" to { _, _ -> KeyboardManager.upArrow(arrivedAt = KeyboardManager.arrivedAt(eventTimeMs = 70_000, uptimeMs = 70_040)) },
+            "the space bar" to { _, _ -> KeyboardManager.processNewKeyboardKey(' ', arrivedAt = KeyboardManager.arrivedAt(eventTimeMs = 70_000, uptimeMs = 70_040)) },
+            // the phone: the clock as the first statement of the Bluetooth write callback read it
+            "!jump from the phone" to { app, entered -> app.manager.takeWrite(jump, responseNeeded = false, arrivedAt = entered) },
+            "!jump from the phone, its receipt asked for" to { app, entered -> waitingCall("bluetooth") { app.manager.takeWrite(jump, responseNeeded = true, arrivedAt = entered) } },
+            // the adb hook: the clock as the first statement of its receive read it
+            "!jump from the adb hook" to { app, entered -> waitingCall("hook") { app.manager.processNewBytesAndTell(jump, entered) } },
+        )
+        for ((source, handsOn) in sources) cell("$source, an event of 2,110 ms that the app hands on 40 ms later", listOf("a new best of 1")) {
+            val (app, began) = inPlay()
+            while (app.now + 40 <= began + 2_110) asks(app, 40)
+            app.now = began + 2_150
+            handsOn(app, began + 2_110)
+            app.now = began + 2_190
+            ownerRuns()
+            shown(app)
+        }
+        cell("a key's event of 40 ms ago; and one that says it is of a time still to come arrived now", listOf(960L, 1_000L)) {
+            gameApp() // (its clock, which the keyboard reads, is at 1,000)
+            listOf(KeyboardManager.arrivedAt(eventTimeMs = 70_000, uptimeMs = 70_040), KeyboardManager.arrivedAt(eventTimeMs = 70_500, uptimeMs = 70_000))
         }
         for (late in listOf(0L, 80L, 3_000L)) {
             // the sign stopped asking; the game ended by the clock, unseen; then:

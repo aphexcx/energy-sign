@@ -279,12 +279,22 @@ class MessageManager(
      * The button is the up arrow, and the space bar while anything of a game is on. It starts
      * a game when nothing of one is on (the up arrow only) and jumps while one is played; in
      * the intro and in a closing show it does nothing (a jump that comes a moment after the
-     * hit is not a new game, and takes no score off the sign). A HELD KEY IS ONE PRESS: its
-     * repeats are the game's as well, and do nothing. Any other key is typing, repeats and all,
-     * and takes the sign from the game.
+     * hit is not a new game, and takes no score off the sign). Any other key is typing, repeats
+     * and all, and takes the sign from the game.
+     *
+     * A HELD KEY IS ONE PRESS, AND IT IS WHOSE ITS KEY-DOWN WAS. A key-down the game took makes
+     * the key the game's until it is pressed anew ([heldForTheGame]): its repeats do nothing
+     * and type nothing, whatever the game has become meanwhile. (A space bar held from a
+     * closing show into the messages would otherwise be typed there, and typing empties the
+     * queue.) A repeat is never a new press, so the next key-down that is none says the key
+     * was let go.
      */
     private fun gameKey(key: Char, repeated: Boolean, arrivedAt: Long): Boolean {
+        if (repeated && key in heldForTheGame) return true
         val isTheButton = key == KeyboardManager.UP_ARROW || (key == ' ' && game.busy)
+        if (!repeated) {
+            if (isTheButton) heldForTheGame += key else heldForTheGame -= key
+        }
         if (!isTheButton) {
             game.end("somebody is typing", arrivedAt)
             return false
@@ -294,6 +304,9 @@ class MessageManager(
         }
         return true
     }
+
+    /** The keys whose last key-down the game took. Owner thread only. */
+    private val heldForTheGame = mutableSetOf<Char>()
 
     /** Not while the sign is somebody else's: a game behind the chooser or the echo would be played by nobody. */
     private fun startGame(arrivedAt: Long) {
@@ -624,7 +637,7 @@ class MessageManager(
         }
     }
 
-    private fun processUartCommand(value: ByteArray, arrivedAt: Long = nowMs()) {
+    private fun processUartCommand(value: ByteArray, arrivedAt: Long) {
         when (val cmd = String(value)) {
             // (the game gets every one of these with the time the command ARRIVED)
             "!game" -> startGame(arrivedAt)
@@ -859,21 +872,27 @@ class MessageManager(
     }
 
 
-    /** A command or a new message, as the phone writes it. Posted: it has not been carried out when this returns. */
-    fun processNewBytes(value: ByteArray) = change(bytesChange(value))
+    /**
+     * A command or a new message, as the phone writes it. Posted: it has not been carried out
+     * when this returns. [arrivedAt] is when it entered the app, on this manager's clock: the
+     * caller read it before it did anything else (see signClockMs), and the game counts the
+     * command from then.
+     */
+    fun processNewBytes(value: ByteArray, arrivedAt: Long = nowMs()) = change(bytesChange(value, arrivedAt))
 
     /** The same, for a caller that says "done" to someone: returns when the owner has carried it out. Not from the main thread. */
-    fun processNewBytesAndWait(value: ByteArray): Unit = changeAndWait(bytesChange(value))
+    fun processNewBytesAndWait(value: ByteArray, arrivedAt: Long = nowMs()): Unit = changeAndWait(bytesChange(value, arrivedAt))
 
     /**
      * The same, for a caller that has to say which of three things happened (the adb hook): the
      * owner carried it out, the owner threw on it, or the owner never took it up and it was
      * withdrawn. See OwnerQueue.askFor. Not from the main thread.
      */
-    fun processNewBytesAndTell(value: ByteArray): OwnerQueue.Asked<Unit> = owner.askFor(change = bytesChange(value))
+    fun processNewBytesAndTell(value: ByteArray, arrivedAt: Long = nowMs()): OwnerQueue.Asked<Unit> =
+        owner.askFor(change = bytesChange(value, arrivedAt))
 
     /** What [value] asks for, as a change for the owner. What can be done here, on the caller's thread, is done here. */
-    private fun bytesChange(value: ByteArray): () -> Unit {
+    private fun bytesChange(value: ByteArray, arrivedAt: Long): () -> Unit {
         val cmd = String(value)
         return if (cmd.startsWith("!🅰")) {
             logD("Procesing Uart command $cmd")
@@ -882,8 +901,7 @@ class MessageManager(
         } else if (cmd.startsWith("!")) {
             // logged here, by the caller: the owner has the sign to answer
             logD("Procesing Uart command $cmd")
-            val arrived = nowMs() // (what the game does with a command, it does as of this moment)
-            ({ processUartCommand(value, arrived) })
+            ({ processUartCommand(value, arrivedAt) })
         } else {
             ({ addNewUserMessage(cmd, isQuery = false) })
         }

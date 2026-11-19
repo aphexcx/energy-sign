@@ -18,6 +18,7 @@ package cx.aphex.energysign
 
 import android.bluetooth.BluetoothDevice
 import android.os.Bundle
+import android.os.SystemClock
 import android.text.format.DateFormat
 import android.view.KeyEvent
 import android.view.KeyEvent.ACTION_DOWN
@@ -104,15 +105,17 @@ class GattServerActivity : AppCompatActivity() {
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val key: Char = event.keyCharacterMap.get(event.keyCode, event.metaState).toChar()
         if (event.action == ACTION_DOWN) {
+            // The moment of a key is its event's own, whenever it is dispatched and whatever is logged first
+            val arrived = keyboardManager.arrivedAt(event.eventTime, SystemClock.uptimeMillis())
             logD("Keypress! $key")
             when {
                 event.keyCode == KeyEvent.KEYCODE_ENTER -> keyboardManager.submitKeyboardInput()
                 event.keyCode == KeyEvent.KEYCODE_DEL -> keyboardManager.deleteKey()
                 event.keyCode == KeyEvent.KEYCODE_ESCAPE -> keyboardManager.escapeKey()
                 // (the two keys the game may take say whether they are a repeat of a key held down)
-                event.keyCode == KeyEvent.KEYCODE_DPAD_UP -> keyboardManager.upArrow(event.repeatCount > 0)
-                event.keyCode == KeyEvent.KEYCODE_SPACE -> keyboardManager.processNewKeyboardKey(' ', event.repeatCount > 0)
-                event.isPrintingKey -> keyboardManager.processNewKeyboardKey(key)
+                event.keyCode == KeyEvent.KEYCODE_DPAD_UP -> keyboardManager.upArrow(event.repeatCount > 0, arrived)
+                event.keyCode == KeyEvent.KEYCODE_SPACE -> keyboardManager.processNewKeyboardKey(' ', event.repeatCount > 0, arrived)
+                event.isPrintingKey -> keyboardManager.processNewKeyboardKey(key, arrivedAt = arrived)
                 else -> return true // super.dispatchKeyEvent(event)
             }
         }
