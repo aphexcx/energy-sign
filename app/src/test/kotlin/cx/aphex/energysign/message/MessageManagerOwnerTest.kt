@@ -1006,6 +1006,12 @@ class MessageManagerOwnerTest {
                 wrong += "queued: the heading of an ad round's track without the line of what is playing"
             }
         }
+        // its stars come and go with the announcement: none are left behind by a track that is gone
+        val stars = queue.count { it is Message.Starfield }
+        if (stars != announcements.size) wrong += "queued: $stars starfield(s) for ${announcements.size} announcement(s)"
+        // and stops do not pile up ad rounds
+        val ads = queue.count { it.str == "AD" }
+        if (ads > 1) wrong += "queued: the ad $ads times"
         app.repo.oneTimeMessages.clear()
         app.phone(trackAds)
         ownerRuns()
@@ -1193,6 +1199,132 @@ class MessageManagerOwnerTest {
         )
     }
 
+    // ---- WHAT IS QUEUED FOR A TRACK IS ONE PIECE: its announcement, its line, its stars, the
+    // heading and line in an ad round, and its mark as "played". It goes or stays as one.
+
+    /** Posts [changes] updates, the sign reading nothing in between, and returns the length of the queue after each. */
+    private fun queueLengths(app: App, changes: Int, update: (Int) -> BeatLinkTrack): List<Int> =
+        (1..changes).map { i ->
+            app.post(update(i))
+            app.repo.oneTimeMessages.size
+        }
+
+    private val trackA = BeatLinkTrack(id = 501, title = "A", artist = "DJ")
+    private val trackB = BeatLinkTrack(id = 502, title = "B", artist = "DJ")
+
+    @Test
+    fun `while the sign reads nothing, two tracks taking turns leave one announcement in the queue, after 2, 3 and 10 changes`() {
+        for (changes in listOf(2, 3, 10)) {
+            val app = appWithCurrentPlaying()
+
+            val lengths = queueLengths(app, changes) { i -> if (i % 2 == 1) trackA else trackB }
+
+            // NOW PLAYING, the line, its stars: three, however many changes there were
+            assertEquals(List(changes) { 3 }, lengths, "$changes changes")
+            val last = if (changes % 2 == 1) "DJ - A" else "DJ - B"
+            assertEquals(listOf("NOW${Message.VT}PLAYING", last, ""), app.repo.oneTimeMessages.map { it.str }, "$changes changes")
+            assertEquals(emptyList(), wrongOnTheSign(app, playing = last, announced = true), "$changes changes")
+        }
+    }
+
+    @Test
+    fun `the same in chooser mode and paused`() {
+        for (mode in listOf("!choose", "!pause")) {
+            val app = appWithCurrentPlaying()
+            app.phone(mode)
+            ownerRuns()
+
+            val lengths = queueLengths(app, 10) { i -> if (i % 2 == 1) trackA else trackB }
+
+            assertEquals(List(10) { 3 }, lengths, mode)
+            app.phone(if (mode == "!choose") "!endchoose" else "!unpause")
+            ownerRuns()
+            assertEquals(listOf("NOW${Message.VT}PLAYING", "DJ - B", ""), app.repo.oneTimeMessages.map { it.str }, mode)
+        }
+    }
+
+    @Test
+    fun `while the sign reads nothing, a track and a stop taking turns do not pile up ad rounds`() {
+        val app = appWithCurrentPlaying()
+
+        val lengths = queueLengths(app, 10) { i -> if (i % 2 == 1) trackA else stopOfTheTrack }
+
+        // after a track: the one ad round a stop asked for, and the announcement; after a stop: the ad round
+        assertTrue(lengths.all { it <= 4 }, lengths.toString())
+        assertEquals(listOf("AD"), app.repo.oneTimeMessages.map { it.str })
+        assertEquals(emptyList(), wrongOnTheSign(app, playing = null, announced = false))
+    }
+
+    @Test
+    fun `stars that are not a track's own stay in the queue when the track changes`() {
+        val app = appWithCurrentPlaying()
+        app.post(trackA)                                   // NOW PLAYING, its line, its stars
+        app.repo.enqueueOneTimeMessage(Message.Starfield()) // somebody else's stars, equal to look at
+
+        app.post(trackB)
+
+        assertEquals(listOf("", "NOW${Message.VT}PLAYING", "DJ - B", ""), app.repo.oneTimeMessages.map { it.str })
+    }
+
+    @Test
+    fun `tracks played before taking turns queue nothing at all`() {
+        val app = appWithCurrentPlaying()
+
+        val lengths = queueLengths(app, 10) { i -> if (i % 2 == 1) oldTrack else currentTrack }
+
+        assertEquals(List(10) { 0 }, lengths)
+    }
+
+    @Test
+    fun `one line under two ids, stopped before the sign read the announcement, is announced when either id comes back`() {
+        for (comesBack in listOf(601, 602)) {
+            val app = appWithCurrentPlaying()
+            app.post(BeatLinkTrack(id = 601, title = "Song", artist = "DJ"))
+            app.post(BeatLinkTrack(id = 602, title = "Song", artist = "DJ"))
+            app.post(stopOfTheTrack) // the sign had not read the announcement
+
+            app.post(BeatLinkTrack(id = comesBack, title = "Song", artist = "DJ"))
+
+            assertEquals(emptyList(), wrongOnTheSign(app, playing = "DJ - Song", announced = true), "id $comesBack comes back")
+        }
+    }
+
+    @Test
+    fun `one line under two ids, announced and read by the sign, is not announced again under either id`() {
+        for (comesBack in listOf(601, 602)) {
+            val app = appWithCurrentPlaying()
+            app.post(BeatLinkTrack(id = 601, title = "Song", artist = "DJ"))
+            assertSame(Message.FlashingAnnouncement.NowPlayingAnnouncement, app.manager.getNextMessage()) // the sign reads it
+            app.post(BeatLinkTrack(id = 602, title = "Song", artist = "DJ"))
+            app.post(stopOfTheTrack)
+
+            app.post(BeatLinkTrack(id = comesBack, title = "Song", artist = "DJ"))
+
+            assertEquals(emptyList(), wrongOnTheSign(app, playing = "DJ - Song", announced = false), "id $comesBack comes back")
+        }
+    }
+
+    @Test
+    fun `the table of pairs again with every track posted under two ids, in all 24 orders of arrival`() {
+        // accepted: the first update under one id, the same under another id, the second under one id, under another
+        val wrong = mutableListOf<String>()
+        for (sequence in sequencesOf(2)) {
+            val updates = sequence.flatMapIndexed { i, kind ->
+                val update = updateOf(kind, i + 1)
+                listOf(update, if (update.isEmpty) update else update.copy(id = update.id + 1000))
+            }
+            for (arrival in permutations(updates.indices.toList())) {
+                val app = appWithCurrentPlaying()
+                val turns = updates.map { app.manager.acceptTrackUpdate() }
+                arrival.forEach { i -> app.post(updates[i], turns[i]) }
+                val problems = wrongOnTheSign(app, playing = lineOf(updates.last()), announced = sequence.last() == Kind.NEW)
+                if (problems.isNotEmpty()) wrong += sequence.joinToString(", then ") { it.short } + " | arriving " + arrival.map { it + 1 } + " | " + problems.joinToString("; ")
+            }
+        }
+
+        assertEquals(emptyList(), wrong, "${wrong.size} wrong cells of 384")
+    }
+
     // ---- found by an independent review of the rule
 
     private fun announcements(app: App) = app.repo.oneTimeMessages.count { it === Message.FlashingAnnouncement.NowPlayingAnnouncement }
@@ -1299,7 +1431,7 @@ class MessageManagerOwnerTest {
 
     /** Posts [json] to the route and returns the status line of the answer. */
     private fun postTrack(port: Int, json: String): String {
-        val post = Post(port)
+        val post = Post(port, "the post of $json")
         post.headers(json.toByteArray().size)
         post.body(json)
         return waitingCall("test-reads-answer") { post.status() }
@@ -1377,8 +1509,8 @@ class MessageManagerOwnerTest {
     // ---- POST /currentTrack, the real route on a real server: the order of two posts that overlap
 
     /** One HTTP exchange on a socket of its own: [send] writes the request, in as many parts as it likes. Returns the status line. */
-    private class Post(port: Int) {
-        private val socket = java.net.Socket("127.0.0.1", port)
+    private class Post(port: Int, private val what: String) {
+        private val socket = java.net.Socket("127.0.0.1", port).apply { soTimeout = 10_000 }
         private val out = socket.getOutputStream()
 
         fun headers(bodyLength: Int) {
@@ -1395,7 +1527,14 @@ class MessageManagerOwnerTest {
         }
 
         /** The first line of the answer, e.g. "HTTP/1.1 200 OK". Waits for it. */
-        fun status(): String = socket.getInputStream().bufferedReader().readLine().also { socket.close() }
+        fun status(): String =
+            try {
+                socket.getInputStream().bufferedReader().readLine() ?: throw java.io.IOException("the server closed the connection without an answer")
+            } catch (e: java.io.IOException) {
+                throw AssertionError("no answer to $what within ${socket.soTimeout / 1000} s: $e")
+            } finally {
+                socket.close()
+            }
     }
 
     @Test
@@ -1413,14 +1552,14 @@ class MessageManagerOwnerTest {
 
             // The track's post is accepted: its headers are there, the route has it. Its body is still on the way.
             val turnsBefore = app.manager.trackTurnsTaken
-            val track = Post(port)
+            val track = Post(port, "the post of the track (its body was held back)")
             track.headers(trackJson.toByteArray().size)
             // (the route gives the update its place in the order when it accepts the request; this waits for that)
             val deadline = System.currentTimeMillis() + 2_000
             while (app.manager.trackTurnsTaken < turnsBefore + 1 && System.currentTimeMillis() < deadline) Thread.sleep(5)
 
             // Now the stop comes, whole, and is answered.
-            val stop = Post(port)
+            val stop = Post(port, "the post of the stop")
             stop.headers(stopJson.toByteArray().size)
             stop.body(stopJson)
             assertEquals("HTTP/1.1 200 OK", waitingCall("test-reads-stop") { stop.status() })
@@ -1453,8 +1592,8 @@ class MessageManagerOwnerTest {
 
         app.post(stopOfTheTrack)
 
-        // the announcement is gone with the track (its stars stay), and the ad round a stop asks for has no track in it
-        assertEquals(listOf("AD", ""), app.repo.oneTimeMessages.map { it.str })
+        // the announcement is gone with the track, its stars too, and the ad round a stop asks for has no track in it
+        assertEquals(listOf("AD"), app.repo.oneTimeMessages.map { it.str })
     }
 
     /** One request of the sign, answered by the real responder: the text that goes out on the wire. */

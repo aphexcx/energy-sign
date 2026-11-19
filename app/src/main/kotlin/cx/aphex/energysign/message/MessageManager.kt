@@ -37,7 +37,11 @@ class MessageManager(
 ) :
     KoinComponent {
     private val advertisements: MutableList<Message> = mutableListOf()
-    private val playedTracks: LinkedHashSet<BeatLinkTrack> = linkedSetOf()
+    /**
+     * The lines of the tracks played lately, the newest last. By LINE, not by the track's id:
+     * two ids with one line are one track to the sign.
+     */
+    private val playedLines: LinkedHashSet<Message.NowPlayingTrackMessage> = linkedSetOf()
     private var nowPlayingTrack: Message.NowPlayingTrackMessage? = null
 
     private val currentIdx = atomic<Int>(0)
@@ -72,6 +76,9 @@ class MessageManager(
         Message.ColorMessage.OneByOneMessage("CURRENT", context.getColor(R.color.twitch)),
         Message.ColorMessage.OneByOneMessage("TRACK:", context.getColor(R.color.twitch)),
     )
+
+    /** The stars after an announcement of a track. One object, so that they can be found in the queue and go with their announcement. */
+    private val announcementStars = Message.Starfield()
 
     private val DEFAULT_ADS = listOf(
         Message.ColorMessage.IconInvaders.Enemy1(context.getColor(R.color.icon_defaultblue)),
@@ -719,8 +726,8 @@ class MessageManager(
     /** The number of the newest update the owner has taken in. Owner only. */
     private var newestTrackUpdate: Long = 0
 
-    /** The track whose announcement was queued last. Owner only. */
-    private var lastAnnounced: BeatLinkTrack? = null
+    /** The line whose announcement was queued last. Owner only. */
+    private var lastAnnounced: Message.NowPlayingTrackMessage? = null
 
     /**
      * Gives a track update its place in the order. To be called the moment the update comes in,
@@ -775,7 +782,7 @@ class MessageManager(
      * Owner only. THE RULE: what is playing is decided by the update that was accepted last,
      * alone: a track never played, a track played before, the track that is playing already, or
      * a stop, and in whatever order the updates get here (one that a later one has overtaken
-     * is left out). Whether a track is ANNOUNCED is a second question ([playedTracks]) and never
+     * is left out). Whether a track is ANNOUNCED is a second question ([playedLines]) and never
      * changes the first. A track without anything the sign can show has no line and is shown
      * as nothing playing.
      */
@@ -786,43 +793,48 @@ class MessageManager(
             return
         }
         newestTrackUpdate = update.number
-        val track = update.track
         val line = update.line
 
-        // 1. What is playing. When that changes, nothing of the track before stays in the
-        //    queue: not its announcement, not its line in an ad round that is still waiting.
+        // 1. What is playing. WHAT IS QUEUED FOR A TRACK IS ONE PIECE: its announcement with
+        //    its line and its stars, its line with the heading in an ad round that is still
+        //    waiting, and its mark as "played". When what is playing changes, the piece of the
+        //    track before goes as one, so the queue does not grow with the number of changes.
         val changed = line != nowPlayingTrack
         nowPlayingTrack = line
         if (changed) {
-            // An announcement that is still waiting was never shown: its track does not count
-            // as played, so it is announced when it comes back.
-            if (msgRepo.oneTimeMessages.any { it === NowPlayingAnnouncement }) lastAnnounced?.let { playedTracks.remove(it) }
-            msgRepo.oneTimeMessages.removeIf { queued ->
-                queued is NowPlayingAnnouncement || queued is Message.NowPlayingTrackMessage || trackHeading.any { it === queued }
+            val queue = msgRepo.oneTimeMessages
+            // An announcement that is still waiting was never shown: its line does not count
+            // as played, so it is announced when it comes back (under whatever id).
+            if (queue.any { it === NowPlayingAnnouncement }) lastAnnounced?.let { playedLines.remove(it) }
+            queue.removeIf { queued ->
+                queued is NowPlayingAnnouncement || queued is Message.NowPlayingTrackMessage ||
+                        queued === announcementStars || trackHeading.any { it === queued }
             }
-            // (the track has ended: an ad round. Not for a stop when nothing was playing.)
-            if (line == null) pushAdvertisements()
+            // The track has ended: an ad round. Not for a stop when nothing was playing, and
+            // not while an ad round is still waiting (stops do not pile them up).
+            if (line == null && queue.none { queued -> advertisements.any { it === queued } }) pushAdvertisements()
         }
         if (line == null) return
 
-        // 2. Whether it is announced: when it changes what the sign shows, and was not played
-        //    lately. (Two tracks with the same line are one to the sign: no second announcement.)
-        if (changed && track !in playedTracks) {
+        // 2. Whether it is announced: when its line was not played lately. (The line that is
+        //    playing is among the played, so the same line again, under whatever id, is not
+        //    announced a second time.)
+        if (line !in playedLines) {
             // (what there is to say about the line is said for a track that is shown, once)
             update.notes.forEach { logW(it) }
 
             msgRepo.enqueueOneTimeMessage(NowPlayingAnnouncement)
             msgRepo.enqueueOneTimeMessage(line)
-            msgRepo.enqueueOneTimeMessage(Message.Starfield())
-            lastAnnounced = track
+            msgRepo.enqueueOneTimeMessage(announcementStars)
+            lastAnnounced = line
         }
 
         // 3. It was played, and it is the newest of the played: the oldest are forgotten first.
-        playedTracks.remove(track)
-        while (playedTracks.size > MAX_PLAYED_TRACKS_MEMORY) {
-            playedTracks.remove(playedTracks.first())
+        playedLines.remove(line)
+        while (playedLines.size > MAX_PLAYED_TRACKS_MEMORY) {
+            playedLines.remove(playedLines.first())
         }
-        playedTracks.add(track)
+        playedLines.add(line)
     }
 
     /* For replies generated by externally running models e.g. Llama running on my laptop */
