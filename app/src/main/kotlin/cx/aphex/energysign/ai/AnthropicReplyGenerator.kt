@@ -183,7 +183,8 @@ class AnthropicReplyGenerator(
         } catch (e: AnthropicIoException) {
             val blocked = WireSendBlockedException.findIn(e)
             if (blocked != null) {
-                blockedResult(blocked)
+                val (reason, detail) = blocked.toNoReplyReasonAndDetail()
+                noReply(reason, detail)
             } else {
                 // No response at all: a timeout, the network, or TLS. Only the kinds of the
                 // exceptions are logged, never their messages.
@@ -193,23 +194,6 @@ class AnthropicReplyGenerator(
             noReply(NoReplyReason.NOT_A_MESSAGE, "the body could not be read as a message")
         } catch (e: AnthropicException) {
             noReply(NoReplyReason.PROVIDER_ERROR, e.javaClass.simpleName)
-        }
-
-    private fun blockedResult(blocked: WireSendBlockedException): AIReplyResult.NoReply =
-        if (!blocked.afterWireSend) {
-            when (blocked.kind) {
-                WireSendBlockedException.Kind.TOO_LATE ->
-                    noReply(NoReplyReason.TOO_LATE_TO_SEND, "not sent: ${blocked.leftMs / 1000} s of the query's time were left")
-                WireSendBlockedException.Kind.BUDGET_EXHAUSTED ->
-                    noReply(NoReplyReason.WITHDRAWN, "not sent: hourly budget is spent")
-            }
-        } else {
-            val status = blocked.priorHttpStatus
-            if (status != null) {
-                noReply(NoReplyReason.forHttpStatus(status), "HTTP $status (replay blocked: ${blocked.kind})")
-            } else {
-                noReply(NoReplyReason.NETWORK, "replay blocked: ${blocked.kind}")
-            }
         }
 
     /**

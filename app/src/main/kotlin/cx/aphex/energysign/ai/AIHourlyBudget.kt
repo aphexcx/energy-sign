@@ -3,6 +3,10 @@ package cx.aphex.energysign.ai
 import okhttp3.Interceptor
 import okhttp3.Request
 import okhttp3.Response
+import okhttp3.internal.http2.ConnectionShutdownException
+import okhttp3.internal.http2.ErrorCode
+import okhttp3.internal.http2.StreamResetException
+import java.io.IOException
 import java.net.ProtocolException
 import java.time.Duration
 import java.util.Collections
@@ -60,6 +64,9 @@ class AIHourlyBudget(
         /** Whether at least one wire request was stamped against this reservation. */
         val wasSent: Boolean
             get() = synchronized(lock) { state == State.STAMPED }
+
+        /** Whether this reservation is still open and has not been stamped or released. */
+        internal fun isReserved(): Boolean = synchronized(lock) { state == State.RESERVED }
 
         /**
          * Converts this active reservation into a permanent wire-send timestamp at [now] (or
@@ -179,6 +186,22 @@ class WireSendBlockedException(
 ) : ProtocolException("wire send blocked ($kind, afterWireSend=$afterWireSend)") {
     enum class Kind { TOO_LATE, BUDGET_EXHAUSTED }
 
+    /** Maps a blocked wire send into a single consistent (reason, detail) pair for both generators. */
+    fun toNoReplyReasonAndDetail(): Pair<NoReplyReason, String> =
+        if (!afterWireSend) {
+            when (kind) {
+                Kind.TOO_LATE -> NoReplyReason.TOO_LATE_TO_SEND to "not sent: ${leftMs / 1000} s of the query's time were left"
+                Kind.BUDGET_EXHAUSTED -> NoReplyReason.WITHDRAWN to "not sent: hourly budget is spent"
+            }
+        } else {
+            val status = priorHttpStatus
+            if (status != null) {
+                NoReplyReason.forHttpStatus(status) to "HTTP $status (replay blocked: $kind)"
+            } else {
+                NoReplyReason.NETWORK to "replay blocked: $kind"
+            }
+        }
+
     companion object {
         fun tooLate(leftMs: Long, priorHttpStatus: Int?, afterWireSend: Boolean) =
             WireSendBlockedException(Kind.TOO_LATE, leftMs, priorHttpStatus, afterWireSend)
@@ -226,6 +249,10 @@ class WireBudgetInterceptor(
             throw WireSendBlockedException.budgetExhausted(priorHttpStatus = null, afterWireSend = false)
         }
 
+        if (chain.call().isCanceled()) {
+            throw IOException("Canceled")
+        }
+
         val alreadySent = context.wireSends.get() > 0
         val priorStatus = context.lastHttpStatus.get().takeIf { it > 0 }
         val leftMs = context.deadline.remainingMs()
@@ -237,22 +264,50 @@ class WireBudgetInterceptor(
             )
         }
 
-        val permitted = if (!alreadySent) {
-            context.reservation?.stamp() ?: budget.tryStampAdditional()
+        // Hold an active reservation across chain.proceed(request) so the hourly ceiling holds
+        // during the write, and commit (stamp) only once the write outcome is known. Confirmed
+        // pre-write failures (e.g. HTTP/2 GOAWAY ConnectionShutdownException or REFUSED_STREAM
+        // before stream processing) leave zero bytes sent and release/preserve the reservation.
+        val deskReservation = context.reservation
+        val slot: AIHourlyBudget.Reservation
+        val ownsSlot: Boolean
+        if (!alreadySent && deskReservation != null) {
+            if (!deskReservation.isReserved()) {
+                throw WireSendBlockedException.budgetExhausted(
+                    priorHttpStatus = priorStatus,
+                    afterWireSend = false,
+                )
+            }
+            slot = deskReservation
+            ownsSlot = false
         } else {
-            budget.tryStampAdditional()
-        }
-        if (!permitted) {
-            throw WireSendBlockedException.budgetExhausted(
+            slot = budget.reserve() ?: throw WireSendBlockedException.budgetExhausted(
                 priorHttpStatus = priorStatus,
                 afterWireSend = alreadySent,
             )
+            ownsSlot = true
         }
 
-        // Counted BEFORE writing to the wire so a transport error mid-write still counts as sent.
-        context.wireSends.incrementAndGet()
-        val response = chain.proceed(request)
-        context.lastHttpStatus.set(response.code)
-        return response
+        return try {
+            val response = chain.proceed(request)
+            slot.stamp()
+            context.wireSends.incrementAndGet()
+            context.lastHttpStatus.set(response.code)
+            response
+        } catch (e: Throwable) {
+            if (isConfirmedPreWriteFailure(e)) {
+                if (ownsSlot) slot.release()
+            } else {
+                slot.stamp()
+                context.wireSends.incrementAndGet()
+            }
+            throw e
+        }
     }
+
+    private fun isConfirmedPreWriteFailure(failure: Throwable): Boolean =
+        generateSequence(failure) { it.cause }.take(12).any { cause ->
+            cause is ConnectionShutdownException ||
+                (cause is StreamResetException && cause.errorCode == ErrorCode.REFUSED_STREAM)
+        }
 }

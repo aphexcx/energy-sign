@@ -259,6 +259,7 @@ class AIQueryDesk<Q : Any>(
                 out = null
                 outReservation = null
             }
+            if (noticeFor === query) noticeFor = null
             reservation.release()
             throw e
         }

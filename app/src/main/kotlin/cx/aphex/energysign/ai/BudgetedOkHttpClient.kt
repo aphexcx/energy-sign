@@ -105,9 +105,14 @@ internal class BudgetedOkHttpClient(
         }
 
     private fun newCall(request: HttpRequest, requestOptions: RequestOptions, context: WireCallContext?): Call {
-        val clientBuilder = okHttpClient.newBuilder()
-            .followRedirects(false)
-            .followSslRedirects(false)
+        // Prepare URL and request body FIRST: body.contentLength() lazily runs Jackson JSON
+        // serialization in the Anthropic SDK, which can take seconds. Computing timeouts only
+        // after all preparation finishes ensures OkHttp's timer and the 15 s check are never stale.
+        val url = toUrl(request)
+        var body: RequestBody? = request.body().orElse(null)?.let(::toOkHttpRequestBody)
+        if (body == null && requiresBody(request.method)) {
+            body = "".toRequestBody(null)
+        }
 
         val effectiveTimeout = when (context) {
             is WireCallContext.Paid -> {
@@ -149,23 +154,26 @@ internal class BudgetedOkHttpClient(
             null -> requestOptions.timeout().orElse(defaultTimeout)
         }
 
-        clientBuilder
+        val callClient = okHttpClient.newBuilder()
+            .followRedirects(false)
+            .followSslRedirects(false)
             .connectTimeout(effectiveTimeout.connect())
             .readTimeout(effectiveTimeout.read())
             .writeTimeout(effectiveTimeout.write())
             .callTimeout(effectiveTimeout.request())
-
-        val callClient = clientBuilder.build()
-        return callClient.newCall(toOkHttpRequest(request, callClient, context))
+            .build()
+        return callClient.newCall(toOkHttpRequest(request, url, body, callClient, context))
     }
 
-    private fun toOkHttpRequest(request: HttpRequest, client: OkHttpClient, context: WireCallContext?): Request {
-        var body: RequestBody? = request.body().orElse(null)?.let(::toOkHttpRequestBody)
-        if (body == null && requiresBody(request.method)) {
-            body = "".toRequestBody(null)
-        }
+    private fun toOkHttpRequest(
+        request: HttpRequest,
+        url: String,
+        body: RequestBody?,
+        client: OkHttpClient,
+        context: WireCallContext?,
+    ): Request {
         val builder = Request.Builder()
-            .url(toUrl(request))
+            .url(url)
             .method(request.method.name, body)
             .tag(WireCallContext::class.java, context)
 

@@ -171,22 +171,10 @@ class OpenAIReplyGenerator(
         }
     }
 
-    private fun blockedResult(blocked: WireSendBlockedException): AIReplyResult.NoReply =
-        if (!blocked.afterWireSend) {
-            when (blocked.kind) {
-                WireSendBlockedException.Kind.TOO_LATE ->
-                    noReply(NoReplyReason.TOO_LATE_TO_SEND, "not sent: ${blocked.leftMs / 1000} s of the query's time were left")
-                WireSendBlockedException.Kind.BUDGET_EXHAUSTED ->
-                    noReply(NoReplyReason.WITHDRAWN, "not sent: hourly budget is spent")
-            }
-        } else {
-            val status = blocked.priorHttpStatus
-            if (status != null) {
-                noReply(NoReplyReason.forHttpStatus(status), "HTTP $status (replay blocked: ${blocked.kind})")
-            } else {
-                noReply(NoReplyReason.NETWORK, "replay blocked: ${blocked.kind}")
-            }
-        }
+    private fun blockedResult(blocked: WireSendBlockedException): AIReplyResult.NoReply {
+        val (reason, detail) = blocked.toNoReplyReasonAndDetail()
+        return noReply(reason, detail)
+    }
 
     override fun syncClock(limit: Duration) {
         timeFrom?.syncClock(limit)
