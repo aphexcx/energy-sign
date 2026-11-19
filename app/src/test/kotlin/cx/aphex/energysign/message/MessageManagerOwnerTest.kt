@@ -648,7 +648,7 @@ class MessageManagerOwnerTest {
         // As the old app saved them: an ad of 120 apostrophes (720 bytes of text as JSON) and an
         // ad with 32 clocks, whose 33000 ms had overflowed to -32536.
         val filesDir = newFilesDir()
-        val legacy = "[{\"dly\":1000,\"str\":\"" + "\\u0027".repeat(120) + "\",\"type\":\"O\",\"b\":3,\"g\":2,\"r\":1}," +
+        val legacy = "[{\"dly\":1000,\"str\":\"" + "\u0027".repeat(120) + "\",\"type\":\"O\",\"b\":3,\"g\":2,\"r\":1}," +
                 "{\"dly\":-32536,\"scroll\":false,\"str\":\"LONG\",\"type\":\"C\",\"b\":3,\"g\":2,\"r\":1}]"
         File(filesDir, "ads.json").writeText(legacy)
 
@@ -970,13 +970,19 @@ class MessageManagerOwnerTest {
     private fun lineOf(track: BeatLinkTrack): String? = if (track.isEmpty) null else "${track.artist} - ${track.title}"
 
     /** The start of every cell: "Old" was played, then "Current", which is playing; both were shown; nothing is queued. The ad list is the place of the track and one ad. */
-    private fun appWithCurrentPlaying(): App {
+    private fun appWithCurrentPlaying(adRoundWaiting: Boolean = false): App {
         val app = App(newFilesDir())
         app.phone(trackAds)
         ownerRuns()
         app.post(oldTrack)
+        app.repo.oneTimeMessages.clear() // the sign has shown its announcement
         app.post(currentTrack)
-        app.repo.oneTimeMessages.clear()
+        app.repo.oneTimeMessages.clear() // and this one
+        if (adRoundWaiting) {
+            app.phone(trackAds)
+            ownerRuns()
+            assertEquals(listOf("CURRENT", "TRACK:", "DJ - Current", "AD"), app.repo.oneTimeMessages.map { it.str })
+        }
         return app
     }
 
@@ -1016,11 +1022,11 @@ class MessageManagerOwnerTest {
      * Every one of [sequences] (the updates in the order they are ACCEPTED) with every order in
      * which its updates can reach the owner. Returns the cells that are wrong, as lines.
      */
-    private fun wrongCells(sequences: List<List<Kind>>): List<String> {
+    private fun wrongCells(sequences: List<List<Kind>>, adRoundWaiting: Boolean = false): List<String> {
         val wrong = mutableListOf<String>()
         for (sequence in sequences) {
             for (arrival in permutations(sequence.indices.toList())) {
-                val app = appWithCurrentPlaying()
+                val app = appWithCurrentPlaying(adRoundWaiting)
                 val updates = sequence.mapIndexed { i, kind -> updateOf(kind, i + 1) }
                 val turns = sequence.map { app.manager.acceptTrackUpdate() }
                 arrival.forEach { i -> app.post(updates[i], turns[i]) }
@@ -1055,6 +1061,29 @@ class MessageManagerOwnerTest {
         val wrong = wrongCells(sequencesOf(2))
 
         assertEquals(emptyList(), wrong, "${wrong.size} wrong cells of 32")
+    }
+
+    @Test
+    fun `the same single updates and pairs with an ad round of the playing track waiting in the queue`() {
+        // (the round's heading and line must go when the track changes, and stay when it does not)
+        val wrong = wrongCells(sequencesOf(1), adRoundWaiting = true) + wrongCells(sequencesOf(2), adRoundWaiting = true)
+
+        assertEquals(emptyList(), wrong, "${wrong.size} wrong cells of 36")
+    }
+
+    @Test
+    fun `an ad round that is waiting keeps its track when the same track is posted again, and loses it whole when another comes`() {
+        val same = appWithCurrentPlaying(adRoundWaiting = true)
+        same.post(currentTrack)
+        assertEquals(listOf("CURRENT", "TRACK:", "DJ - Current", "AD"), same.repo.oneTimeMessages.map { it.str })
+
+        val other = appWithCurrentPlaying(adRoundWaiting = true)
+        other.post(oldTrack) // played before: it is not announced, it only takes the place
+        assertEquals(listOf("AD"), other.repo.oneTimeMessages.map { it.str })
+
+        val fresh = appWithCurrentPlaying(adRoundWaiting = true)
+        fresh.post(updateOf(Kind.NEW, 1))
+        assertEquals(listOf("AD", "NOW${Message.VT}PLAYING", "DJ - New 1", ""), fresh.repo.oneTimeMessages.map { it.str })
     }
 
     @Test
@@ -1143,21 +1172,163 @@ class MessageManagerOwnerTest {
 
     @Test
     fun `an ad that says CURRENT or TRACK itself is an ad, a change of track does not take it out`() {
+        // (in this test every colour is 0, so the owner's two ads EQUAL the two heading lines of
+        // an ad round; they are told apart by which objects they are)
         val app = App(newFilesDir())
-        app.phone("!$A\n${O}CURRENT\n${O}TRACK:\n🛤")
+        val ads = "!$A\n${O}CURRENT\n${O}TRACK:\n\uD83D\uDEE4\n${O}AD"
+        app.phone(ads)
         ownerRuns()
         app.post(currentTrack)
         app.repo.oneTimeMessages.clear()
-        app.phone("!$A\n${O}CURRENT\n${O}TRACK:\n🛤")
+        app.phone(ads)
         ownerRuns()
-        assertEquals(listOf("CURRENT", "TRACK:", "CURRENT", "TRACK:", "DJ - Current"), app.repo.oneTimeMessages.map { it.str })
+        assertEquals(listOf("CURRENT", "TRACK:", "CURRENT", "TRACK:", "DJ - Current", "AD"), app.repo.oneTimeMessages.map { it.str })
+
+        app.post(oldTrack) // another track takes the place; it was not played here before, so it is announced
+
+        // the round keeps the owner's two ads and loses the two heading lines and the line
+        assertEquals(
+            listOf("CURRENT", "TRACK:", "AD", "NOW${Message.VT}PLAYING", "DJ - Old", ""),
+            app.repo.oneTimeMessages.map { it.str }
+        )
+    }
+
+    // ---- found by an independent review of the rule
+
+    private fun announcements(app: App) = app.repo.oneTimeMessages.count { it === Message.FlashingAnnouncement.NowPlayingAnnouncement }
+
+    @Test
+    fun `a track whose announcement was pushed out before it was shown is announced when it comes back`() {
+        val app = appWithCurrentPlaying()
+        val fresh = updateOf(Kind.NEW, 1)
+        app.post(fresh)
+        assertEquals(1, announcements(app))
+        app.post(stopOfTheTrack) // before the sign got to the announcement
+        assertEquals(0, announcements(app))
+
+        app.post(fresh)
+
+        assertEquals(emptyList(), wrongOnTheSign(app, playing = "DJ - New 1", announced = true))
+    }
+
+    @Test
+    fun `a track whose announcement the sign has taken is not announced again when it comes back`() {
+        val app = appWithCurrentPlaying()
+        val fresh = updateOf(Kind.NEW, 1)
+        app.post(fresh)
+        assertSame(Message.FlashingAnnouncement.NowPlayingAnnouncement, app.manager.getNextMessage()) // the sign asks
+        app.post(stopOfTheTrack)
+
+        app.post(fresh)
+
+        assertEquals(emptyList(), wrongOnTheSign(app, playing = "DJ - New 1", announced = false))
+    }
+
+    @Test
+    fun `after the sign has taken the announcement, a stop keeps the line of the stopped track from following it`() {
+        val app = appWithCurrentPlaying()
+        app.post(updateOf(Kind.NEW, 1))
+        assertSame(Message.FlashingAnnouncement.NowPlayingAnnouncement, app.manager.getNextMessage())
 
         app.post(stopOfTheTrack)
 
-        // the owner's two ads stay (once from the queued round; the stop's own round is not pushed twice... see below)
-        assertTrue(app.repo.oneTimeMessages.map { it.str }.containsAll(listOf("CURRENT", "TRACK:")))
-        assertTrue(app.repo.oneTimeMessages.none { it is Message.NowPlayingTrackMessage })
-        assertEquals(0, app.repo.oneTimeMessages.size % 2, "only whole pairs of the owner's two ads: ${app.repo.oneTimeMessages.map { it.str }}")
+        val next = (1..3).map { app.manager.getNextMessage() }
+        assertTrue(next.none { it is Message.NowPlayingTrackMessage }, next.map { it.str }.toString())
+        assertEquals("AD", next.first().str, "the ad round the stop asks for")
+    }
+
+    @Test
+    fun `two tracks that are the same line to the sign are announced once`() {
+        val app = appWithCurrentPlaying()
+        app.post(BeatLinkTrack(id = 301, title = "Song", artist = "DJ"))
+        app.post(BeatLinkTrack(id = 302, title = "Song", artist = "DJ"))                   // another id
+        app.post(BeatLinkTrack(id = 303, title = "Song", artist = "DJ", isId = true))     // another flag
+        app.post(BeatLinkTrack(id = 304, title = "Song\u4e2d", artist = "DJ"))             // differs only in what the sign cannot show
+
+        assertEquals(emptyList(), wrongOnTheSign(app, playing = "DJ - Song", announced = true))
+    }
+
+    @Test
+    fun `a second stop, when nothing is playing, adds nothing to the queue`() {
+        val app = appWithCurrentPlaying()
+        app.post(stopOfTheTrack)
+        assertEquals(listOf("AD"), app.repo.oneTimeMessages.map { it.str }, "the stop of a track asks for an ad round")
+
+        app.post(stopOfTheTrack)
+        app.post(stopOfTheTrack)
+
+        assertEquals(listOf("AD"), app.repo.oneTimeMessages.map { it.str })
+    }
+
+    @Test
+    fun `the five tracks played last are remembered, by when they were played last, and the sixth back is announced again`() {
+        val app = App(newFilesDir())
+        app.phone(trackAds)
+        ownerRuns()
+        val tracks = (1..6).map { BeatLinkTrack(id = 400 + it, title = "T$it", artist = "DJ") }
+        fun announcedWhenPosted(track: BeatLinkTrack): Boolean {
+            app.repo.oneTimeMessages.clear()
+            app.post(track)
+            return announcements(app) == 1
+        }
+
+        // six tracks never played: each is announced
+        assertEquals(List(6) { true }, tracks.map { announcedWhenPosted(it) })
+        // played: T1 is forgotten (five are remembered: T2..T6). T3 comes back: remembered, and now the newest
+        assertEquals(false, announcedWhenPosted(tracks[2]))
+        // T1 comes back: forgotten, so announced; the oldest by last play, T2, is forgotten for it
+        assertEquals(true, announcedWhenPosted(tracks[0]))
+        // T4 and T3 are still remembered (T3 because it was played again), T2 is not
+        assertEquals(false, announcedWhenPosted(tracks[3]))
+        assertEquals(false, announcedWhenPosted(tracks[2]))
+        assertEquals(true, announcedWhenPosted(tracks[1]))
+    }
+
+    /** The real route on a real server (Netty, a free port) for the time of [block], which gets the port. */
+    private fun <T> withTrackServer(app: App, block: (port: Int) -> T): T {
+        val server = io.ktor.server.engine.embeddedServer(io.ktor.server.netty.Netty, port = 0) {
+            install(io.ktor.server.plugins.contentnegotiation.ContentNegotiation) { gson {} }
+            routing { currentTrack(app.manager) }
+        }.start(wait = false)
+        try {
+            return block(kotlinx.coroutines.runBlocking { server.resolvedConnectors().first().port })
+        } finally {
+            server.stop(100, 500)
+        }
+    }
+
+    /** Posts [json] to the route and returns the status line of the answer. */
+    private fun postTrack(port: Int, json: String): String {
+        val post = Post(port)
+        post.headers(json.toByteArray().size)
+        post.body(json)
+        return waitingCall("test-reads-answer") { post.status() }
+    }
+
+    @Test
+    fun `a posted track without an artist or without a title is taken in with what it has`() {
+        // (the server fills the track with Gson: a field that is not in the JSON is null, whatever Kotlin's type says)
+        val app = appWithCurrentPlaying()
+        withTrackServer(app) { port ->
+            assertEquals("HTTP/1.1 200 OK", postTrack(port, """{"id":7,"title":"Only A Title"}"""))
+            assertEquals(emptyList(), wrongOnTheSign(app, playing = "Only A Title", announced = true))
+
+            assertEquals("HTTP/1.1 200 OK", postTrack(port, """{"id":8,"artist":"Only An Artist","title":null}"""))
+            assertEquals(emptyList(), wrongOnTheSign(app, playing = "Only An Artist", announced = true))
+        }
+    }
+
+    @Test
+    fun `a posted track with nothing the sign can show is taken in as nothing playing, not left out`() {
+        val app = appWithCurrentPlaying()
+        withTrackServer(app) { port ->
+            assertEquals("HTTP/1.1 200 OK", postTrack(port, """{"id":9}"""))
+            assertEquals(emptyList(), wrongOnTheSign(app, playing = null, announced = false))
+
+            app.post(currentTrack)
+            assertEquals("HTTP/1.1 200 OK", postTrack(port, """{"id":10,"artist":"","title":"\u4e2d\u6587"}"""))
+            assertEquals(emptyList(), wrongOnTheSign(app, playing = null, announced = false))
+        }
     }
 
     @Test
