@@ -8,7 +8,8 @@ import androidx.arch.core.executor.ArchTaskExecutor
 import androidx.arch.core.executor.TaskExecutor
 import com.vdurmont.emoji.EmojiParser
 import cx.aphex.energysign.MainViewModel
-import cx.aphex.energysign.gpt.GPTViewModel
+import cx.aphex.energysign.ai.AIReplySource
+import cx.aphex.energysign.message.FakeReplies
 import cx.aphex.energysign.message.Message
 import cx.aphex.energysign.message.MessageManager
 import cx.aphex.energysign.message.MessageRepository
@@ -77,7 +78,7 @@ class BluetoothWriteEntryTest {
             modules(module {
                 single { repo }
                 single { owner }
-                single { GPTViewModel() }
+                single<AIReplySource> { FakeReplies() }
             })
         }
         manager = MessageManager(context, repo, owner)
