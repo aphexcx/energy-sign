@@ -1,5 +1,6 @@
 package cx.aphex.energysign.bluetooth
 
+import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothManager
 import android.content.ContextWrapper
@@ -122,5 +123,21 @@ class BluetoothRecoveryTest {
         listener.dispose()
         assertEquals(BluetoothGatt.GATT_FAILURE, gatt.uartWriteStatus("late".toByteArray()))
         assertEquals(listOf("hello"), received)
+    }
+
+    @Test
+    fun disconnectShowsRemainingPhoneAndMtu() {
+        val a = android.newInstance(BluetoothDevice::class.java)
+        val b = android.newInstance(BluetoothDevice::class.java)
+        val updates = mutableListOf<BluetoothStatusUpdate>()
+        gatt.postPeer = { it() }
+        gatt.showPeer = { updates.add(it) }
+        gatt.onConnectionStateChange(a, 0, 2)
+        gatt.onMtuChanged(a, 64)
+        gatt.onConnectionStateChange(b, 0, 2)
+        gatt.onConnectionStateChange(b, 0, 0)
+        assertEquals(BluetoothStatusUpdate(a, 64), updates.last())
+        gatt.onConnectionStateChange(a, 0, 0)
+        assertEquals(BluetoothStatusUpdate(null, null), updates.last())
     }
 }

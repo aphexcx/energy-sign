@@ -168,4 +168,26 @@ class BluetoothRegistrationTest {
         session.adapterOn()
         assertEquals(1, registrations.size)
     }
+
+    @Test
+    fun missingCallbacksExpireWhileRadioStaysOn() {
+        var alarm: (() -> Unit)? = null
+        session.arm = { fire -> alarm = fire; { alarm = null } }
+        session.start()
+        val stale = registrations.single()
+        alarm?.invoke()
+        assertEquals(2, registrations.size)
+        stale(0)
+        registrations.last()(0)
+        val staleAd = advertisements.single()
+        alarm?.invoke()
+        assertEquals(3, registrations.size)
+        registrations.last()(0)
+        staleAd(4)
+        advertisements.last()(0)
+        alarm?.invoke()
+        session.checkAdapter()
+        assertEquals(3, registrations.size)
+        assertEquals(2, closed)
+    }
 }

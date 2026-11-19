@@ -37,6 +37,9 @@ internal class EnergySignBluetoothGattServer(
     /* Collection of notification subscribers */
     private val registeredDevices = Collections.synchronizedSet(mutableSetOf<BluetoothDevice>())
 
+    internal var postPeer: (() -> Unit) -> Unit = { mainThread.post(it) }
+    internal var showPeer: (BluetoothStatusUpdate) -> Unit = viewModel::onBtStatusUpdate
+
     fun start(): Boolean {
         val server = checkNotNull(bluetoothManager.openGattServer(context, this)) { "Bluetooth GATT server unavailable" }
         gattServer = server
@@ -60,7 +63,7 @@ internal class EnergySignBluetoothGattServer(
     override fun onMtuChanged(device: BluetoothDevice?, mtu: Int) {
         if (closed) return
         logD("MTU Changed! New MTU: $mtu")
-        viewModel.onBtStatusUpdate(
+        showPeer(
             BluetoothStatusUpdate(
                 btDevice = device,
                 mtu = mtu
@@ -73,7 +76,7 @@ internal class EnergySignBluetoothGattServer(
         status: Int,
         newState: Int
     ) {
-        mainThread.post {
+        postPeer post@{
             if (closed) return@post
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
@@ -83,13 +86,13 @@ internal class EnergySignBluetoothGattServer(
                         changed = { mtu -> onMtuChanged(bluetoothDevice, mtu) },
                     )
                     mtuClients[bluetoothDevice] = peer
-                    viewModel.onBtStatusUpdate(BluetoothStatusUpdate(bluetoothDevice, null))
+                    showPeer(BluetoothStatusUpdate(bluetoothDevice, null))
                     peer.start { callback -> bluetoothDevice.connectGatt(context, true, callback) }
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     mtuClients.remove(bluetoothDevice)?.stop()
                     registeredDevices.remove(bluetoothDevice)
-                    viewModel.onBtStatusUpdate(BluetoothStatusUpdate(null, null))
+                    showPeer(BluetoothStatusUpdate(null, null))
                 }
             }
         }

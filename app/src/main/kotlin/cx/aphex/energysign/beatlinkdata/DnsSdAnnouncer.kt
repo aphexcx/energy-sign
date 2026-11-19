@@ -18,9 +18,11 @@ class DnsSdAnnouncer(val context: Context) : NsdManager.RegistrationListener {
     private lateinit var serverSocket: ServerSocket
     private lateinit var serviceInfo: NsdServiceInfo
 
+    internal var submit: (NsdManager.RegistrationListener) -> Unit = { registerService(localPort) }
+
     fun start() {
         initializeServerSocket()
-        registerService(localPort)
+        submit(this)
     }
 
     private fun registerService(port: Int) {

@@ -15,6 +15,8 @@ internal class BluetoothSession(
     private val closeServices: () -> Unit,
     private val showAdvertiseResult: (Int) -> Unit = {},
 ) {
+    internal var arm: ((() -> Unit) -> (() -> Unit)) = { {} }
+
     private enum class Phase { REGISTERING_SERVICE, STARTING_ADVERTISER, STARTING_UUID_ONLY, READY }
 
     /** Android may deliver a callback from an older server after an OFF/ON cycle. */

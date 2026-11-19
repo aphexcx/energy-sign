@@ -23,4 +23,21 @@ class BeatLinkListenerTest {
         service.onDestroy()
         verify(next).stop(0, 0)
     }
+
+    @Test
+    fun foregroundAndDestructionOnlyEnqueueNettyWork() {
+        val service = BeatLinkDataConsumerServerService()
+        val jobs = ArrayDeque<Runnable>()
+        service.dispatch = java.util.concurrent.Executor(jobs::addLast)
+        val engine = mock(ApplicationEngine::class.java)
+        `when`(engine.start(false)).thenReturn(engine)
+        repeat(3) { service.ensureListening { engine } }
+        verify(engine, never()).start(false)
+        while (jobs.isNotEmpty()) jobs.removeFirst().run()
+        verify(engine).start(false)
+        service.onDestroy()
+        verify(engine, never()).stop(0, 0)
+        while (jobs.isNotEmpty()) jobs.removeFirst().run()
+        verify(engine).stop(0, 0)
+    }
 }

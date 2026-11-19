@@ -56,6 +56,8 @@ class BeatLinkDataConsumerServerService : Service(), KoinComponent {
         ensureListening()
     }
 
+    internal var dispatch: java.util.concurrent.Executor = java.util.concurrent.Executor { it.run() }
+
     internal fun ensureListening(create: () -> ApplicationEngine = ::createEngine) {
         if (server != null) return
         val engine = startup.optional("BeatLink listener construction", create) ?: return
