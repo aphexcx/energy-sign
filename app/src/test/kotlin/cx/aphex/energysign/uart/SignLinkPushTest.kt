@@ -1713,21 +1713,29 @@ class SignLinkPushTest {
     }
 
     @Test
-    fun `a link that is told nothing about pushes does not push`() {
-        var asked = false
+    fun `the push is the only path, a link pushes a change with nothing to switch on`() {
         val plain = SignLink(
             wire = wire, baud = baud, name = "UART", events = {}, answer = { _, _ -> },
-            chooserFrame = {
-                asked = true
-                "H:B"
-            },
+            chooserFrame = { "H:B" },
             timing = UartTimingLog(isEnabled = { false }, emit = {}),
             nanoTime = { now }, sleepNanos = { now += it },
         )
         plain.requestPush()
         while (now < 500 * ms) plain.step()
+        assertEquals(listOf("tx[00x72]@0", "tx[H:B]@70"), wire())
+    }
+
+    @Test
+    fun `a question mark from the sign is no request, the sign that listens for pushes does not poll, it is read away and nothing is written`() {
+        arrives(0, "?")
+        runUntil(500)
         assertEquals(emptyList(), wire())
-        assertFalse(asked)
+        assertEquals(0, answers)
+        assertTrue(line.any { it == "log:Read 1 bytes from UART that are not a request: [?]" }, line.toString())
+        // and a request behind it is answered as ever
+        arrives(500, "~")
+        runUntil(600)
+        assertEquals(listOf("tx[H:A]@500"), wire())
     }
 
     // ================= the timing log
