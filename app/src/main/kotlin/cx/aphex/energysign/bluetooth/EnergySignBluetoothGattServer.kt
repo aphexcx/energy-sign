@@ -13,6 +13,10 @@ import cx.aphex.energysign.ext.logW
 import java.util.*
 
 
+// Bluetooth Core Specification, Client Characteristic Configuration (0x2902), little endian.
+private val NOTIFICATIONS_ON = byteArrayOf(1, 0)
+private val NOTIFICATIONS_OFF = byteArrayOf(0, 0)
+
 data class BluetoothStatusUpdate(val btDevice: BluetoothDevice?, val mtu: Int?)
 
 /** Gatt Server, plus callbacks to handle incoming requests to the GATT server.
@@ -240,11 +244,11 @@ internal class EnergySignBluetoothGattServer(
                 }
 
                 val returnValue =
-//                            BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+//                            NOTIFICATIONS_ON
                     if (registeredDevices.contains(device)) {
-                        BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                        NOTIFICATIONS_ON
                     } else {
-                        BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+                        NOTIFICATIONS_OFF
                     }
 
                 gattServer?.sendResponse(
@@ -286,11 +290,11 @@ internal class EnergySignBluetoothGattServer(
             descriptor.uuid != CLIENT_CHARACTERISTIC_CONFIG_DESCRIPTOR -> BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED
             preparedWrite -> BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED
             offset != 0 -> BluetoothGatt.GATT_INVALID_OFFSET
-            value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) -> {
+            value.contentEquals(NOTIFICATIONS_ON) -> {
                 registeredDevices.add(device)
                 BluetoothGatt.GATT_SUCCESS
             }
-            value.contentEquals(BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE) -> {
+            value.contentEquals(NOTIFICATIONS_OFF) -> {
                 registeredDevices.remove(device)
                 BluetoothGatt.GATT_SUCCESS
             }
