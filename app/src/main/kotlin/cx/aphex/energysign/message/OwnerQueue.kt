@@ -35,6 +35,14 @@ class OwnerQueue {
     @Volatile
     private var mustNotWait: Thread? = null
 
+    /**
+     * The thread that last ran this queue ([drain]) is alive. False before any thread has, and
+     * when that thread has ended. It does not say that the owner is looking at the queue now:
+     * a change handed over may still be withdrawn ([askFor]). For a caller that must not hand
+     * over what nobody is there to carry out (the adb hook).
+     */
+    val ownerRuns: Boolean get() = ownerThread?.isAlive == true
+
     /** Hands [event] to the owner. From any thread; returns at once. */
     fun post(event: () -> Unit) {
         events.add(event)
@@ -49,25 +57,71 @@ class OwnerQueue {
      * back) and this throws a TimeoutException. A change the owner has taken up is waited for
      * to its end, whatever the clock says: its real result is the only true answer.
      * Never from a thread named with [neverWaitsOn]; the owner asking itself is answered at once.
+     *
+     * A TimeoutException from here does not say WHO threw it: a change may throw one of its own.
+     * A caller that must know which of the two it was uses [askFor].
      */
-    fun <T> ask(timeoutMs: Long = ASK_TIMEOUT_MS, change: () -> T): T {
+    fun <T> ask(timeoutMs: Long = ASK_TIMEOUT_MS, change: () -> T): T =
+        when (val asked = askFor(timeoutMs, change)) {
+            is Asked.Done -> asked.result
+            is Asked.Threw -> throw asked.thrown
+            Asked.Withdrawn -> throw TimeoutException("the sign link did not get to the change within $timeoutMs ms")
+        }
+
+    /** What became of a change that was handed to the owner with [askFor]: one of three, when [askFor] returns. */
+    sealed class Asked<out T> {
+        /** The owner ran the change to its end, and it returned [result]. */
+        class Done<T>(val result: T) : Asked<T>()
+
+        /**
+         * The owner ran the change and it threw [thrown] (an Error included). How far the change
+         * had come by then is not known: part of it may have been made.
+         */
+        class Threw(val thrown: Throwable) : Asked<Nothing>()
+
+        /**
+         * The owner had not taken the change up within the time, and it was WITHDRAWN: it has
+         * not run and it never will. This is not something a change can return or throw: only
+         * the queue makes it, at the one place where the asker wins the change back from the
+         * owner. So it is certain that nothing happened.
+         */
+        object Withdrawn : Asked<Nothing>()
+    }
+
+    /**
+     * [ask], with what happened as a value instead of an exception, for a caller that has to
+     * tell the three apart (the adb hook: "done", "it threw, part of it may be done", "nothing
+     * happened"). What the change threw is never thrown from here. Thrown from here, as from
+     * [ask]: IllegalStateException for a caller that must not wait ([neverWaitsOn]), before
+     * anything is handed over; and InterruptedException when the asker's wait is interrupted,
+     * and then the change is NOT withdrawn: the owner may still run it.
+     */
+    fun <T> askFor(timeoutMs: Long = ASK_TIMEOUT_MS, change: () -> T): Asked<T> {
         val asker = Thread.currentThread()
-        if (asker === ownerThread) return change()
+        if (asker === ownerThread) {
+            return try {
+                Asked.Done(change())
+            } catch (e: Throwable) {
+                Asked.Threw(e)
+            }
+        }
         check(asker !== mustNotWait) { "a change must be posted from ${asker.name}, not waited for" }
         val answer = FutureTask(Callable(change))
         val takenUp = AtomicBoolean(false) // set once, by whoever is first: the owner taking it up, or the asker withdrawing it
         post { if (takenUp.compareAndSet(false, true)) answer.run() }
-        try {
-            return try {
-                answer.get(timeoutMs, TimeUnit.MILLISECONDS)
-            } catch (e: TimeoutException) {
-                if (takenUp.compareAndSet(false, true)) {
-                    throw TimeoutException("the sign link did not get to the change within $timeoutMs ms")
+        return try {
+            Asked.Done(
+                try {
+                    answer.get(timeoutMs, TimeUnit.MILLISECONDS)
+                } catch (e: TimeoutException) {
+                    // Thrown by the wait, not by the change: what the change throws comes as an
+                    // ExecutionException, below.
+                    if (takenUp.compareAndSet(false, true)) return Asked.Withdrawn
+                    answer.get()
                 }
-                answer.get()
-            }
+            )
         } catch (e: ExecutionException) {
-            throw e.cause ?: e
+            Asked.Threw(e.cause ?: e)
         }
     }
 

@@ -54,10 +54,11 @@ class MessageRepository(
         /** All of [elements] with ONE move of the entries behind them, however many they are. */
         override fun addAll(index: Int, elements: Collection<Message>): Boolean {
             var counted = 0 // in the one pass that makes the entries: [elements] is walked once
-            entries.addAll(index, elements.map { counted += counts(it); Entry(it, ++lastNumber) })
+            // (nothing to put in changes nothing: whoever is reading the queue reads on)
+            if (!entries.addAll(index, elements.map { counted += counts(it); Entry(it, ++lastNumber) })) return false
             announcements += counted
             modCount++
-            return elements.isNotEmpty()
+            return true
         }
         override fun set(index: Int, element: Message) =
             entries.set(index, Entry(element, ++lastNumber)).message.also { announcements += counts(element) - counts(it) }
@@ -68,9 +69,13 @@ class MessageRepository(
             return removed.message
         }
         override fun removeIf(filter: Predicate<in Message>): Boolean {
-            val removed = entries.removeIf { filter.test(it.message) }
+            // The announcements that go are counted while each entry is tested, once: no second
+            // walk over what stays. (Nothing is taken out before every entry has been tested, so
+            // a test that throws leaves the entries and the count as they were.)
+            var gone = 0
+            val removed = entries.removeIf { entry -> filter.test(entry.message).also { if (it) gone += counts(entry.message) } }
             if (removed) {
-                announcements = entries.sumOf { counts(it.message) } // (the removal walked the entries already)
+                announcements -= gone
                 modCount++
             }
             return removed
