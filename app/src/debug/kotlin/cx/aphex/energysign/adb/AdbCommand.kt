@@ -6,6 +6,7 @@ import java.util.Base64
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 
 /**
@@ -101,7 +102,7 @@ sealed class AdbCommand {
          *   threw on the command; where in it is not known here, so part of it may have been
          *   done: a message deleted, and then the save failed), "failed: the call threw" (thrown
          *   around the hand-over; the command may not have run at all, or may still be run,
-         *   whole) and "underway" (no outcome in time, see [aside]). Look before sending it again.
+         *   whole) and "underway" (no outcome in time, see [receive]). Look before sending it again.
          *
          * Nothing is thrown on from here, an Error included. Whatever the command threw has been
          * thrown and caught where it happened; the caller is the hook's own thread, and to let it
@@ -123,7 +124,7 @@ sealed class AdbCommand {
         private fun failed(thrown: Throwable): Outcome =
             Outcome(Kind.FAILED, "failed: the app threw ${thrown.javaClass.simpleName} (${thrown.message})$MAYBE_IN_PART", thrown)
 
-        /** The answer when no outcome has come in time ([aside]). */
+        /** The answer when no outcome has come in time ([receive]). */
         fun underway(): Outcome = Outcome(
             Kind.UNDERWAY,
             "underway: no outcome in time; the command may have been carried out, or may still be. How it ends goes to the log",
@@ -147,87 +148,163 @@ sealed class AdbCommand {
          * BROADCAST_BG_TIMEOUT = 60*1000, counted by BroadcastQueue from the moment the system
          * hands the broadcast to the app). `am broadcast` sends a background one unless it is
          * given `--receiver-foreground`. The bound here is half of the SHORTER limit, whichever
-         * way the broadcast was sent: the other half is for the main thread to get to
-         * onReceive at all (it lagged up to 1.6 s on the Pico while the app started) and for
-         * the answer to travel back.
+         * way the broadcast was sent, and it is counted from the receiver's first statements
+         * ([receive] arms the timer before anything else).
+         *
+         * WHAT NO BOUND IN HERE CAN COVER: the time before onReceive is called at all. The
+         * system's clock for the broadcast runs from the moment it hands the broadcast to the
+         * app, and onReceive runs on the main thread when that thread gets to it. When the app
+         * is not running yet (the Pico has just started), the main thread first makes the app:
+         * on the board that took 47 s once. A background broadcast then still has its answer in
+         * time (47 + 5 < 60); a foreground one (10 s) does not, so `--receiver-foreground` is
+         * not for a board that is starting. When the system's limit runs out first, `am` prints
+         * "result=0" with no data (see [Kind]), and the command is STILL carried out when the
+         * main thread gets to it: its line in the log says so.
          */
         const val ANSWER_WITHIN_MS: Long = 5_000
 
         /**
-         * [carriedOut] on a thread of its own, with ONE answer handed to [done]. For the
-         * receiver: it is called on the main thread, which must never wait for the owner of the
-         * messages (OwnerQueue.ask refuses it), and it has to finish its broadcast in time
-         * ([ANSWER_WITHIN_MS]).
+         * ONE BROADCAST, from the first thing the receiver does with it to its end. The rule:
          *
-         * The answer is the outcome when it comes within [answerWithinMs]. When it does not
-         * (the owner is still at the command, or has not been reached), the answer is
-         * [underway], given by a second thread at that moment, and the outcome goes to [late]
-         * when it comes, for the log: the command is not cut short, and nobody is told
-         * "refused" for something that is happening.
+         * EVERY BROADCAST GETS EXACTLY ONE ANSWER INSIDE THE LIMIT, AND EVERY COMMAND THAT WAS
+         * ANSWERED "underway" GETS EXACTLY ONE LINE IN THE LOG THAT SAYS HOW IT ENDED.
          *
-         * When one of the two threads cannot be started ([start]; only tests set it), the
-         * command is not carried out. Then this throws, and [done] has not been and will not be
-         * called; or, when the deadline's thread had already answered "underway" by then (no
-         * time was left), it does not throw: [done] is called once, whatever happens.
+         * The receiver calls this on the main thread, as the first thing after goAsync(), and
+         * does nothing else. In the order things happen here, with what a step that takes long
+         * or throws does to the answer:
+         *
+         * 1. THE TIMER IS ARMED FIRST, before anything that can take time: a thread that answers
+         *    [underway] when [answerWithinMs] have passed and nobody has answered. From here on
+         *    the answer does not depend on this thread getting anywhere. If that thread cannot
+         *    be started, the answer is given at once ("refused"): nothing that can take long is
+         *    begun without a limit.
+         * 2. [command] reads the extras. Refused: that is the answer.
+         * 3. [app] gets the app's way in (MessageManager.processNewBytesAndTell), or null when
+         *    the app has none. This is the step that can take LONG on the main thread: on a
+         *    cold start the message manager is made by this call and reads the saved messages
+         *    and the advertisements from storage. It stays on this thread (only the main thread
+         *    may make it), the timer answers "underway" meanwhile, and the command is carried
+         *    out when this step is through.
+         * 4. The command's thread is started; it waits for the owner ([carriedOut]).
+         *
+         * Whatever ends the command (its outcome, a refusal at step 2 or 3, a thread that
+         * cannot be started, anything thrown by step 2 or 3) goes through ONE place, which is
+         * passed once: it is the answer, to [done], when the timer has not answered yet, and
+         * otherwise the line for the log, to [late]. Anything thrown before the command's thread
+         * was started is "refused": the app has not been handed the bytes. [done] and [late]
+         * get the outcome and its line for the log ([logLine]); what they throw is dropped,
+         * so that no thread of the hook dies of it (that would end the app).
+         *
+         * Not covered, because nothing can cover it from in here: a command the owner never
+         * finishes, and a step 3 that never returns, are answered "underway" and get no line.
+         *
+         * [start] starts a thread; only tests set it.
          */
-        fun aside(
-            bytes: ByteArray,
-            carryOut: (ByteArray) -> OwnerQueue.Asked<Unit>,
+        fun receive(
+            command: () -> AdbCommand,
+            app: () -> ((ByteArray) -> OwnerQueue.Asked<Unit>)?,
             answerWithinMs: Long = ANSWER_WITHIN_MS,
-            late: (Outcome) -> Unit = {},
             start: (Thread) -> Unit = Thread::start,
-            done: (Outcome) -> Unit,
-        ): Thread {
+            late: (Outcome, String) -> Unit = { _, _ -> },
+            done: (Outcome, String) -> Unit,
+        ) {
             val answered = AtomicBoolean(false) // set once, by whoever answers the broadcast
-            val ended = CountDownLatch(1)
-            val command = thread(start = false, name = "adb-command", isDaemon = true) {
-                val outcome = carriedOut(bytes, carryOut)
-                // Who answers is settled first, and only then is the deadline's thread let go:
-                // once this thread has claimed the answer, the deadline cannot give one.
-                val inTime = answered.compareAndSet(false, true)
-                ended.countDown()
-                if (inTime) done(outcome) else late(outcome)
-            }
-            val deadline = thread(start = false, name = "adb-command-deadline", isDaemon = true) {
+            val wake = CountDownLatch(1)
+            val bytesKnown = AtomicReference<ByteArray?>(null)
+
+            fun tell(to: (Outcome, String) -> Unit, what: String, outcome: Outcome) {
                 try {
-                    ended.await(answerWithinMs, TimeUnit.MILLISECONDS) // zero or less: no wait at all
+                    to(outcome, logLine(what, outcome, bytesKnown.get()))
+                } catch (e: Throwable) {
+                    // The receiver's own failure (the log, the broadcast's result). Nowhere to report it.
+                }
+            }
+
+            /**
+             * The ONE end of this broadcast's command. Called once: by the command's thread, or
+             * by this thread on a path that returns right after and has not started that thread.
+             */
+            fun end(outcome: Outcome) {
+                // Who answers is settled first, and only then is the timer's thread let go: once
+                // the answer has been claimed here, the timer cannot give one.
+                val inTime = answered.compareAndSet(false, true)
+                wake.countDown()
+                if (inTime) tell(done, "adb write", outcome) else tell(late, "adb write, after its answer", outcome)
+            }
+
+            fun refused(why: String, thrown: Throwable? = null) = end(Outcome(Kind.REFUSED, "refused: $why", thrown))
+
+            // 1
+            val timer = thread(start = false, name = "adb-command-deadline", isDaemon = true) {
+                try {
+                    wake.await(answerWithinMs, TimeUnit.MILLISECONDS) // zero or less: no wait at all
                 } catch (e: InterruptedException) {
                     // then the time is up now
                 }
-                if (answered.compareAndSet(false, true)) done(underway())
+                if (answered.compareAndSet(false, true)) tell(done, "adb write", underway())
             }
-            // The deadline first: when it cannot be started, nothing has been. When the command's
-            // thread cannot be started, the deadline's is told that there is nothing to answer
-            // for. Either way the caller hears of it, and the command has not been carried out.
-            start(deadline)
             try {
-                start(command)
+                start(timer)
             } catch (e: Throwable) {
-                // Nobody answers for a command that never ran: unless the deadline has answered
-                // already, and then the caller must not answer a second time.
-                val unanswered = answered.compareAndSet(false, true)
-                ended.countDown()
-                if (unanswered) throw e
+                return refused("the hook could not start its timer (${e.javaClass.simpleName})", e)
             }
-            return command
+
+            try {
+                // 2
+                val bytes = when (val asked = command()) {
+                    is Refused -> return refused(asked.why)
+                    is Bytes -> asked.bytes
+                }
+                bytesKnown.set(bytes)
+                // 3
+                val carryOut = app() ?: return refused(NOT_READY)
+                // 4
+                val runner = thread(start = false, name = "adb-command", isDaemon = true) { end(carriedOut(bytes, carryOut)) }
+                try {
+                    start(runner)
+                } catch (e: Throwable) {
+                    return refused("the hook could not start the command's thread (${e.javaClass.simpleName})", e)
+                }
+                // Nothing may follow here: from this line on the command is the other thread's.
+            } catch (e: Throwable) {
+                // Step 2 or 3 threw (4 answers for itself): the app was not handed the bytes.
+                refused("the hook failed before the command was handed to the app (${e.javaClass.simpleName}: ${e.message})", e)
+            }
         }
 
+        /** The hook's way into [app]: one write of the phone, carried out by the owner of its messages. */
+        fun entryOf(app: MessageManager): (ByteArray) -> OwnerQueue.Asked<Unit> = app::processNewBytesAndTell
+
+        const val NOT_READY = "the app is not ready (it has no MessageManager)"
+
         /**
-         * The hook's one way into the app: [bytes] as one write of the phone, carried out by the
-         * owner of [app]'s messages before [done] is told. processNewBytesAndTell hands the owner
-         * the same change as processNewBytes, the entry of a Bluetooth write.
+         * The line for the log: what it is, THE OUTCOME, and then a bounded piece of the command
+         * in brackets, on one line. In this order because logcat cuts an entry at about 4000
+         * bytes: an ad command can be longer than that, and after an "underway" the line in the
+         * log is the only place that says how the command ended. So the outcome comes first,
+         * and nothing behind it can push it out. The outcome is bounded too (an exception's
+         * message can be of any length); no cut splits a character in two.
          */
-        fun aside(
-            bytes: ByteArray,
-            app: MessageManager,
-            answerWithinMs: Long = ANSWER_WITHIN_MS,
-            late: (Outcome) -> Unit = {},
-            done: (Outcome) -> Unit,
-        ): Thread = aside(
-            bytes,
-            carryOut = app::processNewBytesAndTell,
-            answerWithinMs = answerWithinMs, late = late, done = done,
-        )
+        fun logLine(what: String, outcome: Outcome, bytes: ByteArray?): String {
+            val said = "$what: ${piece(outcome.answer, MAX_OUTCOME_CHARS_IN_LOG)}"
+            if (bytes == null) return said
+            // Decoded from a bounded part of the bytes: the work does not grow with the command.
+            // (Four bytes are the most one character takes: this many bytes hold at least the
+            // characters that are shown, so whatever the cut leaves at their end is never shown.)
+            val text = String(bytes, 0, minOf(bytes.size, MAX_COMMAND_CHARS_IN_LOG * 4), Charsets.UTF_8)
+            return "$said [${piece(text, MAX_COMMAND_CHARS_IN_LOG)}]"
+        }
+
+        /** At most [max] characters of [text], on one line, with "..." when something was left out. */
+        private fun piece(text: String, max: Int): String {
+            var end = minOf(text.length, max)
+            if (end in 1 until text.length && text[end - 1].isHighSurrogate()) end--
+            val shown = text.substring(0, end).map { if (it.isISOControl()) ' ' else it }.joinToString("")
+            return if (end < text.length) "$shown..." else shown
+        }
+
+        private const val MAX_OUTCOME_CHARS_IN_LOG = 600
+        private const val MAX_COMMAND_CHARS_IN_LOG = 80
     }
 
     /**

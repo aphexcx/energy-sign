@@ -3,7 +3,6 @@ package cx.aphex.energysign.adb
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.os.SystemClock
 import android.util.Log
 import cx.aphex.energysign.bluetooth.BLUETOOTH_WRITE_TAG
 import cx.aphex.energysign.message.MessageManager
@@ -33,7 +32,8 @@ import org.koin.core.context.GlobalContext
  *     the wrong action, extras that cannot be read, an extra of the wrong type or with an
  *     unknown name, no extra, bad base64, nothing to send: decided before the app is touched;
  *     the app has no MessageManager: there is nobody to hand the bytes to;
- *     the hook could not start its threads: the command's thread never ran;
+ *     the hook could not start its timer or the command's thread, or failed before the command
+ *     was handed to the app: the command's thread never ran;
  *     the sign link did not get to it: the owner's queue withdrew the change, and says so with
  *     a value only the queue makes (OwnerQueue.Asked.Withdrawn).
  * - anything else: the command MAY have happened. "failed: ..." (code 2): the app threw on
@@ -44,78 +44,65 @@ import org.koin.core.context.GlobalContext
  *   broadcast ran out before the hook answered (see AdbCommand.Kind).
  * A command that throws ends neither the app nor this door.
  *
- * The 5 s are counted from the first line of onReceive. What the system spends before that
- * (starting the app when it is not running, a busy main thread) is not the hook's to bound.
+ * The 5 s are counted from the first statements of onReceive: the timer is armed before the
+ * extras are read and before the app's MessageManager is asked for. What the system spends
+ * BEFORE onReceive (starting the app when it is not running, a busy main thread) is not the
+ * hook's to bound: see AdbCommand.ANSWER_WITHIN_MS for what happens then.
+ *
+ * Every line in the log has the outcome first and a bounded piece of the command behind it
+ * (AdbCommand.logLine): "adb write: ok 5 bytes [!next]"; after an "underway", the one line
+ * "adb write, after its answer: ..." says how the command ended.
  */
 class AdbCommandReceiver : BroadcastReceiver() {
 
+    /**
+     * Three statements, and then everything is AdbCommand.receive, which arms its timer before
+     * it does anything else: from there on the broadcast is answered within
+     * AdbCommand.ANSWER_WITHIN_MS whatever this thread is held up by. The three before it read a
+     * flag and take the broadcast's result object; they wait for nothing.
+     */
     override fun onReceive(context: Context, intent: Intent) {
-        val arrivedAtMs = SystemClock.elapsedRealtime()
         // `am broadcast` sends an ordered broadcast; anything else has nowhere to put an answer.
         // Asked now: after goAsync() this receiver no longer knows.
         val ordered = isOrderedBroadcast
-
-        val bytes = when (val command = commandOf(intent)) {
-            is AdbCommand.Refused -> {
-                refuse(command.why, ordered)
-                return
-            }
-
-            is AdbCommand.Bytes -> command.bytes
-        }
-        // Here, on the main thread: MessageManager is built by its first use, and only the main
-        // thread may build it (it observes LiveData). Normally the main screen has done that.
-        val manager = try {
-            GlobalContext.getOrNull()?.get<MessageManager>()
-        } catch (e: Exception) {
-            Log.w(BLUETOOTH_WRITE_TAG, "adb write: the app has no MessageManager", e)
-            null
-        }
-        if (manager == null) {
-            refuse("the app is not ready (it has no MessageManager)", ordered)
+        // The broadcast stays open until some thread has an answer; this one need not be it.
+        val pending: PendingResult? = goAsync()
+        if (pending == null) {
+            // Not called for a broadcast at all: there is nothing to answer and nothing is done.
+            Log.w(BLUETOOTH_WRITE_TAG, "adb write refused: not called for a broadcast")
             return
         }
 
-        // The wait for the owner of the messages is not for the main thread: the broadcast stays
-        // open until another thread has an answer. That thread reads the command (an ad command
-        // is parsed there) and then waits for the owner: two seconds at most for the owner to
-        // start it, and then for as long as the owner takes to finish it. The BROADCAST does not
-        // wait that long: it is answered within AdbCommand.ANSWER_WITHIN_MS of its arrival, with
-        // "underway" when there is no outcome yet (Android's own limit: see that constant).
-        val pending = goAsync()
-        fun log(what: String, outcome: AdbCommand.Outcome) {
-            val line = "$what: [${String(bytes)}] ${outcome.answer}"
+        fun log(outcome: AdbCommand.Outcome, line: String) {
             if (outcome.accepted) Log.d(BLUETOOTH_WRITE_TAG, line) else Log.w(BLUETOOTH_WRITE_TAG, line, outcome.thrown)
         }
-        try {
-            AdbCommand.aside(
-                bytes, manager,
-                answerWithinMs = (AdbCommand.ANSWER_WITHIN_MS - (SystemClock.elapsedRealtime() - arrivedAtMs)).coerceAtLeast(0),
-                late = { outcome -> log("adb write, after its answer", outcome) },
-            ) { outcome ->
-                try {
-                    log("adb write", outcome)
-                    if (ordered) {
-                        pending.resultCode = outcome.kind.resultCode
-                        pending.resultData = outcome.answer
-                    }
-                } finally {
-                    pending.finish()
-                }
-            }
-        } catch (e: Throwable) {
-            // No thread for the hook: the command's thread never ran, so nothing was carried out.
+        AdbCommand.receive(
+            command = { commandOf(intent) },
+            // On this thread, the main thread: MessageManager is built by its first use, and only
+            // the main thread may build it (it observes LiveData). Normally the main screen has
+            // done that; when it has not, this reads storage, and the timer answers meanwhile.
+            app = { messageManager()?.let(AdbCommand::entryOf) },
+            late = ::log,
+        ) { outcome, line ->
             try {
-                Log.w(BLUETOOTH_WRITE_TAG, "adb write refused: the hook could not start its threads", e)
+                log(outcome, line)
                 if (ordered) {
-                    pending.resultCode = AdbCommand.Kind.REFUSED.resultCode
-                    pending.resultData = "refused: the hook could not start its threads (${e.javaClass.simpleName})"
+                    pending.resultCode = outcome.kind.resultCode
+                    pending.resultData = outcome.answer
                 }
             } finally {
                 pending.finish()
             }
         }
     }
+
+    private fun messageManager(): MessageManager? =
+        try {
+            GlobalContext.getOrNull()?.get<MessageManager>()
+        } catch (e: Exception) {
+            Log.w(BLUETOOTH_WRITE_TAG, "adb write: the app has no MessageManager", e)
+            null
+        }
 
     private fun commandOf(intent: Intent): AdbCommand {
         if (intent.action != AdbCommand.ACTION) return AdbCommand.Refused("the action must be ${AdbCommand.ACTION}")
@@ -127,14 +114,5 @@ class AdbCommandReceiver : BroadcastReceiver() {
             return AdbCommand.Refused("the extras could not be read (${e.javaClass.simpleName})")
         }
         return AdbCommand.fromExtras(extras)
-    }
-
-    /** An answer that needs no other thread: nothing was handed to the app. */
-    private fun refuse(why: String, ordered: Boolean) {
-        Log.w(BLUETOOTH_WRITE_TAG, "adb write refused: $why")
-        if (ordered) {
-            resultCode = AdbCommand.Kind.REFUSED.resultCode
-            resultData = "refused: $why"
-        }
     }
 }

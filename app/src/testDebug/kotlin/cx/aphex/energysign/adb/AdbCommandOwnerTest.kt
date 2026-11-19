@@ -143,7 +143,12 @@ class AdbCommandOwnerTest {
         late: (AdbCommand.Outcome) -> Unit = {},
     ): LinkedBlockingQueue<AdbCommand.Outcome> {
         val outcomes = LinkedBlockingQueue<AdbCommand.Outcome>()
-        AdbCommand.aside(command.toByteArray(Charsets.UTF_8), manager, answerWithinMs, late) { outcomes.put(it) }
+        AdbCommand.receive(
+            command = { AdbCommand.Bytes(command.toByteArray(Charsets.UTF_8)) },
+            app = { AdbCommand.entryOf(manager) },
+            answerWithinMs = answerWithinMs,
+            late = { outcome, _ -> late(outcome) },
+        ) { outcome, _ -> outcomes.put(outcome) }
         return outcomes
     }
 
