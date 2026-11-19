@@ -123,6 +123,7 @@ object ChooserProtocol {
  * [write] gets the reply and what it is to the sign (a poll report goes out about five times a
  * second in chooser mode; the caller keeps those out of the log), and says whether all of it
  * went out. A message that did not go out is handed to [unsent]: it was taken for nothing.
+ * The same when [write] throws; what it threw goes on to the caller.
  * A message whose frame is longer than the sign can take is not written at all: the sign gets
  * nothing for that request and asks again, and gets the message after it. [tooLong] hears of it;
  * it is not handed back (it would be the next message again, for ever). A stored message stays
@@ -157,11 +158,15 @@ class SignResponder(
             tooLong(message, bytes)
             return null
         }
-        if (!write(frame, if (message is Message.Chooser) Reply.CHOOSER else Reply.MESSAGE)) {
+        val written = try {
+            write(frame, if (message is Message.Chooser) Reply.CHOOSER else Reply.MESSAGE)
+        } catch (e: Throwable) {
+            // Not on the wire as far as anybody can say: handed back like a write that says so.
             unsent(message)
-            return null
+            throw e
         }
-        return message
+        if (!written) unsent(message)
+        return if (written) message else null
     }
 
     companion object {
