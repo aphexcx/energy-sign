@@ -108,23 +108,23 @@ internal class EnergySignBluetoothManager(
         override fun close() = stopServices()
     }, worker, warn, ::showAdvertiseResult)
 
-    private fun receiver(name: String, receiver: BroadcastReceiver, filter: () -> IntentFilter) =
+    private fun receiver(name: String, receiver: BroadcastReceiver, register: () -> Unit) =
         OptionalStart(name, worker, warn) { attempt ->
-            context.registerReceiver(receiver, filter())
+            register()
             if (!attempt.done()) context.unregisterReceiver(receiver)
         }
 
     private val adapterEvents = receiver("Bluetooth adapter receiver", bluetoothReceiver) {
         check(context.packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE))
-        IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
+        context.registerReceiver(bluetoothReceiver, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED))
     }
     private val pairingEvents = receiver("Bluetooth pairing receiver", bondStateReceiver) {
-        IntentFilter().apply {
+        context.registerReceiver(bondStateReceiver, IntentFilter().apply {
             addAction(BluetoothDevice.ACTION_PAIRING_REQUEST)
             addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
             addAction(BluetoothDevice.ACTION_FOUND)
             priority = IntentFilter.SYSTEM_HIGH_PRIORITY
-        }
+        })
     }
 
     fun ensure() {
@@ -134,7 +134,6 @@ internal class EnergySignBluetoothManager(
         publication.ensure()
         server?.retryPeerSetup()
     }
-
 
     private fun stopServices() {
         val cancel = cancelAdvertising
