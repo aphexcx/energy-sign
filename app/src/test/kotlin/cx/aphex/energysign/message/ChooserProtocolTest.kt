@@ -58,9 +58,9 @@ class ChooserProtocolTest {
     fun `every marquee type follows the same rule`() {
         val all: List<(String) -> Message.Marquee> = listOf(
             { Message.Marquee.User(it) },
-            { Message.Marquee.GPTQuery(it) },
+            { Message.Marquee.AIQuery(it) },
             { Message.Marquee.Chonky(it) },
-            { Message.Marquee.GPTReply(it) },
+            { Message.Marquee.AIReply(it) },
         )
         all.forEach { make ->
             assertEquals("TWELVE CHARS", ChooserProtocol.chooserText(make("TWELVE CHARS")))
@@ -265,8 +265,8 @@ class ChooserProtocolTest {
     }
 
     @Test
-    fun `a GPTReply message is no longer cut to 5 characters`() {
-        val json = wireJson(ChooserProtocol.chooserMessage(listOf(Message.Marquee.GPTReply("RAVEGPT SAYS HELLO")), 0))
+    fun `a AIReply message is no longer cut to 5 characters`() {
+        val json = wireJson(ChooserProtocol.chooserMessage(listOf(Message.Marquee.AIReply("RAVEGPT SAYS HELLO")), 0))
 
         assertEquals("RAVEGPT SAYS HELLO", json["str"].asString)
         assertEquals("H", json["type"].asString)

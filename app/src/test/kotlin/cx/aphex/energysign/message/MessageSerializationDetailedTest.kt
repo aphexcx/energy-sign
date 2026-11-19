@@ -41,7 +41,7 @@ class MessageSerializationDetailedTest {
 
     @Test
     fun testGPTThinkingSerialization() {
-        val message = Message.ColorMessage.GPTThinking(
+        val message = Message.ColorMessage.AIThinking(
             str = "...",
             colorCycle = 0xFF0000,
             delayMs = 250,

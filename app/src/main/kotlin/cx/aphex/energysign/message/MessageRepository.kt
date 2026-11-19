@@ -1,13 +1,15 @@
 package cx.aphex.energysign.message
 
 import android.content.Context
+import cx.aphex.energysign.ai.AIReplyLimits
+import cx.aphex.energysign.ai.NoReplyReason
+import cx.aphex.energysign.ai.AIReplyResult
 import cx.aphex.energysign.ext.convertHeartEmojis
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logE
 import cx.aphex.energysign.ext.logW
 import cx.aphex.energysign.ext.toNormalized
-import cx.aphex.energysign.gpt.GptAnswerResponse
-import cx.aphex.energysign.gpt.PostedGptAnswer
+import cx.aphex.energysign.ai.PostedAIAnswer
 import cx.aphex.energysign.message.Message.Companion.VT
 import cx.aphex.energysign.message.MessageRepository.Companion.MAX_SIGN_STRINGS
 import cx.aphex.energysign.replaceWith
@@ -34,8 +36,49 @@ class MessageRepository(
         messages.reversed().forEach { pushOneTimeMessage(it) }
     }
 
+    /** To the front of the queue; behind what is being shown in one piece ([pushInOnePiece]). */
     fun pushOneTimeMessage(message: Message) {
+        oneTimeMessages.add(waitingOfOnePiece(), message)
+    }
+
+    /**
+     * [messages] to the front of the queue, to be shown one after the other with nothing in
+     * between: the heading of a reply and the reply. Until the last of them has been taken,
+     * whatever else is pushed to the front goes behind them. One piece at a time.
+     */
+    fun pushInOnePiece(messages: List<Message>) {
+        oneTimeMessages.addAll(0, messages)
+        onePiece = messages
+    }
+
+    /** [message] was taken from the front and could not be shown: it is the first again, also in front of its own piece. */
+    fun putBackOneTimeMessage(message: Message) {
         oneTimeMessages.add(0, message)
+    }
+
+    /** Whether [message] is one of the messages last pushed in one piece (itself, not one like it). */
+    fun isOfOnePiece(message: Message): Boolean = onePiece.any { it === message }
+
+    /** When [message] is one of a piece, what is still waiting of that piece is taken out of the queue. */
+    fun dropOnePieceOf(message: Message) {
+        if (!isOfOnePiece(message)) return
+        oneTimeMessages.removeIf(::isOfOnePiece)
+        onePiece = emptyList()
+    }
+
+    /** The last of the piece has been shown: its messages are messages like any other again. */
+    fun onePieceShown() {
+        onePiece = emptyList()
+    }
+
+    private var onePiece: List<Message> = emptyList()
+
+    /** How many messages of the piece are still waiting; they are the first ones in the queue. */
+    private fun waitingOfOnePiece(): Int {
+        if (onePiece.isEmpty()) return 0
+        var waiting = 0
+        while (waiting < oneTimeMessages.size && isOfOnePiece(oneTimeMessages[waiting])) waiting++
+        return waiting
     }
 
     fun enqueueOneTimeMessage(message: Message) {
@@ -51,52 +94,60 @@ class MessageRepository(
         marqueeMessages.add(0, marqueeMessage)
     }
 
-    /** Inserts a GPT reply after the query it is replying to, and converts the query to a user message. */
-    fun insertGPTReply(gptAnswerResponse: GptAnswerResponse) {
-        val replyMsg = Message.Marquee.GPTReply(
-            gptAnswerResponse.answer
-                .convertHeartEmojis()
-                .toNormalized()
-                .toUpperCasePreservingASCIIRules()
-        )
-        val queryMsgIdx = marqueeMessages.indexOf(gptAnswerResponse.inReplyTo)
-        if (queryMsgIdx >= 0 && queryMsgIdx < marqueeMessages.size) {
-            marqueeMessages.add(queryMsgIdx + 1, replyMsg)
-            // Convert the GPTQuery message to a user message
-            marqueeMessages[queryMsgIdx] = gptAnswerResponse.inReplyTo.toUserMessage()
-            logD("Inserted GPT reply after messages[${queryMsgIdx}]: ${gptAnswerResponse.inReplyTo}")
-        } else {
-            marqueeMessages.add(1, replyMsg) // "Reply" to the first message if index is out of bounds
-            logD("Inserted GPT reply after first message")
-            marqueeMessages[0] = gptAnswerResponse.inReplyTo.toUserMessage()
-        }
+    /**
+     * Puts [reply] after [query] and makes the query a plain message. Returns the place the reply
+     * was put at: every message from there on has moved one place back, and whoever keeps a
+     * place in the list has to follow its message. [NOT_PUT_IN], and nothing is changed, when
+     * the query is not in the list any more (it was deleted while its reply was on the way).
+     *
+     * [reply] comes ready ([replyMessage]): this runs on the thread that answers the sign, and
+     * nothing here looks at the text. One pass over the list to find the query.
+     */
+    fun insertAIReply(query: Message.Marquee.AIQuery, reply: Message.Marquee.AIReply, seenAt: Int? = null): Int {
+        val queryMsgIdx = indexOf(query, seenAt)
+        if (queryMsgIdx < 0) return NOT_PUT_IN
+        marqueeMessages[queryMsgIdx] = query.toUserMessage()
+        marqueeMessages.add(queryMsgIdx + 1, reply)
+        return queryMsgIdx + 1
     }
 
-    fun insertGPTReplyToUserMessage(postedGptAnswer: PostedGptAnswer) {
-        val replyMsg = Message.Marquee.GPTReply(
-            postedGptAnswer.answer
-                .convertHeartEmojis()
-                .toNormalized()
-                .toUpperCasePreservingASCIIRules()
-        )
-        val inReplyTo: Message.Marquee =
-            marqueeMessages.firstOrNull { it.str == postedGptAnswer.inReplyTo } ?: marqueeMessages.first()
-        val queryMsgIdx = marqueeMessages.indexOf(inReplyTo)
-        if (queryMsgIdx >= 0 && queryMsgIdx < marqueeMessages.size) {
-            // Convert the GPTQuery message to a user message
-            (inReplyTo as? Message.Marquee.GPTQuery)?.let {
-                marqueeMessages[queryMsgIdx] = it.toUserMessage()
-            }
-            marqueeMessages.add(queryMsgIdx + 1, replyMsg)
-            logD("Inserted GPT reply after messages[${queryMsgIdx}]: $inReplyTo")
-        } else {
-            marqueeMessages.add(1, replyMsg) // "Reply" to the first message if index is out of bounds
-            logD("Inserted GPT reply after first message")
-            // Convert the GPTQuery message to a user message
-            (marqueeMessages[0] as? Message.Marquee.GPTQuery)?.let {
-                marqueeMessages[0] = it.toUserMessage()
-            }
+    /**
+     * Where [query] stands, or -1. [seenAt] is where the caller saw it in a pass it has just
+     * made over the list: when the query still stands there, no second pass is made.
+     */
+    private fun indexOf(query: Message.Marquee.AIQuery, seenAt: Int?): Int =
+        if (seenAt != null && marqueeMessages.getOrNull(seenAt) === query) seenAt
+        else marqueeMessages.indexOfFirst { it === query }
+
+    /**
+     * [query] will get no reply: it stays where it is, as the plain message it was, and is not a
+     * query any more. False when it is not in the list.
+     */
+    fun retireQuery(query: Message.Marquee.AIQuery, seenAt: Int? = null): Boolean {
+        val queryMsgIdx = indexOf(query, seenAt)
+        if (queryMsgIdx < 0) return false
+        marqueeMessages[queryMsgIdx] = query.toUserMessage()
+        return true
+    }
+
+    /**
+     * A reply that was written elsewhere and posted to the app: it goes after the message with
+     * the text [inReplyTo], or after the newest message when there is none. Returns the place it
+     * was put at, as [insertAIReply] does; [NOT_PUT_IN], and nothing is changed, when the list
+     * is empty.
+     *
+     * [reply] comes ready ([postedReplyMessage]), as for [insertAIReply]. One pass over the list.
+     */
+    fun insertPostedAIReply(reply: Message.Marquee.AIReply, inReplyTo: String): Int {
+        if (marqueeMessages.isEmpty()) return NOT_PUT_IN
+        val found = marqueeMessages.indexOfFirst { it.str == inReplyTo }
+        val queryMsgIdx = if (found >= 0) found else 0
+        // Convert the AIQuery message to a user message
+        (marqueeMessages[queryMsgIdx] as? Message.Marquee.AIQuery)?.let {
+            marqueeMessages[queryMsgIdx] = it.toUserMessage()
         }
+        marqueeMessages.add(queryMsgIdx + 1, reply)
+        return queryMsgIdx + 1
     }
 
     /**
@@ -188,6 +239,49 @@ class MessageRepository(
     }
 
     companion object {
+        /**
+         * The message for a reply of the app's own. [fittedAnswer] has been through
+         * [AIReplyLimits.fitToSign]. Everything that grows with the text of a reply is done in
+         * here and in [postedReplyMessage], and neither is called by the thread that answers the
+         * sign: the call's thread makes the one, the HTTP server's thread the other.
+         */
+        fun replyMessage(fittedAnswer: String): Message.Marquee.AIReply =
+            Message.Marquee.AIReply(
+                fittedAnswer
+                    .convertHeartEmojis()
+                    .toNormalized()
+                    .toUpperCasePreservingASCIIRules()
+            )
+
+        /**
+         * The message for a reply that was posted to the app, with the same clean-up and the
+         * same size limit as a reply of the app's own; null when nothing is left of it.
+         */
+        fun postedReplyMessage(answer: String): Message.Marquee.AIReply? =
+            AIReplyLimits.fitToSign(answer).takeIf { it.isNotBlank() }?.let(::replyMessage)
+
+        /**
+         * [result] with the message for it when it is a reply, for the call's thread to hand to
+         * the owner. It never throws, an Error of [make] included: whatever happens here, the
+         * owner must be told that the call has ended, or its query would be "out" for ever.
+         *
+         * When [make] fails, the provider has answered already: the result says so
+         * ([NoReplyReason.FAILED_AFTER_ANSWER]), and that ends the query. Any reason that lets
+         * a query be asked again would buy the same answer a second time.
+         */
+        fun readyReply(
+            result: AIReplyResult,
+            make: (String) -> Message.Marquee.AIReply = ::replyMessage,
+        ): Pair<AIReplyResult, Message.Marquee.AIReply?> =
+            try {
+                result to (result as? AIReplyResult.Reply)?.let { make(it.text) }
+            } catch (e: Throwable) {
+                AIReplyResult.NoReply(NoReplyReason.FAILED_AFTER_ANSWER, e.javaClass.name) to null
+            }
+
+        /** What the two inserts return when nothing was put in. */
+        const val NOT_PUT_IN: Int = -1
+
         private const val SIGN_STRINGS_FILE_NAME = "signstrings.txt"
         private const val SIGN_DB_FILE_NAME = "signstrings.bin"
         private const val MAX_SIGN_STRINGS: Int = 1000
