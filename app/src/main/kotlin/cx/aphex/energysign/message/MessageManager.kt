@@ -135,15 +135,11 @@ class MessageManager(
 
     /**
      * Called once whenever what the chooser should show has changed (entering chooser mode,
-     * another message or count, leaving it): the sign link then pushes it to the sign, if
-     * pushes are switched on. Called on the owner thread.
+     * another message or count, leaving it): the sign link then pushes it to the sign.
+     * Called on the owner thread.
      */
     @Volatile
     var onChooserChanged: () -> Unit = {}
-
-    /** Gets the word of an `!attn` command (off, auto, break, zeros; or whatever was typed). Called on the owner thread. */
-    @Volatile
-    var onAttentionCommand: (word: String) -> Unit = {}
 
     /** The only door to the owner: whatever goes through it runs under the chooser watch (see WatchedOwner). */
     private val toOwner = WatchedOwner(owner, ChooserChangeWatch(view = { chooserShown() }) { onChooserChanged() })
@@ -765,10 +761,6 @@ class MessageManager(
 //                        👾
                     }
 
-                    // before "!A", which it also begins with: whether and how the chooser is pushed to the sign
-                    cmd.startsWith(ATTENTION_COMMAND, ignoreCase = true) ->
-                        onAttentionCommand(cmd.drop(ATTENTION_COMMAND.length).trim().lowercase())
-
                     cmd.startsWith("!B", ignoreCase = true) -> {
                         msgRepo.pushOneTimeMessage(
                             Message.UtilityMessage.BrightnessShift(
@@ -1215,8 +1207,6 @@ class MessageManager(
         /** How many lines are remembered as played (see [playedLines]). */
         private const val PLAYED_LINES_REMEMBERED: Int = 5
 
-        /** `!attn off|auto|break|zeros`: the push switch (AttentionSwitch). */
-        private const val ATTENTION_COMMAND: String = "!attn"
 
     }
 }

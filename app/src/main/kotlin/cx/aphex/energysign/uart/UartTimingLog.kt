@@ -21,10 +21,10 @@ package cx.aphex.energysign.uart
  *         request bytes in one rx with T - E of a few ms mean the platform delivered them
  *         together: it held the first one back, and nothing in the app can fetch it sooner.
  *         (chunks and first_us are kept for the tool that reads this log; a request is one read.)
- *     tx t_us=T n=W/L kind=report|message|attention call_us=C rx_us=R
+ *     tx t_us=T n=W/L kind=message|attention call_us=C rx_us=R
  *         One frame handed to the transmitter. T: the last write() returned. C: the first was
- *         called. W of L bytes were taken; W below L is a failed write. report is a chooser poll
- *         report, message a full message (a reply or a pushed frame), attention the run of 0x00
+ *         called. W of L bytes were taken; W below L is a failed write. message is a full
+ *         message (a reply or a pushed frame), attention the run of 0x00
  *         bytes that gets the sign's attention for a push. R: the t_us of the latest rx line,
  *         so for a reply T - R is request-to-reply inside the app.
  *     drop t_us=T n=N bytes=[...]
@@ -104,7 +104,7 @@ class UartTimingLog(
         )
     }
 
-    /** A frame was handed to the transmitter: [wrote] of [of] bytes. [kind]: report, message or attention. */
+    /** A frame was handed to the transmitter: [wrote] of [of] bytes. [kind]: message or attention. */
     fun tx(callNs: Long, returnNs: Long, wrote: Int, of: Int, kind: String) {
         if (!enabled(returnNs)) return
         emit("tx t_us=${returnNs / 1000} n=$wrote/$of kind=$kind call_us=${callNs / 1000} rx_us=${lastRxNs / 1000}")

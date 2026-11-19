@@ -14,7 +14,6 @@ import cx.aphex.energysign.ext.logW
 import cx.aphex.energysign.message.OwnerQueue
 import cx.aphex.energysign.message.Reply
 import io.reactivex.rxjava3.subjects.BehaviorSubject
-import java.io.File
 import java.io.IOException
 import java.lang.reflect.Method
 
@@ -24,20 +23,15 @@ import java.lang.reflect.Method
  * ([owner]). Everything that decides anything is in [SignLink]; this class is the Android
  * around it.
  *
- * Three switches for measuring on the device, without a rebuild:
+ * Two switches for measuring on the device, without a rebuild (neither changes what is said
+ * on the wire):
  *  - the timing log: `adb shell setprop log.tag.SignUart VERBOSE` (see [UartTimingLog])
- *  - whether and how the chooser is pushed: `adb shell setprop debug.energysign.attn off|auto|break|zeros`
- *    (read when the chooser next changes; wins over the saved switch while it is set; see [ATTN_PROPERTY])
  *  - the priority of the link thread: `adb shell setprop debug.energysign.nice -16`
  *    (read when the app starts; see [NICE_PROPERTY])
  */
 class EnergySignUartManager(
     private val viewModel: MainViewModel,
     private val owner: OwnerQueue,
-    /** The app's files directory: the push switch is kept there. */
-    filesDir: File,
-    /** Writes a file later, on the saver's thread. */
-    saveLater: (write: () -> Unit) -> Unit,
 ) {
     private val uartDevice: UartDevice = configureUart()
 
@@ -55,17 +49,8 @@ class EnergySignUartManager(
     private val wire = object : SignWire {
         override fun read(buffer: ByteArray, length: Int): Int = uartDevice.read(buffer, length)
         override fun write(buffer: ByteArray, length: Int): Int = uartDevice.write(buffer, length)
-        override fun sendBreak(millis: Int) = uartDevice.sendBreak(millis)
         override fun close() = uartDevice.close()
     }
-
-    /** Whether and how the chooser is pushed. Off unless switched on; says what is in force when it is built. */
-    private val attentionSwitch = AttentionSwitch(
-        file = File(filesDir, AttentionSwitch.FILE_NAME),
-        property = { property(ATTN_PROPERTY) },
-        saveLater = saveLater,
-        log = { line -> logD(line) },
-    )
 
     internal fun onForeground() = link.prepareAgain()
 
@@ -79,7 +64,6 @@ class EnergySignUartManager(
         answer = ::answer,
         chooserFrame = { viewModel.chooserFrame() },
         pushed = { viewModel.onChooserPushed() },
-        attention = attentionSwitch::inForce,
         timing = timing,
         log = { line -> logD(line) },
         warn = { line -> logW(line) },
@@ -128,13 +112,10 @@ class EnergySignUartManager(
     }
 
     /**
-     * What the chooser should show has changed: have it pushed to the sign (contract VERSION 3.1),
-     * if pushes are switched on. From any thread; returns at once.
+     * What the chooser should show has changed: have it pushed to the sign (contract VERSION
+     * 3.1). From any thread; returns at once.
      */
     fun requestPush() = link.requestPush()
-
-    /** The `!attn` command: sets and keeps the push switch. On the link thread. */
-    fun setAttention(word: String): Boolean = attentionSwitch.set(word)
 
     /** Writes one reply to the sign. For the answer to a request, on the link thread. */
     fun send(frame: String, reply: Reply): Boolean = link.send(frame, reply)
@@ -190,17 +171,6 @@ class EnergySignUartManager(
 
         private const val LINK_THREAD_NAME: String = "sign-link"
         private const val STOP_JOIN_MS: Long = 1_000
-
-        /**
-         * System property that, while it holds one of these words, wins over the saved switch
-         * (the `!attn` command, [AttentionSwitch]); it is gone after a restart of the board:
-         *  - `off`: no pushes at all, the app behaves as contract 2.1. Also the saved default.
-         *  - `auto`: what gets this sign's attention, which is `zeros`.
-         *  - `zeros`: 50 ms worth of 0x00 bytes. Measured on the sign: seen 11 times of 11.
-         *  - `break`: `UartDevice.sendBreak(50)`. On the Pico the call returns after 1 to 6 ms
-         *    and the line is not held LOW (seen 0 times of 11); kept for measuring.
-         */
-        private const val ATTN_PROPERTY: String = "debug.energysign.attn"
 
         /**
          * System property with the nice value of the link thread, -19 to 0, read at [start].
