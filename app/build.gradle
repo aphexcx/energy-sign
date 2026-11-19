@@ -94,11 +94,6 @@ android {
         test.java.srcDirs += 'src/test/kotlin'
     }
 
-    compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
-    }
-
 
     buildFeatures {
         viewBinding true
@@ -130,9 +125,16 @@ android {
     }
 }
 
+// ONE place names the JDK: gradle/gradle-daemon-jvm.properties, the JVM Gradle itself runs on
+// (change it with ./gradlew updateDaemonJvm --jvm-version=N --jvm-vendor=ADOPTIUM). The same JDK
+// compiles the app and runs the unit tests, and the Java source, target and Kotlin jvmTarget level
+// follow it. A machine without that JDK gets it fetched by the resolver in settings.gradle.
+def daemonJvm = new Properties()
+rootProject.file('gradle/gradle-daemon-jvm.properties').withInputStream { daemonJvm.load(it) }
 kotlin {
-    compilerOptions {
-        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8
+    jvmToolchain {
+        languageVersion = JavaLanguageVersion.of(daemonJvm.getProperty('toolchainVersion'))
+        vendor = JvmVendorSpec.of(daemonJvm.getProperty('toolchainVendor'))
     }
 }
 

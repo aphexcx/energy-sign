@@ -1,1 +1,7 @@
+plugins {
+    // Fetches the JDK that gradle/gradle-daemon-jvm.properties names when this machine does not have it
+    // (once, into the Gradle user home; nothing is installed into the system).
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
+}
+
 include ':app'
