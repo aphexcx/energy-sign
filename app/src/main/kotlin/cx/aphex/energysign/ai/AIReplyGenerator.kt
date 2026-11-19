@@ -193,7 +193,7 @@ interface AIReplySource {
     /**
      * Starts the warm-up when there is one, and returns at once. True: [onDone] will be called
      * once, on some other thread, and nothing may be asked before that. False: there is no
-     * warm-up and [onDone] is never called.
+     * warm-up and [onDone] is never called. Implementations never throw and return false if warm-up cannot start.
      */
     fun warmUp(onDone: () -> Unit): Boolean
 
@@ -236,7 +236,7 @@ fun aiRepliesOrNone(warn: (String) -> Unit, build: () -> AIReplySource): AIReply
         // Only the kind of failure: what a library writes into its message is not ours to print.
         val why = "the replies could not be set up (${e.javaClass.name})"
         try {
-            warn("No AI replies in this run: $why, sign link continues")
+            warn("No AI replies in this run: $why")
         } catch (logFailure: Throwable) {
             // nothing
         }

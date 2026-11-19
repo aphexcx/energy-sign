@@ -18,7 +18,7 @@ import java.nio.charset.CodingErrorAction
  */
 class AdStore(
     private val dir: File,
-    /** Reports period read failures and saves whose directory could not be forced to storage. */
+    /** Gets one line when a save is in place but its directory could not be forced to storage. */
     private val warn: (String) -> Unit = {},
     /** How the file beside the one to replace is opened (a test opens one that fails). The other steps of a save are always the app's real ones. */
     private val open: (File) -> FileOutputStream = ::FileOutputStream,
@@ -62,7 +62,6 @@ class AdStore(
         try {
             if (periodFile.exists()) periodFile.readText().trim().toIntOrNull()?.takeIf(::isValidPeriod) else null
         } catch (e: Throwable) {
-            runCatching { warn("Saved ad period failed (${e.javaClass.name}), sign link continues with the default period") }
             null
         }
 

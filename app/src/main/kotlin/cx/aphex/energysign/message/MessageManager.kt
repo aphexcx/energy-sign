@@ -2,7 +2,6 @@ package cx.aphex.energysign.message
 
 import android.content.Context
 import cx.aphex.energysign.R
-import cx.aphex.energysign.SignStartup
 import cx.aphex.energysign.ai.AIQueryDesk
 import cx.aphex.energysign.ai.AIReplyResult
 import cx.aphex.energysign.ai.AIReplySource
@@ -90,24 +89,23 @@ class MessageManager(
     //How often to advertise, e.g. every 5 user messages
     private var advertiseEvery: Int = 8
 
-    private val startup = SignStartup { logW(it) }
     /**
      * The two lines an ad round shows before the line of the track that is playing. The same two
      * objects in every ad round, so that they can be found in the queue again when the track
      * changes (by what they ARE, not by what they say: an ad of the owner's may say the same).
      */
-    private val trackHeading: List<Message> = startup.optional("Track heading") {
-        val color = context.getColor(R.color.twitch)
-        listOf(Message.ColorMessage.OneByOneMessage("CURRENT", color), Message.ColorMessage.OneByOneMessage("TRACK:", color))
-    }.orEmpty()
+    private val trackHeading: List<Message> = listOf(
+        Message.ColorMessage.OneByOneMessage("CURRENT", context.getColor(R.color.twitch)),
+        Message.ColorMessage.OneByOneMessage("TRACK:", context.getColor(R.color.twitch)),
+    )
 
     /** The stars after an announcement of a track. One object, so that they can be found in the queue and go with their announcement. */
     private val announcementStars = Message.Starfield()
 
-    private val defaultAds = startup.optional("Default ads") {
-        val blue = context.getColor(R.color.icon_defaultblue)
-        listOf(Message.ColorMessage.IconInvaders.Enemy1(blue), Message.ColorMessage.IconInvaders.Enemy2(blue))
-    }.orEmpty()
+    private val DEFAULT_ADS = listOf(
+        Message.ColorMessage.IconInvaders.Enemy1(context.getColor(R.color.icon_defaultblue)),
+        Message.ColorMessage.IconInvaders.Enemy2(context.getColor(R.color.icon_defaultblue))
+    )
 
     private val replies: AIReplySource by inject()
     private val keyboardManager = KeyboardManager
@@ -116,7 +114,7 @@ class MessageManager(
     private val filesDir: File = context.filesDir
 
     /** The ads and the ad period as they were last set, kept across a restart. */
-    private val adStore = startup.optional("Ad storage") { AdStore(filesDir, warn = { logW(it) }) }
+    private val adStore = AdStore(filesDir, warn = { logW(it) })
 
     /*
      * THREADS. ONE thread owns everything in here, the lists of MessageRepository and the input
@@ -167,7 +165,7 @@ class MessageManager(
             seenAt.keys
         },
         log = { logD(it) },
-        warmingUp = startup.optional("AI reply warm-up") { replies.warmUp { change { warmUpEnded() } } } ?: false,
+        warmingUp = replies.warmUp { change { warmUpEnded() } },
     )
 
     /**
@@ -195,9 +193,10 @@ class MessageManager(
     init {
 
         msgRepo.marqueeMessages.addAll(msgRepo.loadUserMessages(filesDir))
-        adStore?.loadPeriod()?.let { advertiseEvery = it }
+        adStore.loadPeriod()?.let { advertiseEvery = it }
+
         setAds(
-            adStore?.let { startup.optional("Saved ads") { loadAds(it) } } ?: defaultAds
+            loadAds()
 //            listOf(
 //                Message.ColorMessage.ChonkySlide("QUARAN", context.getColor(R.color.instagram)),
 //                Message.ColorMessage.ChonkySlide("TRANCE", context.getColor(R.color.instagram)),
@@ -720,8 +719,8 @@ class MessageManager(
      * The ads as they were last set. Nothing is written here: a file that cannot be read stays
      * as it is until the next ad command replaces the list.
      */
-    private fun loadAds(store: AdStore): List<Message> =
-        when (val saved = store.loadAds(note = { logW("${AdStore.ADS_FILE_NAME}, $it") })) {
+    private fun loadAds(): List<Message> =
+        when (val saved = adStore.loadAds(note = { logW("${AdStore.ADS_FILE_NAME}, $it") })) {
             is AdStore.SavedAds.Ads -> {
                 logD("Loaded ${saved.ads.size} ads from ${AdStore.ADS_FILE_NAME}.")
                 saved.ads
@@ -729,15 +728,15 @@ class MessageManager(
 
             AdStore.SavedAds.NoFile -> {
                 logD("${AdStore.ADS_FILE_NAME} does not exist yet; showing the default ad of <Invaders>.")
-                defaultAds
+                DEFAULT_ADS
             }
 
             is AdStore.SavedAds.Unreadable -> {
                 logW(
                     "Could not load ${AdStore.ADS_FILE_NAME} (${saved.why}); showing the default ads for this run. " +
-                            "The sign link continues. The file is left as it is until the next ad command."
+                            "The file is left as it is until the next ad command."
                 )
-                defaultAds
+                DEFAULT_ADS
             }
         }
 
@@ -749,11 +748,10 @@ class MessageManager(
      * an earlier save.
      */
     private fun saveAds() {
-        val store = adStore ?: return
         val snapshot = ArrayList(advertisements)
         msgRepo.saveLater {
             try {
-                store.saveAds(snapshot)
+                adStore.saveAds(snapshot)
                 logD("Wrote ${snapshot.size} ads to ${AdStore.ADS_FILE_NAME}.")
             } catch (e: Throwable) {
                 logW("Exception when saving ${AdStore.ADS_FILE_NAME}! ${e.message}")
@@ -763,11 +761,10 @@ class MessageManager(
 
     /** The period is read here, by the owner; the saver writes it. */
     private fun saveAdPeriod() {
-        val store = adStore ?: return
         val period = advertiseEvery
         msgRepo.saveLater {
             try {
-                store.savePeriod(period)
+                adStore.savePeriod(period)
             } catch (e: Throwable) {
                 logW("Exception when saving ${AdStore.PERIOD_FILE_NAME}! ${e.message}")
             }
