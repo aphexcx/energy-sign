@@ -72,7 +72,9 @@ class LineClockTest {
         val late = LineClock(baud = 14400, startNs = Long.MAX_VALUE - 10 * ms)
         late.wrote(returnedNs = Long.MAX_VALUE - 5 * ms, count = 72) // gone 45 ms past the wrap
         assertEquals(Long.MIN_VALUE + 45 * ms - 1, late.freeAtNs)
-        late.wrote(returnedNs = Long.MIN_VALUE + 10 * ms, count = 72) // behind them, though its time is "smaller"
+        // handed over a millisecond before the wrap: the line is busy until after it, and as numbers
+        // that end is the "smaller" one. The bytes go out behind what is leaving all the same.
+        late.wrote(returnedNs = Long.MAX_VALUE - 1 * ms, count = 72)
         assertEquals(Long.MIN_VALUE + 95 * ms - 1, late.freeAtNs)
         late.low(returnedNs = Long.MIN_VALUE + 20 * ms, millis = 50)
         assertEquals(Long.MIN_VALUE + 95 * ms - 1, late.freeAtNs)
