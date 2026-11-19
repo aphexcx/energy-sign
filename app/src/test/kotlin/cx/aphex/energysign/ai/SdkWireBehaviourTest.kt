@@ -118,6 +118,21 @@ class SdkWireBehaviourTest {
             wire429Delay = api.received.size
         }
 
+        // 2c. 408 Request Timeout (tests retryOnConnectionFailure=false in Anthropic's OkHttpClient)
+        val wire408: Int
+        val intercept408 = AtomicInteger()
+        FakeMessagesApi().use { api ->
+            api.firstAnswers.add(FakeMessagesApi.Answer(408, FakeMessagesApi.error("timeout_error", "timeout")))
+            api.answer = FakeMessagesApi.Answer(200, FakeMessagesApi.message("""[{"type":"text","text":"ok"}]"""))
+            val client = buildClient(api.baseUrl) { intercept408.incrementAndGet() }
+            try {
+                runCatching { client.beta().messages().withRawResponse().create(params(), options()).close() }
+            } finally {
+                client.close()
+            }
+            wire408 = api.received.size
+        }
+
         // 3a. Connection reset (TCP RST via SO_LINGER=0) before the status line
         val wireRst = AtomicInteger()
         val interceptRst = AtomicInteger()
@@ -197,6 +212,7 @@ class SdkWireBehaviourTest {
             |503 Retry-After:0 always : wire=$wire503Always, sdkInterceptor=${intercept503Always.get()}
             |429 Retry-After:0        : wire=$wire429Zero, sdkInterceptor=${intercept429Zero.get()}
             |429 Retry-After:120      : wire=$wire429Delay, sdkInterceptor=${intercept429Delay.get()}
+            |408 Request Timeout      : wire=$wire408, sdkInterceptor=${intercept408.get()}
             |TCP RST before status    : wire=${wireRst.get()}, sdkInterceptor=${interceptRst.get()}
             |EOF before status        : wire=${wireEof.get()}, sdkInterceptor=${interceptEof.get()}
             """.trimMargin()
@@ -211,6 +227,8 @@ class SdkWireBehaviourTest {
         assertEquals(1, intercept429Zero.get(), "429 Retry-After:0 SDK interceptor count")
         assertEquals(1, wire429Delay, "429 Retry-After:120 wire count")
         assertEquals(1, intercept429Delay.get(), "429 Retry-After:120 SDK interceptor count")
+        assertEquals(1, wire408, "408 Request Timeout wire count")
+        assertEquals(1, intercept408.get(), "408 Request Timeout SDK interceptor count")
         assertEquals(1, wireRst.get(), "TCP RST before status wire count")
         assertEquals(1, interceptRst.get(), "TCP RST before status SDK interceptor count")
         assertEquals(1, wireEof.get(), "EOF before status wire count")
@@ -242,6 +260,21 @@ class SdkWireBehaviourTest {
             val gen = OpenAIReplyGenerator(apiKey = "test-key-not-real", log = {}, baseUrl = "${api.baseUrl}/v1/")
             runBlocking { gen.generateReply(AIReplyRequest("s", "u")) }
             wire429 = api.received.size
+        }
+
+        val wire408: Int
+        FakeMessagesApi().use { api ->
+            api.firstAnswers.add(FakeMessagesApi.Answer(408, """{"error":{"message":"timeout","type":"server_error"}}"""))
+            api.answer = FakeMessagesApi.Answer(
+                200,
+                """data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"gpt-5.1","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}""" + "\n\n" +
+                    """data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"gpt-5.1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}""" + "\n\n" +
+                    "data: [DONE]\n\n",
+                headers = mapOf("content-type" to "text/event-stream"),
+            )
+            val gen = OpenAIReplyGenerator(apiKey = "test-key-not-real", log = {}, baseUrl = "${api.baseUrl}/v1/")
+            runBlocking { gen.generateReply(AIReplyRequest("s", "u")) }
+            wire408 = api.received.size
         }
 
         val wireRst = AtomicInteger()
@@ -277,6 +310,7 @@ class SdkWireBehaviourTest {
             |=== OPENAI KTOR-OKHTTP WIRE PROBE (master baseline) ===
             |503 Retry-After:0 -> 200 : wire=$wire503
             |429 Retry-After:0        : wire=$wire429
+            |408 Request Timeout      : wire=$wire408
             |TCP RST before status    : wire=${wireRst.get()}
             """.trimMargin()
         )
