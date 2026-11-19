@@ -39,7 +39,8 @@ class MessageSerializationTest {
         repository.pushMarqueeMessage(reply)
         repository.saveMarqueeMessages(dir)
 
-        assertEquals("CHONKYMARQUEE\u000BAI Reply\n", File(dir, "signstrings.bin").readText())
+        // (the repository ends a line with BufferedWriter.newLine(): the line end of the machine)
+        assertEquals("CHONKYMARQUEE\u000BAI Reply" + System.lineSeparator(), File(dir, "signstrings.bin").readText())
         assertSignFrame(reply.toChonkyMessage(), """{"type":"N","str":"AI Reply"}""")
     }
 

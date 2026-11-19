@@ -4,7 +4,6 @@ import cx.aphex.energysign.message.Message.ColorMessage.ChonkySlide
 import cx.aphex.energysign.message.Message.ColorMessage.IconInvaders
 import cx.aphex.energysign.message.Message.ColorMessage.OneByOneMessage
 import cx.aphex.energysign.ClosesAfterWrite
-import cx.aphex.energysign.SaveSteps
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -61,97 +60,16 @@ class AdStoreTest {
         assertEquals(emptyList(), saved.ads)
     }
 
-    /** What is where at one moment of a save: the file beside (null when there is none) and the file in place. */
-    private fun files(): String = "beside " + File(dir, "ads.json.tmp").let { if (it.exists()) it.readText() else null } +
-            ", in place " + adsFile.readText()
-
-    @Test
-    fun `a save is three steps in this order, the data to storage, the rename, the directory to storage`() {
-        AdStore(dir).saveAds(someAds)
-        val old = adsFile.readText()
-        val fresh = AdCodec.encode(listOf<Message>(IconInvaders.EDC(0x04ff19)))
-        val steps = mutableListOf<String>()
-        val store = AdStore(
-            dir,
-            steps = SaveSteps(
-                syncData = { steps += "data: " + files() },
-                syncDirectory = { directory -> steps += "directory ${directory.name == dir.name}: " + files() },
-            ),
-        )
-
-        store.saveAds(listOf(IconInvaders.EDC(0x04ff19)))
-
-        assertEquals(
-            listOf(
-                // the new list is whole beside the old one, which is still in place
-                "data: beside $fresh, in place $old",
-                // the new list is in place and nothing is beside it: the rename has been done
-                "directory true: beside null, in place $fresh",
-            ),
-            steps
-        )
-        assertEquals(listOf("ads.json"), dir.list()!!.toList())
-    }
-
-    @Test
-    fun `every save takes both steps once, the period too`() {
-        var data = 0
-        var directory = 0
-        val store = AdStore(dir, steps = SaveSteps(syncData = { data++ }, syncDirectory = { directory++ }))
-
-        store.saveAds(someAds)
-        assertEquals(1 to 1, data to directory)
-        store.saveAds(emptyList())
-        assertEquals(2 to 2, data to directory)
-        store.savePeriod(4)
-        assertEquals(3 to 3, data to directory)
-    }
-
-    @Test
-    fun `when the data cannot be forced to storage the save fails and the old list stays in place`() {
-        AdStore(dir).saveAds(someAds)
-        val old = adsFile.readText()
-        var directorySynced = false
-        val store = AdStore(
-            dir,
-            steps = SaveSteps(syncData = { throw java.io.IOException("no space left") }, syncDirectory = { directorySynced = true }),
-        )
-
-        assertFailsWith<java.io.IOException> { store.saveAds(emptyList()) }
-
-        assertEquals(old, adsFile.readText())
-        assertFalse(directorySynced, "nothing was renamed, so there is nothing to force")
-        assertEquals(wire(someAds), wire(assertIs<AdStore.SavedAds.Ads>(AdStore(dir).loadAds()).ads))
-    }
-
-    @Test
-    fun `when the directory cannot be forced to storage the save is done all the same, and that is reported`() {
-        AdStore(dir).saveAds(someAds)
-        val warnings = mutableListOf<String>()
-        val store = AdStore(dir, warn = { warnings += it }, steps = SaveSteps(syncDirectory = { throw java.io.IOException("not today") }))
-
-        store.saveAds(emptyList()) // does not throw
-        store.savePeriod(7)
-
-        assertEquals("[]", adsFile.readText())
-        assertEquals("7", periodFile.readText())
-        assertEquals(emptyList(), assertIs<AdStore.SavedAds.Ads>(AdStore(dir).loadAds()).ads)
-        assertEquals(setOf("ads.json", "ad-period.txt"), dir.list()!!.toSet(), "the new files are in place, nothing beside them")
-        assertEquals(2, warnings.size, warnings.toString())
-        assertContains(warnings[0], "ads.json")
-        assertContains(warnings[0], "not today")
-        assertContains(warnings[1], "ad-period.txt")
-    }
-
-    // ---- the PRODUCTION steps: nothing of the test's own stands in the step under test
+    // ---- saving: the steps are the app's own ([cx.aphex.energysign.replaceContent], see FileReplaceTest
+    // for their order). A test cannot give the store other steps; it can only open the file another way.
 
     @Test
     fun `the ads and the period are really forced to storage, a descriptor that is gone fails the save and the old file stays`() {
         AdStore(dir).saveAds(someAds)
         AdStore(dir).savePeriod(3)
         val oldAds = adsFile.readText()
-        // only the way the file is opened is the test's; the data step is the app's
-        val store = AdStore(dir, steps = SaveSteps(open = ::ClosesAfterWrite))
+        // the store as the app makes it, but for the way the file is opened
+        val store = AdStore(dir, open = ::ClosesAfterWrite)
 
         assertFailsWith<java.io.IOException> { store.saveAds(emptyList()) }
         assertFailsWith<java.io.IOException> { store.savePeriod(9) }
@@ -162,20 +80,51 @@ class AdStoreTest {
     }
 
     @Test
-    fun `a directory that cannot be opened to be forced is reported by the app's own step, and the ads are saved`() {
+    fun `a directory that cannot be opened to be forced is reported by the app's own step, and the ads and the period are saved`() {
         AdStore(dir).saveAds(someAds)
         val warnings = mutableListOf<String>()
-        assumeTrue(dir.setReadable(false, false) && !dir.canRead(), "this user can read every directory (root?)")
         try {
-            // every step is the app's
-            AdStore(dir, warn = { warnings += it }).saveAds(emptyList())
+            assumeTrue(dir.setReadable(false, false) && !dir.canRead(), "this user can read every directory (root?)")
+            // the store as the app makes it
+            val store = AdStore(dir, warn = { warnings += it })
+            store.saveAds(emptyList())
+            store.savePeriod(6)
         } finally {
             dir.setReadable(true, false)
         }
 
         assertEquals("[]", adsFile.readText())
-        assertEquals(1, warnings.size, warnings.toString())
-        assertContains(warnings.single(), "ads.json")
+        assertEquals("6", periodFile.readText())
+        assertEquals(2, warnings.size, warnings.toString())
+        assertContains(warnings[0], "ads.json")
+        assertContains(warnings[1], "ad-period.txt")
+    }
+
+    @Test
+    fun `when the new list cannot be renamed into place the save fails and what is there stays`() {
+        // a directory with something in it where ads.json should be
+        adsFile.mkdir()
+        File(adsFile, "inside").writeText("kept")
+        val warnings = mutableListOf<String>()
+
+        val e = assertFailsWith<java.io.IOException> { AdStore(dir, warn = { warnings += it }).saveAds(someAds) }
+
+        assertContains(e.message!!, "rename")
+        assertEquals(true, adsFile.isDirectory)
+        assertEquals("kept", File(adsFile, "inside").readText())
+        assertEquals(emptyList(), warnings)
+        assertIs<AdStore.SavedAds.Unreadable>(AdStore(dir).loadAds())
+    }
+
+    @Test
+    fun `the same for the period`() {
+        periodFile.mkdir()
+        File(periodFile, "inside").writeText("kept")
+
+        assertFailsWith<java.io.IOException> { AdStore(dir).savePeriod(5) }
+
+        assertEquals("kept", File(periodFile, "inside").readText())
+        assertNull(AdStore(dir).loadPeriod())
     }
 
     // ---- a damaged file

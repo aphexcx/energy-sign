@@ -38,13 +38,21 @@ object AdRules {
     }
 
     /**
-     * The line for the track that is playing, "artist - title". Nobody types it: it is put in
+     * The line for the track that is playing, "artist - title" (or the one of the two there
+     * is; null when there is neither). Nobody types it: it is put in
      * the place an ad list has for it when the ad round is made, and it is announced when the
      * track starts. Both go to the sign, so it is held to the text rule and to the size limit
      * here, where the message is made. [note] gets one line when it was cut.
      */
-    fun nowPlaying(artist: String, title: String, note: (String) -> Unit): Message.NowPlayingTrackMessage =
-        AdSizeLimit.fit(text("$artist - $title"), note) { Message.NowPlayingTrackMessage(it) }
+    fun nowPlaying(artist: String?, title: String?, note: (String) -> Unit): Message.NowPlayingTrackMessage? {
+        // The artist and the title may be MISSING: the server fills a track with Gson, which does
+        // not look at Kotlin's types, so a field the client left out is null here. A part with
+        // nothing the sign can show is left out; with neither there is no line (an empty text
+        // is nothing to send to the sign), and the track is shown as nothing playing.
+        val parts = listOf(artist, title).map { text(it.orEmpty()) }.filter { it.isNotBlank() }
+        if (parts.isEmpty()) return null
+        return AdSizeLimit.fit(parts.joinToString(" - "), note) { Message.NowPlayingTrackMessage(it) }
+    }
 
     /**
      * The `dly` of an ad for a wish of [ms]: whole seconds, from one to thirty.
