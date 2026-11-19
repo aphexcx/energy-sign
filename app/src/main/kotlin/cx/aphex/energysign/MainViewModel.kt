@@ -32,7 +32,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
 
     private val owner: OwnerQueue by inject()
     private val messageManager: MessageManager by inject()
-    private val energySignBluetoothManager: EnergySignBluetoothManager?
+    private val startup = SignStartup { logW(it) }
+    private val bluetooth = BluetoothStartup(startup,
+        create = { EnergySignBluetoothManager(application.applicationContext, this) },
+        subscribe = { it.subscribeToWrites(messageManager) },
+        startManager = EnergySignBluetoothManager::start,
+        stopManager = EnergySignBluetoothManager::stop,
+    )
+    private var firstForeground = true
     private val energySignUartManager: EnergySignUartManager = EnergySignUartManager(this, owner)
 
     /** The answer to a REQUEST of the sign, and the only way to MessageManager.getNextMessage. */
@@ -46,7 +53,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
     )
 
     init {
-        energySignBluetoothManager = SignStartup { logW(it) }.start(
+        startup.start(
             prepareMessages = {
                 // Resolve MessageManager on the main thread, before commands or UART requests arrive.
                 owner.neverWaitsOn(Looper.getMainLooper().thread)
@@ -60,19 +67,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
                 }
             },
             warmUp = { SignResponder.warmUp() },
-            createBluetooth = { EnergySignBluetoothManager(application.applicationContext, this) },
-            subscribeToWrites = { it.subscribeToWrites(messageManager) },
-            startBluetooth = { it.start() },
+            startBluetooth = bluetooth::start,
             startDnsSd = { DnsSdAnnouncer(application.applicationContext).start() },
             startLink = energySignUartManager::start,
         )
+    }
+
+    internal fun onActivityStart() {
+        if (firstForeground) {
+            firstForeground = false // init already attempted setup for this launch.
+        } else {
+            val manager = bluetooth.manager
+            if (manager == null) bluetooth.start() else manager.onForeground()
+        }
     }
 
     override fun onCleared() {
         super.onCleared()
         // Who brings changes stops first, then who carries them out
         try {
-            energySignBluetoothManager?.stop()
+            bluetooth.manager?.stop()
         } finally {
             energySignUartManager.stop()
         }

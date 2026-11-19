@@ -9,6 +9,7 @@ import kotlin.test.assertTrue
 /** Android has separate return values and callbacks for the same registration attempt. */
 class BluetoothRegistrationTest {
     private val registrations = mutableListOf<(Int) -> Unit>()
+    private val names = mutableListOf<Boolean>()
     private val advertisements = mutableListOf<(Int) -> Unit>()
     private val warnings = mutableListOf<String>()
     private var acceptsService = true
@@ -18,7 +19,7 @@ class BluetoothRegistrationTest {
         startup = SignStartup(warnings::add), register = {}, unregister = {},
         enabled = { true }, enable = { error("already enabled") },
         openGatt = { added -> registrations += added; acceptsService },
-        advertise = { result -> advertisements += result },
+        advertise = { name, result -> names += name; advertisements += result },
         closeServices = { closed++ },
     )
 
@@ -109,6 +110,7 @@ class BluetoothRegistrationTest {
         val named = advertisements.single()
         named(android.bluetooth.le.AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE)
         assertEquals(2, advertisements.size)
+        assertEquals(listOf(true, false), names)
         named(4) // late result from the superseded submission
         advertisements.last()(0)
         session.adapterOn()

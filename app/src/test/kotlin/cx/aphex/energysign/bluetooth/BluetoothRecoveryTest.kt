@@ -3,6 +3,7 @@ package cx.aphex.energysign.bluetooth
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothManager
 import android.content.ContextWrapper
+import cx.aphex.energysign.BluetoothStartup
 import cx.aphex.energysign.MainViewModel
 import cx.aphex.energysign.SignStartup
 import org.junit.jupiter.api.Test
@@ -38,7 +39,7 @@ class BluetoothRecoveryTest {
             added(BluetoothGatt.GATT_SUCCESS)
             true
         },
-        advertise = { result ->
+        advertise = { _, result ->
             published = true
             result(0)
         },
@@ -53,7 +54,7 @@ class BluetoothRecoveryTest {
     }) {
         startup.start(
             prepareMessages = {}, launchWarmUp = {}, warmUp = {},
-            createBluetooth = { session }, subscribeToWrites = { subscribe() }, startBluetooth = { it.start() },
+            startBluetooth = BluetoothStartup(startup, { session }, { subscribe() }, { it.start() }, { it.stop() })::start,
             startDnsSd = {}, startLink = { uartStarts++ },
         )
     }
@@ -90,9 +91,9 @@ class BluetoothRecoveryTest {
     fun `a refused subscription leaves no writable service and a late write gets failure`() {
         var opened = false
         startup.start(
-            prepareMessages = {}, launchWarmUp = {}, warmUp = {}, createBluetooth = { gatt },
-            subscribeToWrites = { throw IllegalStateException("subscription refused") },
-            startBluetooth = { opened = true }, startDnsSd = {}, startLink = { uartStarts++ },
+            prepareMessages = {}, launchWarmUp = {}, warmUp = {},
+            startBluetooth = BluetoothStartup(startup, { gatt }, { throw IllegalStateException("subscription refused") },
+                { opened = true }, {})::start, startDnsSd = {}, startLink = { uartStarts++ },
         )
         val status = gatt.uartWriteStatus("!delete".toByteArray())
         assertEquals(BluetoothGatt.GATT_FAILURE, status)

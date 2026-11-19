@@ -65,7 +65,6 @@ class GattServerActivity : AppCompatActivity() {
 
         val app = application as MainApplication
         val viewModel = app.signViewModel()
-        app.bindBeatLink()
 
         viewModel.currentString.observeNonNull(this) {
             binding.currentString.text = STRING_PREFIX + it
@@ -91,6 +90,9 @@ class GattServerActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
+        val app = application as MainApplication
+        app.signViewModel().onActivityStart()
+        app.bindBeatLink()
         appStartTime = System.currentTimeMillis()
     }
 

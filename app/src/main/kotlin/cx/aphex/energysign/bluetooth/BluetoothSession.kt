@@ -1,5 +1,6 @@
 package cx.aphex.energysign.bluetooth
 
+import android.bluetooth.le.AdvertiseCallback
 import cx.aphex.energysign.SignStartup
 
 /** All transitions, including Android's posted registration results, run on the main thread. */
@@ -10,11 +11,11 @@ internal class BluetoothSession(
     private val enabled: () -> Boolean,
     private val enable: () -> Boolean,
     private val openGatt: (onAdded: (Int) -> Unit) -> Boolean,
-    private val advertise: (onResult: (Int) -> Unit) -> Unit,
+    private val advertise: (includeName: Boolean, onResult: (Int) -> Unit) -> Unit,
     private val closeServices: () -> Unit,
     private val showAdvertiseResult: (Int) -> Unit = {},
 ) {
-    private enum class Phase { REGISTERING_SERVICE, STARTING_ADVERTISER, READY }
+    private enum class Phase { REGISTERING_SERVICE, STARTING_ADVERTISER, STARTING_UUID_ONLY, READY }
 
     /** Android may deliver a callback from an older server after an OFF/ON cycle. */
     private class Attempt(var phase: Phase = Phase.REGISTERING_SERVICE)
@@ -29,6 +30,11 @@ internal class BluetoothSession(
             throw failure
         }
         listening = true
+        checkAdapter()
+    }
+
+    fun checkAdapter() {
+        if (!listening || current != null) return
         startup.optional("Bluetooth adapter activation") {
             if (enabled()) adapterOn() else check(enable()) { "Bluetooth adapter refused to enable" }
         }
@@ -54,15 +60,27 @@ internal class BluetoothSession(
             return
         }
 
-        attempt.phase = Phase.STARTING_ADVERTISER
+        submitAdvertisement(attempt, includeName = true)
+    }
+
+    private fun submitAdvertisement(attempt: Attempt, includeName: Boolean) {
+        val phase = if (includeName) Phase.STARTING_ADVERTISER else Phase.STARTING_UUID_ONLY
+        attempt.phase = phase
         val submitted = startup.optional("Bluetooth advertising") {
-            advertise { result -> advertisementStarted(attempt, result) }
+            advertise(includeName) { status ->
+                if (current === attempt && attempt.phase == phase) {
+                    if (includeName && status == AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE) {
+                        submitAdvertisement(attempt, includeName = false)
+                    } else {
+                        advertisementStarted(attempt, status)
+                    }
+                }
+            }
         }
         if (submitted == null && current === attempt) adapterOff()
     }
 
     private fun advertisementStarted(attempt: Attempt, status: Int) {
-        if (current !== attempt || attempt.phase != Phase.STARTING_ADVERTISER) return
         if (status == 0) {
             attempt.phase = Phase.READY
         } else {

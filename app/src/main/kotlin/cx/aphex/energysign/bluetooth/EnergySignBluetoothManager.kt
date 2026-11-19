@@ -10,6 +10,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
@@ -35,8 +36,9 @@ class EnergySignBluetoothManager(
 
     // HOME can start while Android is still bringing Bluetooth up. Install the listeners
     // first, then look up the service again on each adapter event that needs it.
-    private val bluetoothManager: BluetoothManager
-        get() = managerForGatt(context)
+    private val bluetoothManager: BluetoothManager by lazy {
+        managerForGatt(context).also { checkNotNull(it.adapter) }
+    }
     private val bluetoothAdapter: BluetoothAdapter
         get() = checkNotNull(bluetoothManager.adapter)
 
@@ -93,8 +95,7 @@ class EnergySignBluetoothManager(
 
             when (intent.action) {
                 BluetoothDevice.ACTION_PAIRING_REQUEST -> {
-                    logD("Auto-entering pin: $BLE_PIN...")
-                    val pinHasBeenSet = bluetoothDevice.setPin(BLE_PIN.toByteArray())
+                    val pinHasBeenSet = startup.optional("Bluetooth pairing PIN") { bluetoothDevice.setPin(BLE_PIN.toByteArray()) }
 //                    abortBroadcast()
 //                    val bondingWillBegin = bluetoothDevice.createBond()
 //                    logD("Starting bond=$bondingWillBegin")
@@ -149,6 +150,11 @@ class EnergySignBluetoothManager(
         }
     }
 
+    internal fun onForeground() {
+        receivers.ensurePairing(bondStateReceiver)
+        session.checkAdapter()
+    }
+
     fun stop() {
         detachWrites()
         session.stop()
@@ -195,9 +201,9 @@ class EnergySignBluetoothManager(
         }
     }
 
-    private fun startAdvertising(result: (Int) -> Unit) {
+    private fun startAdvertising(includeName: Boolean, result: (Int) -> Unit) {
         // The requested display name is optional; the UART service is identified by its UUID.
-        startup.optional("Bluetooth advertised name") { check(bluetoothAdapter.setName("G!")) }
+        if (includeName) startup.optional("Bluetooth advertised name") { check(bluetoothAdapter.setName("G!")) }
         val advertiser = checkNotNull(bluetoothAdapter.bluetoothLeAdvertiser) { "Bluetooth advertiser unavailable" }
         val callback = object : AdvertiseCallback() {
             override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
@@ -216,7 +222,7 @@ class EnergySignBluetoothManager(
             .build()
 
         val data = AdvertiseData.Builder()
-            .setIncludeDeviceName(true)
+            .setIncludeDeviceName(includeName)
             .setIncludeTxPowerLevel(false)
             .addServiceUuid(ParcelUuid(NordicUartServiceProfile.NORDIC_UART_SERVICE_UUID))
             .build()
@@ -226,5 +232,9 @@ class EnergySignBluetoothManager(
     }
 }
 
-internal fun managerForGatt(context: Context, hasAdapter: (BluetoothManager) -> Boolean = { it.adapter != null }): BluetoothManager =
-    checkNotNull(context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)
+// Android caches BluetoothManager (including its initial adapter) per Context. A lookup
+// during boot can return a wrapper with a permanently null adapter in the application cache.
+internal fun managerForGatt(context: Context): BluetoothManager {
+    val fresh = context.createConfigurationContext(Configuration())
+    return checkNotNull(fresh.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)
+}

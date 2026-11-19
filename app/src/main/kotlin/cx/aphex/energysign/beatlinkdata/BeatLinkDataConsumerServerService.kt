@@ -4,6 +4,8 @@ import android.app.Service
 import android.content.Intent
 import android.os.Binder
 import android.os.IBinder
+import cx.aphex.energysign.SignStartup
+import io.ktor.server.engine.ApplicationEngine
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
 import cx.aphex.energysign.ai.PostedAIAnswer
@@ -46,68 +48,79 @@ class BeatLinkDataConsumerServerService : Service(), KoinComponent {
 
     val HTTP_PORT = 8080
 
-    private lateinit var server: io.ktor.server.engine.ApplicationEngine
+    private val startup = SignStartup { logW(it) }
+    private var server: ApplicationEngine? = null
 
     override fun onCreate() {
         super.onCreate()
         ensureListening()
     }
 
-    internal fun ensureListening(create: () -> io.ktor.server.engine.ApplicationEngine = ::createEngine) {
-        server = create().start(wait = false)
+    internal fun ensureListening(create: () -> ApplicationEngine = ::createEngine) {
+        if (server != null) return
+        val engine = startup.optional("BeatLink listener construction", create) ?: return
+        server = startup.optional("BeatLink listener startup") { engine.start(wait = false) }
+        if (server == null) startup.optional("BeatLink listener cleanup") { engine.stop(0, 0) }
+    }
+
+    override fun onDestroy() {
+        val engine = server
+        server = null
+        startup.optional("BeatLink listener cleanup") { engine?.stop(0, 0) }
+        super.onDestroy()
     }
 
     private fun createEngine() = embeddedServer(Netty, HTTP_PORT) {
-            install(ContentNegotiation) {
-                gson {}
-            }
+        install(ContentNegotiation) {
+            gson {}
+        }
 //            install(CallLogging)
-            routing {
+        routing {
 //                get("/") {
 //                    logD("GET /")
 //                    call.respondText("Hello, world!")
 //                }
 
-                get("/messages") {
-                    logD("GET /messages")
-                    // as the owner has them now: a message posted just before this is in the list
-                    val messages = try {
-                        withContext(Dispatchers.IO) { messageManager.storedMessages() }
-                    } catch (e: Exception) {
-                        call.respond(HttpStatusCode.ServiceUnavailable, mapOf("success" to false, "error" to e.toString()))
-                        return@get
-                    }
-                    call.respond(messages)
+            get("/messages") {
+                logD("GET /messages")
+                // as the owner has them now: a message posted just before this is in the list
+                val messages = try {
+                    withContext(Dispatchers.IO) { messageManager.storedMessages() }
+                } catch (e: Exception) {
+                    call.respond(HttpStatusCode.ServiceUnavailable, mapOf("success" to false, "error" to e.toString()))
+                    return@get
                 }
-                post("/newUserMessage") {
-                    val msg: PostedMessage = call.receive()
-                    logW("Received new POSTed UserMessage: ${msg.message}")
-                    call.answer {
-                        messageManager.processNewUserMessage(msg.message)
-                        true
-                    }
+                call.respond(messages)
+            }
+            post("/newUserMessage") {
+                val msg: PostedMessage = call.receive()
+                logW("Received new POSTed UserMessage: ${msg.message}")
+                call.answer {
+                    messageManager.processNewUserMessage(msg.message)
+                    true
                 }
-                post("/isGeneratingThought") {
-                    val msg: SheepIsGeneratingThought = call.receive()
-                    logW("Received new POSTed generating thought notification: ${msg.isGenerating}")
-                    call.answer {
-                        messageManager.togglePersistentThinkingMessage(msg.isGenerating)
-                        true
-                    }
+            }
+            post("/isGeneratingThought") {
+                val msg: SheepIsGeneratingThought = call.receive()
+                logW("Received new POSTed generating thought notification: ${msg.isGenerating}")
+                call.answer {
+                    messageManager.togglePersistentThinkingMessage(msg.isGenerating)
+                    true
                 }
+            }
 //                post("/streamPartialSheepThought") {
 //                    val msg: PostedMessage = call.receive()7
 //                    logW("Received new partial SheepThought: ${msg.message}")
 //                    messageManager.processPartialThought(msg.message)
 //                    call.respond(mapOf("success" to true))
 //                }
-                post("/newGPTReply") { // formerly /newSheepThought
-                    val answer: PostedAIAnswer = call.receive()
-                    logW("Received new POSTed AI Reply: ${answer}")
-                    call.answer { messageManager.onNewPostedAIReply(answer) }
-                }
-                currentTrack(messageManager)
+            post("/newGPTReply") { // formerly /newSheepThought
+                val answer: PostedAIAnswer = call.receive()
+                logW("Received new POSTed AI Reply: ${answer}")
+                call.answer { messageManager.onNewPostedAIReply(answer) }
             }
+            currentTrack(messageManager)
+        }
 
     }
 

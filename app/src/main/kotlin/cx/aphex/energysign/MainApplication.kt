@@ -24,15 +24,32 @@ class MainApplication : Application() {
 
     // The HTTP server belongs to the same process. Its binding must not retain an old activity
     // or recreate the listener on port 8080 after the last activity finishes.
+    private var httpService: BeatLinkDataConsumerServerService? = null
     private val httpConnection = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName, service: IBinder) = Unit
-        override fun onServiceDisconnected(name: ComponentName) = Unit
+        override fun onServiceConnected(name: ComponentName, service: IBinder) {
+            httpService = (service as BeatLinkDataConsumerServerService.ServerBinder).getService()
+        }
+        override fun onServiceDisconnected(name: ComponentName) {
+            httpService = null // Android retains the binding and reconnects.
+        }
+
+        override fun onBindingDied(name: ComponentName) = release()
+        override fun onNullBinding(name: ComponentName) = release()
+
+        private fun release() {
+            httpService = null
+            httpBound = false
+            SignStartup { logW(it) }.optional("BeatLink service unbinding") { unbindService(this) }
+        }
     }
     private var httpBound = false
 
     @MainThread
     internal fun bindBeatLink() {
-        if (httpBound) return
+        if (httpBound) {
+            httpService?.ensureListening()
+            return
+        }
         SignStartup { logW(it) }.optional("BeatLink service binding") {
             httpBound = bindService(Intent(this, BeatLinkDataConsumerServerService::class.java), httpConnection, BIND_AUTO_CREATE)
             check(httpBound)

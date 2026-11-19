@@ -17,8 +17,8 @@ class ProcessSignTest {
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 opens++
                 SignStartup { error(it) }.start(
-                    prepareMessages = {}, launchWarmUp = {}, warmUp = {}, createBluetooth = {},
-                    subscribeToWrites = {}, startBluetooth = {}, startDnsSd = {}, startLink = { starts++ },
+                    prepareMessages = {}, launchWarmUp = {}, warmUp = {},
+                    startBluetooth = {}, startDnsSd = {}, startLink = { starts++ },
                 )
                 // Android Things opens UART6 in the real model constructor. Stand in only for that model.
                 return ObjenesisStd().newInstance(modelClass)

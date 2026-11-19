@@ -35,7 +35,7 @@ class BluetoothStartupTest {
         var advertised = 0
         val session = BluetoothSession(cx.aphex.energysign.SignStartup {}, { receivers.register(receiver(), receiver()) },
             receivers::clear, { true }, { false }, { added -> added(0); true },
-            { result -> advertised++; result(0) }, {})
+            { _, result -> advertised++; result(0) }, {})
         session.start()
         session.adapterOff()
         session.adapterOn()
@@ -59,6 +59,6 @@ class BluetoothStartupTest {
             override fun getSystemService(name: String): Any = stale
             override fun createConfigurationContext(config: Configuration): Context = fresh
         }
-        assertSame(healthy, managerForGatt(application) { it === healthy })
+        assertSame(healthy, managerForGatt(application))
     }
 }
