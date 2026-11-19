@@ -4,7 +4,7 @@ plugins {
     id 'com.google.gms.google-services' // Google Services Gradle plugin
     id 'com.google.firebase.crashlytics'
     id 'org.jetbrains.kotlin.plugin.serialization' version "$kotlin_version"
-    id 'org.jetbrains.kotlinx.atomicfu' version '0.26.1'
+    id 'org.jetbrains.kotlinx.atomicfu' version '0.33.0'
 }
 
 android {
@@ -137,7 +137,7 @@ dependencies {
     implementation 'com.ibm.icu:icu4j:67.1'
     implementation 'com.google.code.gson:gson:2.11.0'
     implementation "org.jetbrains.kotlin:kotlin-serialization:$kotlin_version"
-    implementation "org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3"
+    implementation "org.jetbrains.kotlinx:kotlinx-serialization-json:1.13.0"
     ext.koin_version = "3.5.6"
     implementation "io.insert-koin:koin-android:$koin_version"
     // Koin for Ktor
@@ -161,7 +161,7 @@ dependencies {
     implementation "com.chibatching.kotpref:kotpref:$ver_kotpref"
 //    implementation "com.chibatching.kotpref:gson-support:$ver_kotpref"
 
-    implementation "org.jetbrains.kotlinx:atomicfu:0.26.1"
+    implementation "org.jetbrains.kotlinx:atomicfu:0.33.0"
 
     ext.ktor_version = "2.3.12"
     implementation "io.ktor:ktor-server-core:$ktor_version"
@@ -192,7 +192,7 @@ dependencies {
     testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.11.3'
 
     // Kotlin Test
-    testImplementation 'org.jetbrains.kotlin:kotlin-test:2.1.20'
+    testImplementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
 
     // Mockito 5 mocks final classes itself (no mockito-inline artifact) and reads the class files of Java 17 and 21
     testImplementation 'org.mockito:mockito-core:5.24.0'
