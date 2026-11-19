@@ -1,0 +1,500 @@
+{
+ "event": "Dreamstate SoCal 2026",
+ "venue": "Queen Mary Waterfront, Long Beach, CA",
+ "timezone": "America/Los_Angeles",
+ "updated": "2026-11-17",
+ "sets": [
+  {
+   "stage": "The Dream",
+   "artist": "VisionV",
+   "start": "2026-11-20T16:00",
+   "end": "2026-11-20T17:00"
+  },
+  {
+   "stage": "The Sequence",
+   "artist": "Maximizer",
+   "start": "2026-11-20T16:00",
+   "end": "2026-11-20T17:00"
+  },
+  {
+   "stage": "The Void",
+   "artist": "Shay De Castro",
+   "start": "2026-11-20T16:00",
+   "end": "2026-11-20T17:00"
+  },
+  {
+   "stage": "The Vision",
+   "artist": "KARMÅ",
+   "start": "2026-11-20T16:00",
+   "end": "2026-11-20T17:00"
+  },
+  {
+   "stage": "The Dream",
+   "artist": "Matty Ralph",
+   "start": "2026-11-20T17:00",
+   "end": "2026-11-20T18:00"
+  },
+  {
+   "stage": "The Sequence",
+   "artist": "Terra",
+   "start": "2026-11-20T17:00",
+   "end": "2026-11-20T18:00"
+  },
+  {
+   "stage": "The Void",
+   "artist": "BK",
+   "start": "2026-11-20T17:00",
+   "end": "2026-11-20T18:00"
+  },
+  {
+   "stage": "The Vision",
+   "artist": "Steve Dekay",
+   "start": "2026-11-20T17:00",
+   "end": "2026-11-20T18:00"
+  },
+  {
+   "stage": "Beatbox Art Car",
+   "artist": "Matt Gucci",
+   "start": "2026-11-20T17:00",
+   "end": "2026-11-20T18:00"
+  },
+  {
+   "stage": "The Dream",
+   "artist": "David Rust + Olly James",
+   "start": "2026-11-20T18:00",
+   "end": "2026-11-20T19:00"
+  },
+  {
+   "stage": "The Sequence",
+   "artist": "KAUFMANN",
+   "start": "2026-11-20T18:00",
+   "end": "2026-11-20T19:00"
+  },
+  {
+   "stage": "The Void",
+   "artist": "Lee Ann Roberts",
+   "start": "2026-11-20T18:00",
+   "end": "2026-11-20T19:00"
+  },
+  {
+   "stage": "The Vision",
+   "artist": "FRANKYEFFE",
+   "start": "2026-11-20T18:00",
+   "end": "2026-11-20T19:00"
+  },
+  {
+   "stage": "Beatbox Art Car",
+   "artist": "Fallen Angel",
+   "start": "2026-11-20T18:00",
+   "end": "2026-11-20T19:00"
+  },
+  {
+   "stage": "The Dream",
+   "artist": "The Rocketman",
+   "start": "2026-11-20T19:00",
+   "end": "2026-11-20T20:00"
+  },
+  {
+   "stage": "The Sequence",
+   "artist": "Burn In Noise",
+   "start": "2026-11-20T19:00",
+   "end": "2026-11-20T20:00"
+  },
+  {
+   "stage": "The Void",
+   "artist": "A.N.I.",
+   "start": "2026-11-20T19:00",
+   "end": "2026-11-20T20:00"
+  },
+  {
+   "stage": "The Vision",
+   "artist": "Mirage (Live)",
+   "start": "2026-11-20T19:00",
+   "end": "2026-11-20T20:00"
+  },
+  {
+   "stage": "Beatbox Art Car",
+   "artist": "Jack Spaidz",
+   "start": "2026-11-20T19:00",
+   "end": "2026-11-20T20:00"
+  },
+  {
+   "stage": "The Dream",
+   "artist": "MaRLo",
+   "start": "2026-11-20T20:00",
+   "end": "2026-11-20T21:00"
+  },
+  {
+   "stage": "The Sequence",
+   "artist": "GMS",
+   "start": "2026-11-20T20:00",
+   "end": "2026-11-20T21:00"
+  },
+  {
+   "stage": "The Void",
+   "artist": "Schrotthagen",
+   "start": "2026-11-20T20:00",
+   "end": "2026-11-20T21:00"
+  },
+  {
+   "stage": "The Vision",
+   "artist": "NRG2000",
+   "start": "2026-11-20T20:00",
+   "end": "2026-11-20T21:00"
+  },
+  {
+   "stage": "Beatbox Art Car",
+   "artist": "Nico Hartt",
+   "start": "2026-11-20T20:00",
+   "end": "2026-11-20T21:00"
+  },
+  {
+   "stage": "The Dream",
+   "artist": "Andrew Rayel pres Extasia",
+   "start": "2026-11-20T21:00",
+   "end": "2026-11-20T22:00"
+  },
+  {
+   "stage": "The Sequence",
+   "artist": "Phaxe",
+   "start": "2026-11-20T21:00",
+   "end": "2026-11-20T22:00"
+  },
+  {
+   "stage": "The Void",
+   "artist": "Panteros666",
+   "start": "2026-11-20T21:00",
+   "end": "2026-11-20T22:00"
+  },
+  {
+   "stage": "The Vision",
+   "artist": "Warp Brothers",
+   "start": "2026-11-20T21:00",
+   "end": "2026-11-20T22:00"
+  },
+  {
+   "stage": "Beatbox Art Car",
+   "artist": "Ronin",
+   "start": "2026-11-20T21:00",
+   "end": "2026-11-20T22:00"
+  },
+  {
+   "stage": "The Dream",
+   "artist": "Dash Berlin",
+   "start": "2026-11-20T22:00",
+   "end": "2026-11-20T23:00"
+  },
+  {
+   "stage": "The Sequence",
+   "artist": "Astrix",
+   "start": "2026-11-20T22:00",
+   "end": "2026-11-20T23:00"
+  },
+  {
+   "stage": "The Void",
+   "artist": "Pegassi",
+   "start": "2026-11-20T22:00",
+   "end": "2026-11-20T23:00"
+  },
+  {
+   "stage": "The Vision",
+   "artist": "Mauro Picotto",
+   "start": "2026-11-20T22:00",
+   "end": "2026-11-20T23:00"
+  },
+  {
+   "stage": "Beatbox Art Car",
+   "artist": "Lujan",
+   "start": "2026-11-20T22:00",
+   "end": "2026-11-20T23:00"
+  },
+  {
+   "stage": "The Dream",
+   "artist": "Hannah Laing + Marie Vaunt",
+   "start": "2026-11-20T23:00",
+   "end": "2026-11-21T00:00"
+  },
+  {
+   "stage": "The Sequence",
+   "artist": "Neelix",
+   "start": "2026-11-20T23:00",
+   "end": "2026-11-21T00:00"
+  },
+  {
+   "stage": "The Void",
+   "artist": "Enrico Sangiuliano",
+   "start": "2026-11-20T23:00",
+   "end": "2026-11-21T00:00"
+  },
+  {
+   "stage": "The Vision",
+   "artist": "BT",
+   "start": "2026-11-20T23:00",
+   "end": "2026-11-21T00:00"
+  },
+  {
+   "stage": "The Dream",
+   "artist": "ARTBAT",
+   "start": "2026-11-21T00:00",
+   "end": "2026-11-21T01:00"
+  },
+  {
+   "stage": "The Sequence",
+   "artist": "Infected Mushroom",
+   "start": "2026-11-21T00:00",
+   "end": "2026-11-21T01:00"
+  },
+  {
+   "stage": "The Void",
+   "artist": "Reinier Zonneveld (Live)",
+   "start": "2026-11-21T00:00",
+   "end": "2026-11-21T01:00"
+  },
+  {
+   "stage": "The Vision",
+   "artist": "Marco V",
+   "start": "2026-11-21T00:00",
+   "end": "2026-11-21T01:00"
+  },
+  {
+   "stage": "The Dream",
+   "artist": "Das Pharaoh",
+   "start": "2026-11-21T16:00",
+   "end": "2026-11-21T17:00"
+  },
+  {
+   "stage": "The Sequence",
+   "artist": "Barakuda",
+   "start": "2026-11-21T16:00",
+   "end": "2026-11-21T17:00"
+  },
+  {
+   "stage": "The Void",
+   "artist": "Discovery Project: Hausman",
+   "start": "2026-11-21T16:00",
+   "end": "2026-11-21T17:00"
+  },
+  {
+   "stage": "The Vision",
+   "artist": "Sequence Six",
+   "start": "2026-11-21T16:00",
+   "end": "2026-11-21T17:00"
+  },
+  {
+   "stage": "The Dream",
+   "artist": "TH;EN",
+   "start": "2026-11-21T17:00",
+   "end": "2026-11-21T18:00"
+  },
+  {
+   "stage": "The Sequence",
+   "artist": "Perfect Stranger",
+   "start": "2026-11-21T17:00",
+   "end": "2026-11-21T18:00"
+  },
+  {
+   "stage": "The Void",
+   "artist": "Roman Messer",
+   "start": "2026-11-21T17:00",
+   "end": "2026-11-21T18:00"
+  },
+  {
+   "stage": "The Vision",
+   "artist": "Maria Healy",
+   "start": "2026-11-21T17:00",
+   "end": "2026-11-21T18:00"
+  },
+  {
+   "stage": "Beatbox Art Car",
+   "artist": "Bruce Wayne",
+   "start": "2026-11-21T17:00",
+   "end": "2026-11-21T18:00"
+  },
+  {
+   "stage": "The Dream",
+   "artist": "Nu Aspect",
+   "start": "2026-11-21T18:00",
+   "end": "2026-11-21T19:00"
+  },
+  {
+   "stage": "The Sequence",
+   "artist": "Rising Dust",
+   "start": "2026-11-21T18:00",
+   "end": "2026-11-21T19:00"
+  },
+  {
+   "stage": "The Void",
+   "artist": "Parallel Worlds",
+   "start": "2026-11-21T18:00",
+   "end": "2026-11-21T19:00"
+  },
+  {
+   "stage": "The Vision",
+   "artist": "Chris Metcalfe",
+   "start": "2026-11-21T18:00",
+   "end": "2026-11-21T19:00"
+  },
+  {
+   "stage": "Beatbox Art Car",
+   "artist": "Sony Jacob",
+   "start": "2026-11-21T18:00",
+   "end": "2026-11-21T19:00"
+  },
+  {
+   "stage": "The Dream",
+   "artist": "JOA",
+   "start": "2026-11-21T19:00",
+   "end": "2026-11-21T20:00"
+  },
+  {
+   "stage": "The Sequence",
+   "artist": "Sighter",
+   "start": "2026-11-21T19:00",
+   "end": "2026-11-21T20:00"
+  },
+  {
+   "stage": "The Void",
+   "artist": "Eddie Halliwell + Judge Jules",
+   "start": "2026-11-21T19:00",
+   "end": "2026-11-21T20:00"
+  },
+  {
+   "stage": "The Vision",
+   "artist": "Andy Moor",
+   "start": "2026-11-21T19:00",
+   "end": "2026-11-21T20:00"
+  },
+  {
+   "stage": "Beatbox Art Car",
+   "artist": "Rowland Giles",
+   "start": "2026-11-21T19:00",
+   "end": "2026-11-21T20:00"
+  },
+  {
+   "stage": "The Dream",
+   "artist": "Aaron Hibell (Live)",
+   "start": "2026-11-21T20:00",
+   "end": "2026-11-21T21:00"
+  },
+  {
+   "stage": "The Sequence",
+   "artist": "John 00 Fleming",
+   "start": "2026-11-21T20:00",
+   "end": "2026-11-21T21:00"
+  },
+  {
+   "stage": "The Void",
+   "artist": "David Forbes + John Askew",
+   "start": "2026-11-21T20:00",
+   "end": "2026-11-21T21:15"
+  },
+  {
+   "stage": "The Vision",
+   "artist": "Allen Watts + Talla 2XLC",
+   "start": "2026-11-21T20:00",
+   "end": "2026-11-21T21:00"
+  },
+  {
+   "stage": "Beatbox Art Car",
+   "artist": "J-Note",
+   "start": "2026-11-21T20:00",
+   "end": "2026-11-21T21:00"
+  },
+  {
+   "stage": "The Dream",
+   "artist": "ALPHA 9 + Ilan Bluestone",
+   "start": "2026-11-21T21:00",
+   "end": "2026-11-21T22:00"
+  },
+  {
+   "stage": "The Sequence",
+   "artist": "Giorgia Angiuli",
+   "start": "2026-11-21T21:00",
+   "end": "2026-11-21T22:00"
+  },
+  {
+   "stage": "The Vision",
+   "artist": "Darren Porter + Sean Tyas",
+   "start": "2026-11-21T21:00",
+   "end": "2026-11-21T22:00"
+  },
+  {
+   "stage": "Beatbox Art Car",
+   "artist": "Causeway b2b Excelsior",
+   "start": "2026-11-21T21:00",
+   "end": "2026-11-21T22:00"
+  },
+  {
+   "stage": "The Void",
+   "artist": "Bryan Kearney + John O'Callaghan pres Key4050",
+   "start": "2026-11-21T21:15",
+   "end": "2026-11-21T22:30"
+  },
+  {
+   "stage": "The Dream",
+   "artist": "Ferry Corsten + Marsh",
+   "start": "2026-11-21T22:00",
+   "end": "2026-11-21T23:00"
+  },
+  {
+   "stage": "The Sequence",
+   "artist": "Vini Vici",
+   "start": "2026-11-21T22:00",
+   "end": "2026-11-21T23:00"
+  },
+  {
+   "stage": "The Vision",
+   "artist": "Cold Blue",
+   "start": "2026-11-21T22:00",
+   "end": "2026-11-21T23:00"
+  },
+  {
+   "stage": "Beatbox Art Car",
+   "artist": "Switchmachine",
+   "start": "2026-11-21T22:00",
+   "end": "2026-11-21T23:00"
+  },
+  {
+   "stage": "The Void",
+   "artist": "Aly & Fila + Billy Gillies",
+   "start": "2026-11-21T22:30",
+   "end": "2026-11-21T23:45"
+  },
+  {
+   "stage": "The Dream",
+   "artist": "Above & Beyond (Anjunabeats Classics)",
+   "start": "2026-11-21T23:00",
+   "end": "2026-11-22T01:00"
+  },
+  {
+   "stage": "The Sequence",
+   "artist": "Ace Ventura",
+   "start": "2026-11-21T23:00",
+   "end": "2026-11-22T00:00"
+  },
+  {
+   "stage": "The Vision",
+   "artist": "4 Strings (Classics Set)",
+   "start": "2026-11-21T23:00",
+   "end": "2026-11-22T00:00"
+  },
+  {
+   "stage": "The Void",
+   "artist": "Paul van Dyk pres The Essence of Acid",
+   "start": "2026-11-21T23:45",
+   "end": "2026-11-22T01:00"
+  },
+  {
+   "stage": "The Sequence",
+   "artist": "Animato",
+   "start": "2026-11-22T00:00",
+   "end": "2026-11-22T01:00"
+  },
+  {
+   "stage": "The Vision",
+   "artist": "Solarstone",
+   "start": "2026-11-22T00:00",
+   "end": "2026-11-22T01:00"
+  }
+ ]
+}
