@@ -583,7 +583,9 @@ class SignLinkPushTest {
         val zeros = txs.first { it.zeros }
         // the three bytes of the reply would have left by 2 ms
         assertTrue(zeros.atNs >= 1_012 * ms, "zeros at ${zeros.atNs / ms} ms")
-        assertEquals(listOf("B"), told)
+        assertEquals("H:B", txs.last().text)
+        // the push is told to nobody: a sign that asked and may not have its answer is not known to be in its chooser display
+        assertEquals(emptyList(), told)
     }
 
     @Test
@@ -716,7 +718,8 @@ class SignLinkPushTest {
         assertTrue(zeros != null, "no push followed the reply that may be torn: ${wire()}")
         assertTrue(zeros!!.atNs - txs[1].goneAtNs >= 1_010 * ms, "zeros ${(zeros.atNs - txs[1].goneAtNs) / ms} ms behind the reply")
         assertEquals("H:$next", txs.last().text)
-        assertEquals(listOf(next), told)
+        // the push is told to nobody: a sign that asked and may not have its answer is not known to be in its chooser display
+        assertEquals(emptyList(), told)
     }
 
     @Test
@@ -748,7 +751,8 @@ class SignLinkPushTest {
         runUntil(2_000)
         // the reply went out and counts as sent; the change is pushed when the line is free
         assertEquals(listOf("tx[H:B]@60", "tx[00x72]@62", "tx[H:B]@132"), wire())
-        assertEquals(listOf("B"), told)
+        // the push is told to nobody: a sign that asked and may not have its answer is not known to be in its chooser display
+        assertEquals(emptyList(), told)
     }
 
     @Test
@@ -785,7 +789,8 @@ class SignLinkPushTest {
         runUntil(1_000)
         // the sign waits a second for its answer; the push that comes again, 250 ms behind the guard, is that answer
         assertEquals(listOf("tx[00x72]@0", "tx[00x72]@320", "tx[H:B]@390"), wire())
-        assertEquals(listOf("B"), told)
+        // and it is told to nobody: whether the sign took it as its answer, or gave its chooser display up first, the link cannot know
+        assertEquals(emptyList(), told)
     }
 
     @Test
@@ -1006,16 +1011,16 @@ class SignLinkPushTest {
         signShowsAnOrdinaryMessage()
         command(100, "B")
         command(500, "C") // a new change is a new push, once as well
-        runUntil(1_500)
+        runUntil(3_000)
         assertEquals(listOf("tx[M1]@0", "tx[00x72]@100", "tx[H:B]@170", "tx[00x72]@500", "tx[H:C]@570"), wire())
         assertEquals(emptyList(), told)
         assertEquals(2, line.count { it.contains("which is not known to be in its chooser display") })
-        assertEquals(SignLink.IDLE_PAUSE_MS * ms, sleeps.last()) // nothing waits its turn
+        assertEquals(SignLink.IDLE_PAUSE_MS * ms, sleeps.last()) // nothing waits its turn: the loop is back at its long pause
         // the sign asks at the end of its message and gets the selection: now it is in its chooser display
-        arrives(1_500, "~")
-        command(2_000, "D")
-        runUntil(2_500)
-        assertEquals(listOf("tx[H:C]@1500", "tx[00x72]@2000", "tx[H:D]@2070"), wire().drop(5))
+        arrives(3_000, "~")
+        command(3_500, "D")
+        runUntil(4_000)
+        assertEquals(listOf("tx[H:C]@3000", "tx[00x72]@3500", "tx[H:D]@3570"), wire().drop(5))
         assertEquals(listOf("D"), told)
     }
 

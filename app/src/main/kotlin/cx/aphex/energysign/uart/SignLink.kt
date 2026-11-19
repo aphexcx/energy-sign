@@ -275,7 +275,8 @@ class LineClock(private val baud: Int, startNs: Long) {
  *    done. It may not have the frame; it is owed again, and not before the sign has had the
  *    quiet it wants behind an answer it could not read ([Behind.TORN_FRAME]).
  *  ENDS IT, DONE: [frameWritten], and nothing else. It is called behind every write of a frame
- *    and ends the changes that were recorded before the frame was made, when the frame is the
+ *    that the sign listens for (an answer to its request; a pushed frame when the sign is
+ *    known to be in its chooser display, [signInChooser]) and ends the changes that were recorded before the frame was made, when the frame is the
  *    selection (a chooser message or, on leaving, the message that takes the sign out of its
  *    chooser display) and [writeAll] calls it proven: every byte taken, no piece that may have
  *    come after the line stood still, the first byte with the transmitter while the sign
@@ -293,7 +294,13 @@ class LineClock(private val baud: Int, startNs: Long) {
  *    reply counts as a message that was sent.
  *  - a poll report: pending. It is not the selection.
  *  - a reply to a request that crossed a push: there is none, the request is read away.
- *  - a pushed frame, whole and begun in time: DONE; the app is told, the screen has the text.
+ *  - a pushed frame, whole and begun in time, to a sign known to be in its chooser display:
+ *    DONE; the app is told, the screen has the text.
+ *  - a pushed frame to a sign NOT known to be in its chooser display (entering chooser mode;
+ *    after a request that was not answered; after the app started): pending, and nobody is
+ *    told. The sign listens for a push only in its chooser display, so nothing can be claimed
+ *    for it. It goes out once for a change, whole or not ([givenOnceFor]); the answer to the
+ *    sign's next request, whole and in time, is DONE and is what the screen is told.
  *  - a pushed frame torn, or with a piece that may have come late: pending, tried again.
  *  - a pushed frame too late to begin (not written), or begun too late (written): pending,
  *    tried again; the app is not told.
@@ -303,7 +310,7 @@ class LineClock(private val baud: Int, startNs: Long) {
  *  - a request in the chooser display read away as old (not a poll): pending, whatever was
  *    called done before; the push that follows is the answer the sign still waits for.
  *  - the attention alone (leaving chooser mode): pending. It carries nothing and proves
- *    nothing. It is not raised a second time for the same change ([aloneGivenFor]: runs of
+ *    nothing. It is not raised a second time for the same change ([givenOnceFor]: runs of
  *    zeros without end at a sign that may be showing a text); the sign's next request is
  *    answered with a message, and that answer, whole and in time, is DONE.
  *  - nothing on the line (the frame could not be made, not one zero was taken): pending.
@@ -333,7 +340,7 @@ class SignLink(
     private val answer: (buffer: ByteArray, count: Int) -> Unit,
     /** The chooser message as it is now, as one frame; null outside chooser mode. Must not change anything. */
     private val chooserFrame: () -> String? = { null },
-    /** The frame [chooserFrame] last gave is on the wire, whole and in time. Not called for a push that failed, or had no frame. */
+    /** The frame [chooserFrame] last gave is on the wire, whole and in time, at a sign that listens for it. Not called for a push that failed, had no frame, or went to a sign not known to be in its chooser display. */
     private val pushed: () -> Unit = {},
     /** Whether and how the chooser is pushed. Asked when a change is recorded and in every turn in which a push waits. Off unless this says otherwise. */
     private val attention: () -> Attention = { Attention.OFF },
@@ -357,8 +364,12 @@ class SignLink(
      */
     private var settled = 0L
 
-    /** The changes up to this count have had the attention alone: it is not raised again for them. */
-    private var aloneGivenFor = -1L
+    /**
+     * The changes up to this count have been given to the sign in a way that proves nothing:
+     * the attention alone, or a frame to a sign that is not known to listen for one
+     * ([signInChooser]). They stay pending, and are not given a second time.
+     */
+    private var givenOnceFor = -1L
 
     /** The changes up to this count are in the answer that is being made: counted before it is made. */
     private var answerCarries = 0L
@@ -386,6 +397,17 @@ class SignLink(
 
     /** The sign may be in its chooser display, where it listens 60 ms for an answer. Until the link knows better, it may. */
     private var chooserDisplay = true
+
+    /**
+     * The sign IS KNOWN to be in its chooser display, the only place where it listens for a
+     * push (the contract: "while it shows a chooser message"). The other question to
+     * [chooserDisplay], and answered the other way in every doubt: it is known when the last
+     * thing the sign sent was a poll, or when its last request was answered with a chooser
+     * message that the line calls proven. Whatever else it sends (a request, the name of an
+     * error) ends that until it is answered so; a message of another kind ends it. Not known
+     * when the link starts.
+     */
+    private var signInChooser = false
 
     /** The first byte of the answer to the request in hand must be with the transmitter by this. */
     private var answerByNs = takenUpToNs
@@ -462,7 +484,7 @@ class SignLink(
     /** A push has something to do: a change is pending, and the attention alone has not been given for it. */
     private fun pushWaiting(): Boolean {
         val count = wanted.get()
-        return count != settled && count != aloneGivenFor
+        return count != settled && count != givenOnceFor
     }
 
     /** Gets the loop out of its sleep: there are events to run. From any thread. */
@@ -542,6 +564,8 @@ class SignLink(
         // A message of another kind ends the sign's chooser display; a chooser message or a report keeps it there
         if (whole) chooserDisplay = reply != Reply.MESSAGE
         frameWritten(if (reply == Reply.REPORT) null else answerCarries)
+        // Where the sign is behind its request: in its chooser display when it has a chooser message for it
+        if (reply != Reply.REPORT) signInChooser = reply == Reply.CHOOSER && provenLast
         return whole
     }
 
@@ -560,6 +584,9 @@ class SignLink(
         }
         lastHeardNs = readNs
         val last = buffer[count - 1]
+        // What the sign sends says where it is: only the chooser display polls. A sign that asks,
+        // or prints an error, is in its chooser display again only when it has been answered so
+        signInChooser = last == POLL
         if (pushedFrameInVoid && cameAfterNs - voidBeforeNs < 0 && last != POLL) {
             // SETS: the sign was sending while a pushed frame that was called done was on the
             // line, or just before it. It may not have that frame (it does not hear while it
@@ -796,12 +823,15 @@ class SignLink(
         val whole = frame == null || writeAll(frame, Writing.PUSHED_FRAME, callNs + PUSH_FIRST_BYTE_MS * NS_PER_MS)
         // Rule 3 lasts until the frame has left the line; with no frame, until the guard is over
         voidBeforeNs = clock.freeAtNs
-        if (frame == null) {
-            // Leaving: the attention alone. It proves nothing (the sign may not have seen it), so
-            // the change stays pending; but it is not raised a second time for the same change
-            aloneGivenFor = carries
-        } else {
+        // A frame is one the sign can take only where it listens for a push: in its chooser display
+        val heard = frame != null && signInChooser
+        if (heard) {
             frameWritten(carries)
+        } else {
+            // The attention alone (leaving), or a frame to a sign that is not known to listen for
+            // one (entering): it proves nothing, so the change stays pending and nobody is told;
+            // but it is not given a second time for the same change. The sign's next request ends it
+            givenOnceFor = carries
         }
         if (!whole) {
             val how = if (lateStartLast) "begun within $PUSH_FIRST_BYTE_MS ms of the attention" else "taken in one piece"
@@ -811,7 +841,7 @@ class SignLink(
             return pushFailed(if (tornLast) Behind.TORN_FRAME else Behind.ATTENTION)
         }
         // A pushed frame that is called done: what the sign sends into it opens the change again ([readRequest])
-        pushedFrameInVoid = frame != null
+        pushedFrameInVoid = heard
         // The sign may be in its chooser display with this message now, as with one it asked for
         if (frame != null) chooserDisplay = true
         clock.hold(Behind.ATTENTION)
@@ -820,7 +850,11 @@ class SignLink(
         lastHeardNs = doneNs
         timing.push(wantedNs, callNs, raisedNs, guardEndNs, doneNs, frame?.size ?: 0)
         // On the line first, then the log and the screen
-        if (text != null) {
+        if (text == null) {
+            log("Pushed attention alone to $name")
+        } else if (!heard) {
+            log("Pushed >$text< to $name, which is not known to be in its chooser display: told to nobody")
+        } else {
             log("Pushed >$text< to $name")
             try {
                 pushed()
@@ -828,8 +862,6 @@ class SignLink(
                 // The frame is out: what the app makes of it must not keep the link from the wire
                 complain("push", e)
             }
-        } else {
-            log("Pushed attention alone to $name")
         }
     }
 
