@@ -191,7 +191,7 @@ class SignLink(
     private val chooserFrame: () -> String? = { null },
     /** The frame [chooserFrame] last gave is on the wire in full. Not called for a push that failed, or had no frame. */
     private val pushed: () -> Unit = {},
-    /** Whether and how the chooser is pushed. Read when a push is about to start. Off unless this says otherwise. */
+    /** Whether and how the chooser is pushed. Asked in every turn in which a push is wanted. Off unless this says otherwise. */
     private val attention: () -> Attention = { Attention.OFF },
     private val timing: UartTimingLog,
     private val nanoTime: () -> Long = System::nanoTime,
@@ -248,7 +248,9 @@ class SignLink(
     /** Asks for the chooser to be pushed to the sign. From any thread; returns at once. */
     fun requestPush() {
         pushWanted.set(true)
-        wake()
+        // The link thread asking for itself (a change it has just made) is awake: a wake-up
+        // would only cut its next sleep short
+        if (Thread.currentThread() !== thread) wake()
     }
 
     /** Gets the loop out of its sleep: there are events to run. From any thread. */
@@ -288,8 +290,8 @@ class SignLink(
             readFailures = 0
             if (stopped) return
             doing = "push"
-            val pushing = pushDue() && push()
-            if (!busy && !pushing) pause()
+            val mode = duePush()
+            if (mode != null) push(mode) else if (!busy) pause()
         } catch (e: Exception) {
             // Whatever it was (the port, the peripheral service, a change that threw): this is the
             // only thread the sign can reach, so it waits a little and goes on
@@ -440,24 +442,35 @@ class SignLink(
         return done
     }
 
-    /** A push is wanted, its distance from the last one is kept (rule 5), and the line is free of what was sent before. */
-    private fun pushDue(): Boolean {
-        if (!pushWanted.get()) return false
+    /**
+     * How to get the sign's attention when a push is to start NOW: one is wanted, its distance
+     * from the last one is kept (rule 5), and the line is free of what was sent before. Null
+     * when none is to start.
+     *
+     * With the switch off a wanted push is dropped here, in the turn that asked for it, before
+     * anything else is looked at: the change is not pushed now and not later, and the loop goes
+     * on exactly as it does without pushes (the same pauses, the same reads).
+     */
+    private fun duePush(): Attention? {
+        if (!pushWanted.get()) return null
+        val mode = attention()
+        if (mode == Attention.OFF) {
+            pushWanted.set(false)
+            return null
+        }
         val now = nanoTime()
-        return now - pushNotBeforeNs >= 0 && now - clock.freeAtNs >= 0
+        return if (now - pushNotBeforeNs >= 0 && now - clock.freeAtNs >= 0) mode else null
     }
 
     /**
-     * One push: the attention, the guard, the chooser frame. False when the switch is off (the
-     * line was not touched and no time passed). This thread sleeps through the attention and the
-     * guard: the sign is not listening for an answer then, so there is nobody to keep waiting.
+     * One push: the attention ([mode] says how), the guard, the chooser frame. This thread
+     * sleeps through the attention and the guard: the sign is not listening for an answer then,
+     * so there is nobody to keep waiting.
      */
-    private fun push(): Boolean {
-        val mode = attention()
+    private fun push(mode: Attention) {
         // A change from here on is the next push. None can come before the frame is made:
         // changes are made by this thread, in events().
         pushWanted.set(false)
-        if (mode == Attention.OFF) return false
         val wantedNs = nanoTime()
         val lineWasNs = clock.freeAtNs
         val text = try {
@@ -475,7 +488,7 @@ class SignLink(
         val raisedNs = nanoTime()
         clock.quiet(ATTN_GUARD_MS)
         sleepUntil(clock.freeAtNs)
-        if (stopped) return true
+        if (stopped) return
         val guardEndNs = nanoTime()
         val whole = frame == null || writeAll(frame, "message", null) == frame.size
         // Rule 3 lasts until the frame has left the line; with no frame, until the guard is over
@@ -498,18 +511,16 @@ class SignLink(
         } else {
             log("Pushed attention alone to $name")
         }
-        return true
     }
 
     /**
      * Rule 4: the push is still wanted. It waits [ERROR_PAUSE_MS], and when this try put
      * anything on the line (it was free at [lineWasNs] before), the distance of rule 5 from that.
      */
-    private fun pushFailed(lineWasNs: Long): Boolean {
+    private fun pushFailed(lineWasNs: Long) {
         pushWanted.set(true)
         holdPushUntil(nanoTime() + ERROR_PAUSE_MS * NS_PER_MS)
         if (clock.freeAtNs != lineWasNs) holdPushUntil(clock.freeAtNs + PUSH_SPACING_MS * NS_PER_MS)
-        return true
     }
 
     private fun holdPushUntil(notBeforeNs: Long) {

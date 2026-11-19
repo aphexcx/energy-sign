@@ -4,6 +4,7 @@ import cx.aphex.energysign.message.Reply
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 import java.io.IOException
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.LockSupport
@@ -878,14 +879,39 @@ class SignLinkPushTest {
     }
 
     @Test
-    fun `the switch is read when the push starts, not when it was asked for`() {
+    fun `switched off while a push waits its turn, the push is dropped, and switching on again does not bring it back`() {
         chooser = "X".repeat(56) // a reply of 40 ms keeps the push waiting
         arrives(0, "~")
-        mode = Attention.OFF
         command(1, "Y")
-        posted.getOrPut(20 * ms) { mutableListOf() } += { mode = Attention.ZEROS }
+        posted.getOrPut(20 * ms) { mutableListOf() } += { mode = Attention.OFF }
+        posted.getOrPut(30 * ms) { mutableListOf() } += { mode = Attention.AUTO }
         runUntil(500)
+        assertEquals(1, wire().size) // the reply, and nothing else
+        assertEquals(0, framesMade)
+    }
+
+    @Test
+    fun `switched from the zeros to the break while a push waits its turn, the push is the break`() {
+        chooser = "X".repeat(56)
+        arrives(0, "~")
+        command(1, "Y")
+        posted.getOrPut(20 * ms) { mutableListOf() } += { mode = Attention.BREAK }
+        runUntil(500)
+        assertEquals(40, lows.single() / ms)
         assertEquals("H:Y", txs.last().text)
+    }
+
+    @Test
+    fun `with pushes off a change while a reply is still leaving moves no read and shortens no pause`() {
+        mode = Attention.OFF
+        chooser = "X".repeat(56) // 40 ms on the line
+        arrives(0, "~")
+        command(1, "Y")
+        runUntil(200)
+        assertEquals(1, wire().size)
+        // the loop of master: after a request, a pause of exactly two ms after every empty read
+        assertTrue(sleeps.all { it == SignLink.ACTIVE_PAUSE_MS * ms }, sleeps.distinct().toString())
+        assertEquals(100, sleeps.size)
     }
 
     @Test
@@ -1030,5 +1056,41 @@ class SignLinkPushTest {
         sleepy.stop()
         thread.join(2_000)
         assertFalse(thread.isAlive)
+    }
+
+    @Test
+    fun `a push asked for by the link thread itself wakes nobody, the pause that follows is a whole one`() {
+        val pauses = CopyOnWriteArrayList<Long>()
+        val quiet = object : SignWire {
+            override fun read(buffer: ByteArray, length: Int): Int = 0
+            override fun write(buffer: ByteArray, length: Int): Int = length
+            override fun sendBreak(millis: Int) {}
+            override fun close() {}
+        }
+        var turns = 0
+        lateinit var self: SignLink
+        self = SignLink(
+            wire = quiet, baud = baud, name = "UART",
+            // as MessageManager does it: on the link thread, inside a change the link is running
+            events = { if (++turns == 3) self.requestPush() },
+            answer = { _, _ -> },
+            attention = { Attention.OFF },
+            timing = UartTimingLog(isEnabled = { false }, emit = {}),
+            sleepNanos = { nanos ->
+                val from = System.nanoTime()
+                LockSupport.parkNanos(nanos)
+                pauses += System.nanoTime() - from
+            },
+        )
+        val thread = Thread(self, "sign-link-test").apply { isDaemon = true }
+        thread.start()
+        Thread.sleep(200)
+        self.stop()
+        thread.join(2_000)
+        assertFalse(thread.isAlive)
+        // every pause but the last (which the stop ended) lasted its ten ms: none was cut short
+        val whole = pauses.dropLast(1)
+        assertTrue(whole.size >= 5, "only ${whole.size} pauses")
+        assertTrue(whole.all { it >= 8 * ms }, whole.map { it / 1000 }.toString())
     }
 }
