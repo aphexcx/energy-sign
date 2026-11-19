@@ -78,6 +78,27 @@ class SignLink(
     @Volatile
     private var stopped = false
     private val stopRequested = { stopped }
+    private var writersReady = false // Owned by the link thread.
+    @Volatile private var preparationRequested = false
+
+    internal fun prepareAgain() {
+        preparationRequested = true
+        wake()
+    }
+
+    private fun prepareWriters() {
+        preparationRequested = false
+        if (writersReady || stopped) return
+        val began = nanoTime()
+        fun expired() = nanoTime() - began >= PREPARATION_MS * NS_PER_MS
+        try {
+            prepareAnswers { stopped || expired() }
+            writersReady = !stopped && !expired()
+            if (!writersReady && !stopped) warn("JSON writer preparation exceeded its deadline, sign link continues")
+        } catch (failure: Throwable) {
+            runCatching { warn("JSON writer preparation failed (${failure.javaClass.name}), sign link continues") }
+        }
+    }
 
     @Volatile
     private var thread: Thread? = null
@@ -122,12 +143,7 @@ class SignLink(
         try {
             // Pay the cold JSON cost before taking a request. Keep the previous read time:
             // a request buffered during preparation may already be too old to answer.
-            try {
-                if (!stopped) prepareAnswers(stopRequested)
-            } catch (e: Exception) {
-                // An adapter can still be built on demand. Keep the port serving requests.
-                complain("preparing answers", e)
-            }
+            prepareWriters()
             while (!stopped && !Thread.currentThread().isInterrupted) {
                 step()
             }
@@ -145,6 +161,7 @@ class SignLink(
     fun step() {
         var doing = "a change"
         try {
+            if (preparationRequested) prepareWriters()
             events(stopRequested)
             if (stopped) return
             doing = "read"
@@ -339,6 +356,7 @@ class SignLink(
 
         private val POLL: Byte = ChooserProtocol.POLL_REQUEST.code.toByte()
         private val NEXT: Byte = ChooserProtocol.NEXT_REQUEST.code.toByte()
+        private const val PREPARATION_MS = 2_000L
         private const val NS_PER_MS: Long = 1_000_000L
         private const val NS_PER_S: Long = 1_000_000_000L
     }

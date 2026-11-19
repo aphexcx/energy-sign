@@ -1,5 +1,6 @@
 package cx.aphex.energysign.bluetooth
 
+import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothManager
 import android.content.Context
@@ -14,7 +15,6 @@ import cx.aphex.energysign.message.Message
 import cx.aphex.energysign.message.MessageManager
 import cx.aphex.energysign.message.MessageRepository
 import cx.aphex.energysign.message.OwnerQueue
-import io.reactivex.rxjava3.plugins.RxJavaPlugins
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
@@ -29,14 +29,15 @@ import org.objenesis.ObjenesisStd
 import java.io.File
 import java.nio.file.Files
 import java.util.UUID
-import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executor
+import java.util.concurrent.FutureTask
+import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
  * The Bluetooth entry from end to end: a write to the UART characteristic of the REAL
- * EnergySignBluetoothGattServer, handed on the way MainViewModel wires it ([deliverEachWrite] to
+ * EnergySignBluetoothGattServer, handed on the way MainViewModel wires it ([takeWrite] to
  * MessageManager.processNewBytes), into the REAL MessageManager and OwnerQueue.
  *
  * What it is here for: a command that throws must leave this path alive for the next command,
@@ -60,9 +61,6 @@ class BluetoothWriteEntryTest {
     /** What the link would log as "A change to the messages failed". */
     private val failedChanges = mutableListOf<Throwable>()
 
-    /** What RxJava would hand to the thread's handler of uncaught exceptions: on Android, the end of the app. */
-    private val unhandled = CopyOnWriteArrayList<Throwable>()
-
     private val uartTx = object : BluetoothGattCharacteristic(NordicUartServiceProfile.NORDIC_UART_TX_UUID, 0, 0) {
         override fun getUuid(): UUID = NordicUartServiceProfile.NORDIC_UART_TX_UUID
     }
@@ -82,7 +80,6 @@ class BluetoothWriteEntryTest {
             })
         }
         manager = MessageManager(context, repo, owner)
-        RxJavaPlugins.setErrorHandler { unhandled += it }
 
         // A server as the app builds it; its collaborators are not used on the path of a write.
         val objenesis = ObjenesisStd()
@@ -90,15 +87,12 @@ class BluetoothWriteEntryTest {
             ContextWrapper(null),
             objenesis.newInstance(BluetoothManager::class.java),
             objenesis.newInstance(MainViewModel::class.java),
+            cx.aphex.energysign.TestStartWorker(), manager::takeWrite,
         )
-        // The call MainViewModel makes. That line itself is run by no test: the view model
-        // cannot be built on the JVM.
-        server.receivedBytes.deliverEachWrite(manager::processNewBytes)
     }
 
     @AfterAll
     fun done() {
-        RxJavaPlugins.reset()
         stopKoin()
         ArchTaskExecutor.getInstance().setDelegate(null)
         dir.deleteRecursively()
@@ -114,12 +108,11 @@ class BluetoothWriteEntryTest {
         repo.marqueeMessages.addAll((1..5).map { Message.Marquee.User("MESSAGE $it") })
         repo.oneTimeMessages.clear()
         failedChanges.clear()
-        unhandled.clear()
     }
 
     /** A write to the UART characteristic, as the Bluetooth stack delivers it. */
     private fun phoneWrites(command: String) {
-        server.onCharacteristicWriteRequest(null, 1, uartTx, false, true, 0, command.toByteArray(Charsets.UTF_8))
+        server.onCharacteristicWriteRequest(null, 1, uartTx, false, false, 0, command.toByteArray(Charsets.UTF_8))
     }
 
     /** The owner thread's turn. */
@@ -128,6 +121,41 @@ class BluetoothWriteEntryTest {
     }
 
     private fun stored(): List<String> = repo.marqueeMessages.map { it.str }
+
+    @Test
+    fun malformedWritesNeverReachTheMessageOwner() {
+        val before = stored()
+        val delete = "!delete".toByteArray()
+        assertEquals(BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED, server.uartWriteStatus(delete, preparedWrite = true))
+        assertEquals(BluetoothGatt.GATT_INVALID_OFFSET, server.uartWriteStatus(delete, offset = 1))
+        ownerRuns()
+        assertEquals(before, stored())
+    }
+
+    @Test
+    fun `a requested success acknowledges a command the owner has already executed`() {
+        var txProperties = 0
+        Mockito.mockConstruction(BluetoothGattCharacteristic::class.java) { _, call ->
+            if (call.arguments()[0] == NordicUartServiceProfile.NORDIC_UART_TX_UUID) {
+                txProperties = call.arguments()[1] as Int
+            }
+        }.use { NordicUartServiceProfile.createNordicUartService() }
+        val required = BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE
+        assertEquals(required, txProperties and required)
+        // BeforeEach drained the queue on this thread, so the owner can answer immediately.
+        assertEquals(BluetoothGatt.GATT_SUCCESS, server.uartWriteStatus("!delete".toByteArray()))
+        assertEquals(listOf("MESSAGE 2", "MESSAGE 3", "MESSAGE 4", "MESSAGE 5"), stored())
+    }
+
+    @Test
+    fun `a requested acknowledgement is refused if the owner never takes the command`() {
+        val before = stored()
+        val result = FutureTask { server.uartWriteStatus("!delete".toByteArray(), responseNeeded = true) }
+        Thread(result).start()
+        assertEquals(BluetoothGatt.GATT_FAILURE, result.get(10, TimeUnit.SECONDS))
+        ownerRuns()
+        assertEquals(before, stored())
+    }
 
     @Test
     fun `a write to the characteristic reaches the app`() {
@@ -161,7 +189,6 @@ class BluetoothWriteEntryTest {
         ownerRuns()
 
         assertEquals(listOf("LATE 2", "LATE 3"), stored())
-        assertEquals(emptyList(), unhandled.toList())
     }
 
     @Test
@@ -174,14 +201,13 @@ class BluetoothWriteEntryTest {
             emoji.`when`<List<String>> { EmojiParser.extractEmojis(anyString()) }
                 .thenThrow(IllegalStateException("the emoji table could not be read"))
 
-            phoneWrites("!🅰️\n🆑🕰DREAM\n🆑STATE\n👾💥")
+            val bad = "!🅰️\n🆑🕰DREAM\n🆑STATE\n👾💥".toByteArray()
+            assertEquals(BluetoothGatt.GATT_FAILURE, server.uartWriteStatus(bad))
 
             emoji.verify({ EmojiParser.extractEmojis(anyString()) }, Mockito.atLeastOnce())
         }
         ownerRuns()
 
-        assertEquals(emptyList(), unhandled.toList(), "nothing may reach the thread's handler of uncaught exceptions")
-        assertTrue(server.receivedBytes.hasObservers(), "the app must still be listening for writes")
         assertEquals(emptyList(), failedChanges.toList(), "the command never reached the owner")
 
         phoneWrites("!next")
