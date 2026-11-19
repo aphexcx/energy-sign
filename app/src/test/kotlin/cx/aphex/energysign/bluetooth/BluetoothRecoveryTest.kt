@@ -54,7 +54,7 @@ class BluetoothRecoveryTest {
         listen { received.add(String(it)) }
     }) {
         startup.start(
-            prepareMessages = {}, launchWarmUp = {}, warmUp = {},
+            prepareMessages = {},
             startBluetooth = BluetoothStartup(startup, { session }, { subscribe() }, { it.start() }, { it.stop() })::start,
             startDnsSd = {}, startLink = { uartStarts++ },
         )
@@ -92,7 +92,7 @@ class BluetoothRecoveryTest {
     fun `a refused subscription leaves no writable service and a late write gets failure`() {
         var opened = false
         startup.start(
-            prepareMessages = {}, launchWarmUp = {}, warmUp = {},
+            prepareMessages = {},
             startBluetooth = BluetoothStartup(startup, { gatt }, { throw IllegalStateException("subscription refused") },
                 { opened = true }, {})::start, startDnsSd = {}, startLink = { uartStarts++ },
         )

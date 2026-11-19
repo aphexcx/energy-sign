@@ -4,16 +4,11 @@ package cx.aphex.energysign
 internal class SignStartup(private val warn: (String) -> Unit) {
     fun start(
         prepareMessages: () -> Unit,
-        launchWarmUp: (Runnable) -> Unit,
-        warmUp: () -> Unit,
         startBluetooth: () -> Unit,
         startDnsSd: () -> Unit,
         startLink: () -> Unit,
     ) {
         prepareMessages()
-        optional("JSON warm-up thread") {
-            launchWarmUp(Runnable { optional("JSON warm-up", warmUp) })
-        }
         startBluetooth()
         optional("DNS-SD startup", startDnsSd)
         startLink()

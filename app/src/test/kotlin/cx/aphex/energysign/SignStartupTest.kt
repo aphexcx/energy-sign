@@ -10,14 +10,13 @@ import kotlin.test.assertSame
 
 class SignStartupTest {
     private val order = listOf(
-        "messages", "JSON warm-up thread", "Bluetooth construction", "Bluetooth writes",
+        "messages", "Bluetooth construction", "Bluetooth writes",
         "Bluetooth start", "DNS-SD construction", "DNS-SD start", "UART",
     )
 
     private class Run(val failAt: String? = null, val failure: Throwable = IllegalStateException()) {
         val calls = mutableListOf<String>()
         val warnings = mutableListOf<String>()
-        lateinit var background: Runnable
 
         fun step(name: String) {
             calls += name
@@ -30,8 +29,6 @@ class SignStartupTest {
                 { step("Bluetooth writes") }, { step("Bluetooth start") }, {})
             startup.start(
                 prepareMessages = { step("messages") },
-                launchWarmUp = { step("JSON warm-up thread"); background = it },
-                warmUp = { step("JSON warm-up") },
                 startBluetooth = bluetooth::start,
                 startDnsSd = { step("DNS-SD construction"); step("DNS-SD start") },
                 startLink = { step("UART") },
@@ -40,31 +37,27 @@ class SignStartupTest {
     }
 
     @Test
-    fun `healthy startup keeps its order, with JSON work on the launched thread`() {
+    fun `healthy startup keeps its order`() {
         val run = Run()
         run.start()
         assertEquals(order, run.calls)
-        run.background.run()
-        assertEquals(order + "JSON warm-up", run.calls)
         assertEquals(emptyList(), run.warnings)
     }
 
     @TestFactory
     fun `an optional failure leaves the link and independent services running`() =
-        (order.drop(1).dropLast(1) + "JSON warm-up").flatMap { step ->
+        order.drop(1).dropLast(1).flatMap { step ->
             listOf(IllegalStateException("private detail"), LinkageError("private detail")).map { failure ->
                 dynamicTest("$step throws ${failure.javaClass.simpleName}") {
                     val run = Run(step, failure)
                     run.start()
-                    if (step == "JSON warm-up") run.background.run()
                     val skipped = when (step) {
                         "Bluetooth construction" -> listOf("Bluetooth start", "Bluetooth writes")
                         "Bluetooth writes" -> listOf("Bluetooth start")
                         "DNS-SD construction" -> listOf("DNS-SD start")
                         else -> emptyList()
                     }
-                    val expected = if (step == "JSON warm-up") order + step else order
-                    assertEquals(expected - skipped.toSet(), run.calls)
+                    assertEquals(order - skipped.toSet(), run.calls)
                     val warning = run.warnings.single()
                     assertContains(warning, step.substringBefore(" "))
                     assertContains(warning, failure.javaClass.simpleName)

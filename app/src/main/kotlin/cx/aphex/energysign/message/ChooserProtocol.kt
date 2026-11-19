@@ -171,8 +171,8 @@ class SignResponder(
         /**
          * Gson builds the writer for a class by reflection the first time it writes one. On the
          * Pico that was 140 ms inside the first reply after the app started and 76 ms inside
-         * the first icon. This does it for every message class ahead of time, off the thread
-         * that answers the sign. Returns how many classes it prepared.
+         * the first icon. The link does this once before its first read, so an answer never
+         * races a background warm-up. Returns how many classes it prepared.
          */
         fun warmUp(): Int {
             var prepared = 0

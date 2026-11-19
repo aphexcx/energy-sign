@@ -59,14 +59,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
                 owner.neverWaitsOn(Looper.getMainLooper().thread)
                 checkNotNull(messageManager)
             },
-            launchWarmUp = { work ->
-                Thread(work, "sign-json-warmup").apply {
-                    isDaemon = true
-                    priority = Thread.MIN_PRIORITY
-                    start()
-                }
-            },
-            warmUp = { SignResponder.warmUp() },
             startBluetooth = bluetooth::start,
             startDnsSd = { DnsSdAnnouncer(application.applicationContext).start() },
             startLink = energySignUartManager::start,
