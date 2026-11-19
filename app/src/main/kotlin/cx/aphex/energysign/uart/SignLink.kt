@@ -103,9 +103,13 @@ enum class Behind(val holdMs: Int) {
  *    threw: the same. The sign gives a frame that came unasked 100 ms a byte and then wants
  *    110 ms of quiet; but when a request of the sign crossed the push, the frame is its answer
  *    and it waits a second. 1010 ms likewise.
- *  - A pushed frame whole, the attention alone, or an attention whose frame was not begun: the
- *    sign reads the frame, or listens 150 ms and asks 10 ms later; it needs 110 ms of quiet to
- *    get over a frame it could not read. 250 ms behind it ([Behind.ATTENTION]).
+ *  - A pushed frame that was begun too late after its attention and written to its end: the
+ *    sign may have asked into it and have only what came behind its own request, and then it
+ *    wants the line quiet for a second and ten ms. 1010 ms likewise.
+ *  - A pushed frame whole, the attention alone, or an attention whose frame was not begun (not
+ *    taken, or too late to begin): the sign reads the frame, or listens 150 ms and asks 10 ms
+ *    later; it needs 110 ms of quiet to get over a frame it could not read. 250 ms behind it
+ *    ([Behind.ATTENTION]).
  *  - An attention in part, with a hole in it, or whose call threw: the sign saw it, listens
  *    150 ms and asks; or it did not see it. 250 ms behind what is or may be out.
  *  - Nothing on the line (the frame could not be made, not one zero was taken): nothing. A
@@ -197,7 +201,7 @@ class LineClock(private val baud: Int, startNs: Long) {
  *
  * THE PUSH (chooser contract VERSION 3.1; off unless [attention] says otherwise). The app knows
  * the moment the chooser changes, so the sign need not ask while a text moves. [requestPush]
- * asks for a push; only a flag is kept, so any number of changes are one push of the newest
+ * asks for a push; only a count is kept, so any number of changes are one push of the newest
  * state. A push gets the sign's attention (a run of zeros [ATTN_BREAK_MS] long: the sign sees
  * the line LOW between two frames), stays silent for [ATTN_GUARD_MS], and then writes
  * [chooserFrame]: the chooser message, or nothing at all when the app is not in chooser mode
@@ -210,9 +214,10 @@ class LineClock(private val baud: Int, startNs: Long) {
  * [readRequest], [push]):
  *  1. Every turn runs the waiting changes, then reads the wire, before anything else. A request
  *     found there is answered with one frame.
- *  2. If that frame was a full message, a push that was wanted is dropped: the sign has just
- *     been sent, at its own asking, the state the push would carry. (The attention would hit a
- *     sign that is waiting for its answer.) A poll report is not that state: the push stays.
+ *  2. If that frame was a full message and the sign has it (see WHEN A CHANGE IS DONE), no push
+ *     follows: the sign has just been sent, at its own asking, the state the push would carry.
+ *     (The attention would hit a sign that is waiting for its answer.) A poll report is not
+ *     that state: the push stays.
  *  3. A push starts when the line's state lets it ([LineClock.pushAtNs]: the line is free, and
  *     the sign has got over whatever the app last put on it); until then the loop goes on
  *     reading and answering. From the read of the turn that starts it until the push is over
@@ -221,11 +226,15 @@ class LineClock(private val baud: Int, startNs: Long) {
  *     With a frame, that frame is what the sign reads behind its request; with none, the sign
  *     gets nothing and asks again. Either way a second frame would be one too many. Those bytes
  *     are read away and none is answered, whether they came while the frame was being made,
- *     into the attention, into the guard, or while the frame was leaving.
- *  4. A push that failed (the attention or the frame was not taken in full) is still wanted and
- *     is tried again. Rule 3 holds for whatever it did put on the line, or may have (a break
- *     call that threw): a request sent into that is void, a request that came after it is
- *     answered, and if that answer is a full message it is the push (rule 2).
+ *     into the attention, into the guard, or while the frame was leaving. Reading a request
+ *     away ends no pending change, ever. It can only open one again: when the push it came
+ *     into had been called done, that frame is owed once more (the sign does not hear while
+ *     it sends, and a sign that did not see the attention asks because bytes went by).
+ *  4. A push that failed (the attention or the frame was not taken in full, or the frame was
+ *     not begun in time) leaves the change pending and is tried again. Rule 3 holds for
+ *     whatever it did put on the line, or may have (a break call that threw): a request sent
+ *     into that is void, a request that came after it is answered, and if that answer is a
+ *     full message that the sign has, it is the push (rule 2).
  *  5. From the end of what one push put on the line to the start of the next there are
  *     [PUSH_SPACING_MS], after a push that failed too, and [TORN_FRAME_MS] behind a frame of
  *     which the sign has the start and not the end ([Behind]). However fast the changes come,
@@ -239,13 +248,61 @@ class LineClock(private val baud: Int, startNs: Long) {
  *    every piece by the return of its write against the EARLIEST the pieces before it can have
  *    left (counted from the start of their offers). When a piece may have been handed over
  *    after the line stood still, the push is given up and tried again: it takes nothing.
- *  - A pushed frame that begins late (the link was kept from the wire inside the guard) is not
- *    judged at all: the sign has asked by then, and the frame is what it reads behind its
- *    request (rule 3 reads that request away).
- *  - An ANSWER is judged as master judges it, by the start of each offer ([writeAll]). To call
- *    an answer failed because a piece may have been late would hand its message back, and the
- *    sign may show it twice; to call it sent may lose it. Without an acknowledgement from the
- *    sign neither is right, and the push does not move that line.
+ *  - A pushed frame must BEGIN while the sign listens for it: [PUSH_FIRST_BYTE_MS] from the
+ *    start of the attention, by the clock before the first offer and again when the write that
+ *    took the first byte has returned. The sign listens 150 ms and then asks; a frame that
+ *    begins about then runs into that request, and the sign has neither. Too late before the
+ *    first offer, the frame is not written. Found too late only when the write has returned,
+ *    it is written to its end (half a frame is worse) and is not the push.
+ *  - An ANSWER, as a MESSAGE, is judged as master judges it, by the start of each offer
+ *    ([writeAll]). To call an answer failed because a piece may have been late would hand its
+ *    message back, and the sign may show it twice; to call it sent may lose it. Without an
+ *    acknowledgement from the sign neither is right, and the push does not move that line.
+ *    Whether the PENDING CHANGE is done with that answer is another question with another
+ *    answer: sending the selection again costs nothing, so there every doubt counts (below).
+ *
+ * WHEN A CHANGE IS DONE. "The sign is behind" is two counts: [wanted], the changes recorded,
+ * and [settled], the changes that are done. A change is pending while they differ, and a push
+ * is due for it. Every place that moves either, and what it has to show for it:
+ *
+ *  SETS (the sign is behind):
+ *  - [requestPush] / [want]: what the chooser shows has changed, while pushes are on.
+ *  - [readRequest], rule 3: the sign sent something into a pushed frame that had been called
+ *    done. It may not have the frame; it is owed again, once.
+ *  ENDS IT, DONE: [frameWritten], and nothing else. It is called behind every write of a frame
+ *    and ends the changes that were recorded before the frame was made, when the frame is the
+ *    selection (a chooser message or, on leaving, the message that takes the sign out of its
+ *    chooser display) and [writeAll] calls it proven: every byte taken, no piece that may have
+ *    come after the line stood still, the first byte with the transmitter while the sign
+ *    listened (judged again when its write has returned). One judgement, the line's, for a
+ *    reply and for a pushed frame.
+ *  ENDS IT, NOT DONE: [dropped], and nothing else: the switch is off in a turn in which a push
+ *    waits. Given up on purpose; the sign's next request gets the selection as it is then.
+ *
+ *  What can be on the line, and what becomes of the pending change:
+ *  - a reply, whole and in time: DONE. It was made on this thread after the changes ran.
+ *  - a reply of which only a part was taken, or nothing, or whose write threw: pending. A
+ *    push follows when the sign has got over it ([Behind]).
+ *  - a reply with a piece that may have come late (the sign may have given the frame up), or
+ *    whose first byte may have come after the sign stopped listening: pending, though the
+ *    reply counts as a message that was sent.
+ *  - a poll report: pending. It is not the selection.
+ *  - a reply to a request that crossed a push: there is none, the request is read away.
+ *  - a pushed frame, whole and begun in time: DONE; the app is told, the screen has the text.
+ *  - a pushed frame torn, or with a piece that may have come late: pending, tried again.
+ *  - a pushed frame too late to begin (not written), or begun too late (written): pending,
+ *    tried again; the app is not told.
+ *  - a pushed frame that was DONE, and then something the sign sent into it: pending again.
+ *  - the attention alone (leaving chooser mode): pending. It carries nothing and proves
+ *    nothing. It is not raised a second time for the same change ([aloneGivenFor]: runs of
+ *    zeros without end at a sign that may be showing a text); the sign's next request is
+ *    answered with a message, and that answer, whole and in time, is DONE.
+ *  - nothing on the line (the frame could not be made, not one zero was taken): pending.
+ *  - the selection changes again while a frame is on the line: that frame is whole but old.
+ *    It ends the changes before it; the new one was counted after it was made and is pending.
+ *  - [stop]: nothing is written any more and nothing is called done.
+ *  - the switch turned off: NOT DONE, dropped ([dropped]). A change made while it is off is
+ *    not recorded at all ([want]), so switching it on brings nothing back.
  *
  * BEHIND A PUSHED FRAME. The firmware that listens for pushes sends a request only when the line
  * has been quiet for [SIGN_QUIET_BEFORE_REQUEST_MS]. Rule 3 ends where the frame ends, by the
@@ -267,9 +324,9 @@ class SignLink(
     private val answer: (buffer: ByteArray, count: Int) -> Unit,
     /** The chooser message as it is now, as one frame; null outside chooser mode. Must not change anything. */
     private val chooserFrame: () -> String? = { null },
-    /** The frame [chooserFrame] last gave is on the wire in full. Not called for a push that failed, or had no frame. */
+    /** The frame [chooserFrame] last gave is on the wire, whole and in time. Not called for a push that failed, or had no frame. */
     private val pushed: () -> Unit = {},
-    /** Whether and how the chooser is pushed. Asked in every turn in which a push is wanted. Off unless this says otherwise. */
+    /** Whether and how the chooser is pushed. Asked when a change is recorded and in every turn in which a push waits. Off unless this says otherwise. */
     private val attention: () -> Attention = { Attention.OFF },
     private val timing: UartTimingLog,
     private val nanoTime: () -> Long = System::nanoTime,
@@ -566,8 +623,9 @@ class SignLink(
      * Hands all of [bytes] to the transmitter. A write may take only some (it does not wait), so
      * the rest is offered again, but only while the frame can still reach the sign in one piece
      * and in time. The clock is looked at before every offer, and not a byte more is sent
-     *  - when the first byte would come after the sign has stopped listening for it ([firstByNs];
-     *    null for what is not an answer: an attention, a pushed frame),
+     *  - when the first byte would come after the sign has stopped listening for it ([firstByNs]:
+     *    the limit of the request for an answer, [PUSH_FIRST_BYTE_MS] behind the start of its
+     *    attention for a pushed frame; null for the attention itself),
      *  - when the line has stood still for [WRITE_PATIENCE_MS] (the sign gives up 60 ms after a
      *    byte): since the call when nothing was taken yet, since the last byte taken left the
      *    line otherwise, each counted from the START of the offer that took it,
@@ -589,11 +647,21 @@ class SignLink(
      *  - An ANSWER is written on and is whole, as on master (see the class comment for why the
      *    push does not move that line); but it counts as torn, so that no push follows it
      *    into a sign that may be busy with a frame that broke off.
+     * The same for the FIRST byte: offered in time, it may have been handed over as late as
+     * its write returned. A pushed frame found late so is written to its end and is not
+     * whole; an answer is whole, as on master. Neither is proven.
      *
-     * True when all of it was taken, and in one piece where that decides. [takenLast] has the
-     * count, and [tornLast] says whether the start of it is, or may be, on the line without its
-     * end in time behind it (only some of it was taken, a piece may have come late, or a write
-     * threw): the sign may be busy with a frame that does not end ([Behind.TORN_FRAME]).
+     * Three things are left behind, and they are three questions:
+     *  - what it returns: for an answer, all of it was taken (the MESSAGE counts as sent, as
+     *    on master); for what comes unasked, the same as [provenLast].
+     *  - [provenLast], THE judgement of whether the sign has it: all of it was taken, no piece
+     *    may have come late, and the first byte was in time by the return of its write. The
+     *    only thing that can end a pending change ([frameWritten]).
+     *  - [tornLast], whether the sign may be busy with it ([Behind.TORN_FRAME]): the start is, or
+     *    may be, on the line without its end in time behind it (only some of it was taken, a
+     *    piece may have come late, a write threw), or all of a pushed frame is, begun too late.
+     * [takenLast] has the count; [lateStartLast] says that it was begun too late, or not begun
+     * for that reason.
      */
     private fun writeAll(bytes: ByteArray, writing: Writing, firstByNs: Long?): Boolean {
         val callNs = nanoTime()
@@ -658,9 +726,10 @@ class SignLink(
      * How to get the sign's attention when a push is to start NOW: one is wanted, and the line's
      * state lets it start ([LineClock.pushAtNs]). Null when none is to start.
      *
-     * With the switch off a wanted push is dropped here, in the turn that asked for it, before
-     * anything else is looked at: the change is not pushed now and not later, and the loop goes
-     * on exactly as it does without pushes (the same pauses, the same reads).
+     * With the switch off a pending change is dropped here ([dropped]), in the first turn that
+     * finds it off, before anything else is looked at: the change is not pushed now and not
+     * later, and the loop goes on exactly as it does without pushes (the same pauses, the same
+     * reads). The switch is not asked for a change that has had its attention alone.
      */
     private fun duePush(): Attention? {
         if (!pushWaiting()) return null

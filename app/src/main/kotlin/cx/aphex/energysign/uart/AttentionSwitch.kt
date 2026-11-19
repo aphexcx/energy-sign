@@ -14,8 +14,8 @@ import java.io.File
  * it is gone after a restart of the board and is for the bench.
  *
  * The value in force is said in the log when the app starts and whenever it has changed. A
- * change of the property is seen at the next look ([inForce]); the link looks in every turn in
- * which a push is wanted, so: when the chooser next changes.
+ * change of the property is seen at the next look ([inForce]); the link looks when a change is
+ * recorded and in every turn in which a push waits, so: when the chooser next changes.
  *
  * The file is read once, where this is built. [set] and [inForce] are called on the sign link
  * thread; the file is written through [saveLater], not by the caller.

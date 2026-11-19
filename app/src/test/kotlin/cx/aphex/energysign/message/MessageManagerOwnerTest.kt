@@ -731,7 +731,7 @@ class MessageManagerOwnerTest {
         phone("!next")
         phone("!next")
         ownerRuns()
-        assertEquals(3, pushes) // each asks; SignLink keeps one flag for all of them
+        assertEquals(3, pushes) // each asks; SignLink makes one push of what is pending
     }
 
     @Test
