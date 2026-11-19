@@ -14,6 +14,22 @@ import kotlin.test.assertTrue
 
 /** Android has separate return values and callbacks for the same registration attempt. */
 class BluetoothRegistrationTest {
+    @Test fun publicationFollowsThePhysicalRadioAfterAMissedOff() {
+        var on = true
+        val radio = BluetoothSession(SignStartup(warnings::add), {}, {}, { on }, { true },
+            openGatt = { registrations += it; true },
+            advertise = { _, result -> advertisements += result }, closeServices = { closed++ })
+        radio.start()
+        registrations.single()(0)
+        advertisements.single()(0)
+        on = false
+        radio.checkAdapter()
+        assertEquals(1, closed, "foreground must retire the stale ready server")
+        on = true
+        radio.adapterOn()
+        assertEquals(2, registrations.size)
+    }
+
     private val registrations = mutableListOf<(Int) -> Unit>()
     private val names = mutableListOf<Boolean>()
     private val advertisements = mutableListOf<(Int) -> Unit>()
