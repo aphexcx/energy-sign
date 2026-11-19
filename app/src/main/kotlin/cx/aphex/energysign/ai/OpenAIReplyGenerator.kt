@@ -99,15 +99,15 @@ class OpenAIReplyGenerator(
         retry = RetryStrategy(maxRetries = 0),
         httpClientConfig = {
             engine {
-                if (this is OkHttpConfig) {
-                    addInterceptor { chain ->
-                        val tagged = chain.request().newBuilder()
-                            .tag(WireCallContext::class.java, activeCall.get())
-                            .build()
-                        chain.proceed(tagged)
-                    }
-                    addNetworkInterceptor(WireBudgetInterceptor(budget))
+                val okHttp = this as? OkHttpConfig
+                    ?: error("OpenAIReplyGenerator requires Ktor OkHttp engine so WireBudgetInterceptor gates every wire send")
+                okHttp.addInterceptor { chain ->
+                    val tagged = chain.request().newBuilder()
+                        .tag(WireCallContext::class.java, activeCall.get())
+                        .build()
+                    chain.proceed(tagged)
                 }
+                okHttp.addNetworkInterceptor(WireBudgetInterceptor(budget))
             }
             HttpResponseValidator {
                 handleResponseExceptionWithRequest { failure, _ ->
@@ -150,7 +150,7 @@ class OpenAIReplyGenerator(
         } catch (e: CancellationException) {
             throw e
         } catch (e: OpenAITimeoutException) {
-            WireSendBlockedException.findIn(e)?.let(::blockedResult) ?: noReply(NoReplyReason.TIMEOUT, e.javaClass.simpleName)
+            noReply(NoReplyReason.TIMEOUT, e.javaClass.simpleName)
         } catch (e: OpenAIIOException) {
             WireSendBlockedException.findIn(e)?.let(::blockedResult) ?: noReply(NoReplyReason.NETWORK, e.javaClass.simpleName)
         } catch (e: OpenAIAPIException) {

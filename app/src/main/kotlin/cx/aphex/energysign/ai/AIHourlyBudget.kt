@@ -62,15 +62,17 @@ class AIHourlyBudget(
             get() = synchronized(lock) { state == State.STAMPED }
 
         /**
-         * Converts this active reservation into a permanent wire-send timestamp at [now].
-         * Returns `true` only if this reservation was still [State.RESERVED]; returns `false`
-         * if already released (fail closed against late threads) or already stamped.
+         * Converts this active reservation into a permanent wire-send timestamp at [now] (or
+         * [nowMs] evaluated inside [lock] when null). Returns `true` only if this reservation was
+         * still [State.RESERVED]; returns `false` if already released (fail closed against late
+         * threads) or already stamped.
          */
-        fun stamp(now: Long = nowMs()): Boolean = synchronized(lock) {
+        fun stamp(now: Long? = null): Boolean = synchronized(lock) {
             if (state != State.RESERVED) return false
             if (!activeReservations.remove(this)) return false
-            pruneLocked(now)
-            sentAt.addLast(now)
+            val at = now ?: nowMs()
+            pruneLocked(at)
+            sentAt.addLast(at)
             state = State.STAMPED
             true
         }
@@ -93,37 +95,41 @@ class AIHourlyBudget(
         }
     }
 
-    /** Whether there is room for at least one more request at [now]. */
-    fun hasRoom(now: Long = nowMs()): Boolean = synchronized(lock) {
-        pruneLocked(now)
+    /** Whether there is room for at least one more request at [now] (or [nowMs] inside [lock]). */
+    fun hasRoom(now: Long? = null): Boolean = synchronized(lock) {
+        val at = now ?: nowMs()
+        pruneLocked(at)
         sentAt.size + activeReservations.size < callsPerHour
     }
 
     /**
-     * Reserves one place at [now] if below [callsPerHour], or returns `null` when the ceiling
-     * is full.
+     * Reserves one place at [now] (or [nowMs] inside [lock]) if below [callsPerHour], or returns
+     * `null` when the ceiling is full.
      */
-    fun reserve(now: Long = nowMs()): Reservation? = synchronized(lock) {
-        pruneLocked(now)
+    fun reserve(now: Long? = null): Reservation? = synchronized(lock) {
+        val at = now ?: nowMs()
+        pruneLocked(at)
         if (sentAt.size + activeReservations.size >= callsPerHour) return null
         Reservation().also { activeReservations.add(it) }
     }
 
     /**
-     * Atomically claims and stamps a slot at [now] without a prior reservation: used for HTTP
-     * client replays (2nd+ wire request of one call) and for direct generator calls made without
-     * a desk reservation.
+     * Atomically claims and stamps a slot at [now] (or [nowMs] inside [lock]) without a prior
+     * reservation: used for HTTP client replays (2nd+ wire request of one call) and for direct
+     * generator calls made without a desk reservation.
      */
-    internal fun tryStampAdditional(now: Long = nowMs()): Boolean = synchronized(lock) {
-        pruneLocked(now)
+    internal fun tryStampAdditional(now: Long? = null): Boolean = synchronized(lock) {
+        val at = now ?: nowMs()
+        pruneLocked(at)
         if (sentAt.size + activeReservations.size >= callsPerHour) return false
-        sentAt.addLast(now)
+        sentAt.addLast(at)
         true
     }
 
     /** Current number of occupied places (stamped sends + active reservations) at [now]. */
-    internal fun usedCount(now: Long = nowMs()): Int = synchronized(lock) {
-        pruneLocked(now)
+    internal fun usedCount(now: Long? = null): Int = synchronized(lock) {
+        val at = now ?: nowMs()
+        pruneLocked(at)
         sentAt.size + activeReservations.size
     }
 
