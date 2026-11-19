@@ -92,7 +92,7 @@ internal class BudgetedOkHttpClient(
     }
 
     private fun resolveUrl(request: HttpRequest): HttpRequest {
-        if (request.baseUrl().isNotEmpty()) return request
+        if (request.baseUrl.isNotEmpty()) return request
         return request.toBuilder().baseUrl(backend.baseUrl()).build()
     }
 
@@ -161,35 +161,35 @@ internal class BudgetedOkHttpClient(
 
     private fun toOkHttpRequest(request: HttpRequest, client: OkHttpClient, context: WireCallContext?): Request {
         var body: RequestBody? = request.body().orElse(null)?.let(::toOkHttpRequestBody)
-        if (body == null && requiresBody(request.method())) {
+        if (body == null && requiresBody(request.method)) {
             body = "".toRequestBody(null)
         }
         val builder = Request.Builder()
             .url(toUrl(request))
-            .method(request.method().name, body)
+            .method(request.method.name, body)
             .tag(WireCallContext::class.java, context)
 
-        for (name in request.headers().names()) {
-            for (value in request.headers().values(name)) {
+        for (name in request.headers.names()) {
+            for (value in request.headers.values(name)) {
                 builder.addHeader(name, value)
             }
         }
-        if ("X-Stainless-Read-Timeout" !in request.headers().names() && client.readTimeoutMillis != 0) {
+        if ("X-Stainless-Read-Timeout" !in request.headers.names() && client.readTimeoutMillis != 0) {
             builder.addHeader("X-Stainless-Read-Timeout", Duration.ofMillis(client.readTimeoutMillis.toLong()).seconds.toString())
         }
-        if ("X-Stainless-Timeout" !in request.headers().names() && client.callTimeoutMillis != 0) {
+        if ("X-Stainless-Timeout" !in request.headers.names() && client.callTimeoutMillis != 0) {
             builder.addHeader("X-Stainless-Timeout", Duration.ofMillis(client.callTimeoutMillis.toLong()).seconds.toString())
         }
         return builder.build()
     }
 
     private fun toUrl(request: HttpRequest): String {
-        val urlBuilder = request.baseUrl().toHttpUrl().newBuilder()
-        for (segment in request.pathSegments()) {
+        val urlBuilder = request.baseUrl.toHttpUrl().newBuilder()
+        for (segment in request.pathSegments) {
             urlBuilder.addPathSegment(segment)
         }
-        for (key in request.queryParams().keys()) {
-            for (value in request.queryParams().values(key)) {
+        for (key in request.queryParams.keys()) {
+            for (value in request.queryParams.values(key)) {
                 urlBuilder.addQueryParameter(key, value)
             }
         }

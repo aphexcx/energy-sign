@@ -881,12 +881,21 @@ class AIHourlyBudgetIntegrationTest {
                             latch = CountDownLatch(1)
                             assertTrue(desk.shown(query, clockMs.get()), "$label attempt 2")
                             assertTrue(latch.await(15, TimeUnit.SECONDS))
-                            assertIs<AIQueryDesk.Outcome.Failed>(desk.finished(query, finishedResult!!, clockMs.get()), "$label attempt 2")
+                            val res2 = finishedResult!!
+                            assertIs<AIQueryDesk.Outcome.Failed>(
+                                desk.finished(query, res2, clockMs.get()),
+                                "$label attempt 2 (res=$res2, used=${budget.usedCount(clockMs.get())}, recv=${api.received.size})"
+                            )
+                            assertEquals(2, budget.usedCount(clockMs.get()), "$label attempt 2 usedCount (res=$res2, recv=${api.received.size})")
 
                             latch = CountDownLatch(1)
                             assertTrue(desk.shown(query, clockMs.get()), "$label attempt 3")
                             assertTrue(latch.await(15, TimeUnit.SECONDS))
-                            assertIs<AIQueryDesk.Outcome.Retired>(desk.finished(query, finishedResult!!, clockMs.get()), "$label attempt 3 must retire")
+                            val res3 = finishedResult!!
+                            assertIs<AIQueryDesk.Outcome.Retired>(
+                                desk.finished(query, res3, clockMs.get()),
+                                "$label attempt 3 must retire (res=$res3, used=${budget.usedCount(clockMs.get())}, recv=${api.received.size})"
+                            )
                             assertEquals(3, budget.usedCount(clockMs.get()), "$label: 3 sent attempts = 3 budget slots")
                         }
                     } else if (expectedReason != null) {
@@ -1006,12 +1015,14 @@ class AIHourlyBudgetIntegrationTest {
             Triple(anthropicSource(api, clock, budget, scope), Query("ravegpt portal")) { true }
         }
 
-        // 12. TIMEOUT (after POST sent on wire -> server stalls past 400 ms request timeout)
+        // 12. TIMEOUT (after POST sent on wire -> server stalls past 400 ms request timeout;
+        // use literal 127.0.0.1 so OkHttp's RouteDatabase never fails over to ::1 after timeout 1)
         runCase("TIMEOUT", NoReplyReason.TIMEOUT, expectWireSent = true, expectBudgetKept = true, expectAttemptUsed = true) { api, clock, budget, scope ->
             api.answer = FakeMessagesApi.Answer(200, okAnthropicBody("slow"), delayMs = 2_000)
             Triple(
                 anthropicSource(
                     api, clock, budget, scope,
+                    baseUrl = api.baseUrl.replace("localhost", "127.0.0.1"),
                     requestTimeout = Duration.ofMillis(400),
                     minTimeToSend = Duration.ofMillis(100),
                 ),
