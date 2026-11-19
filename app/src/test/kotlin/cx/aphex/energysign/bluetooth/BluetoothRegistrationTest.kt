@@ -101,4 +101,18 @@ class BluetoothRegistrationTest {
         added(0)
         assertEquals(1, advertisements.size)
     }
+
+    @Test
+    fun `a device name too large for legacy advertising falls back once without closing GATT`() {
+        session.start()
+        registrations.single()(0)
+        val named = advertisements.single()
+        named(android.bluetooth.le.AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE)
+        assertEquals(2, advertisements.size)
+        named(4) // late result from the superseded submission
+        advertisements.last()(0)
+        session.adapterOn()
+        assertEquals(0, closed)
+        assertEquals(1, registrations.size)
+    }
 }

@@ -48,14 +48,16 @@ class BeatLinkDataConsumerServerService : Service(), KoinComponent {
 
     private lateinit var server: io.ktor.server.engine.ApplicationEngine
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        return super.onStartCommand(intent, flags, startId)
+    override fun onCreate() {
+        super.onCreate()
+        ensureListening()
     }
 
-    override fun onCreate() {
+    internal fun ensureListening(create: () -> io.ktor.server.engine.ApplicationEngine = ::createEngine) {
+        server = create().start(wait = false)
+    }
 
-        logD("Starting embedded server on port $HTTP_PORT")
-        server = embeddedServer(Netty, HTTP_PORT) {
+    private fun createEngine() = embeddedServer(Netty, HTTP_PORT) {
             install(ContentNegotiation) {
                 gson {}
             }
@@ -107,13 +109,6 @@ class BeatLinkDataConsumerServerService : Service(), KoinComponent {
                 currentTrack(messageManager)
             }
 
-        }.start(wait = false)
-        logD("Embedded server started")
-        super.onCreate()
-    }
-
-    override fun onUnbind(intent: Intent?): Boolean {
-        return super.onUnbind(intent)
     }
 
     data class PostedMessage(val message: String)

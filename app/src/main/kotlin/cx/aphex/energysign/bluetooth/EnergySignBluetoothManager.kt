@@ -36,7 +36,7 @@ class EnergySignBluetoothManager(
     // HOME can start while Android is still bringing Bluetooth up. Install the listeners
     // first, then look up the service again on each adapter event that needs it.
     private val bluetoothManager: BluetoothManager
-        get() = checkNotNull(context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)
+        get() = managerForGatt(context)
     private val bluetoothAdapter: BluetoothAdapter
         get() = checkNotNull(bluetoothManager.adapter)
 
@@ -225,3 +225,6 @@ class EnergySignBluetoothManager(
         advertiser.startAdvertising(settings, data, callback)
     }
 }
+
+internal fun managerForGatt(context: Context, hasAdapter: (BluetoothManager) -> Boolean = { it.adapter != null }): BluetoothManager =
+    checkNotNull(context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)
