@@ -826,6 +826,37 @@ class SignLinkTest {
 
     @Test
     fun `failure to prewarm a writer still lets the link answer requests`() {
+        for (failure in listOf(IllegalStateException(), LinkageError())) verifyFailedPreparation(failure)
+    }
+
+    @Test fun incompletePreparationRetriesOnTheLinkAndKeepsServingReads() {
+        for (outcome in listOf("error", "deadline", "complete")) {
+            var passes = 0
+            var turns = 0
+            val owner = Thread.currentThread()
+            val threads = mutableListOf<Thread>()
+            lateinit var real: SignLink
+            val quiet = QuietWire()
+            real = SignLink(wire = quiet, baud = baud, name = "UART", answer = { _, _ -> },
+                events = { if (++turns == 4) real.stop() else repeat(3) { real.prepareAgain() } },
+                prepareAnswers = { stopped ->
+                    threads += Thread.currentThread()
+                    if (++passes == 1 && outcome == "error") throw LinkageError()
+                    if (passes == 1 && outcome == "deadline") {
+                        now += 2_001 * ms
+                        assertTrue(stopped())
+                    }
+                },
+                timing = UartTimingLog(isEnabled = { false }, emit = {}), nanoTime = { now }, sleepNanos = {},
+            )
+            real.run()
+            assertEquals(if (outcome == "complete") 1 else 2, passes, outcome)
+            assertEquals(3, quiet.reads.get(), outcome)
+            assertEquals(setOf(owner), threads.toSet(), outcome)
+        }
+    }
+
+    private fun verifyFailedPreparation(failure: Throwable) {
         val quiet = object : QuietWire() {
             override fun read(buffer: ByteArray, length: Int): Int {
                 buffer[0] = '~'.code.toByte()
@@ -840,13 +871,13 @@ class SignLinkTest {
                 wrote = real.send("FIRST", Reply.MESSAGE)
                 real.stop()
             },
-            prepareAnswers = { throw IllegalStateException("adapter unavailable") },
+            prepareAnswers = { throw failure },
             timing = UartTimingLog(isEnabled = { false }, emit = {}),
             nanoTime = { now }, warn = { line += it },
         )
         real.run()
         assertTrue(wrote)
-        assertTrue(line.any { it.contains("adapter unavailable") })
+        assertTrue(line.any { it.contains(failure.javaClass.name) && it.contains("sign link continues") })
         assertEquals(1, quiet.closes.get())
     }
 
