@@ -70,6 +70,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
         if (firstForeground) {
             firstForeground = false // init already attempted setup for this launch.
         } else {
+            energySignUartManager.onForeground()
             startup.optional("BeatLink startup") { beatLink.value.ensureListening() }
             val manager = bluetooth.manager
             if (manager == null) bluetooth.start() else startup.optional("Bluetooth foreground") { manager.onForeground() }
