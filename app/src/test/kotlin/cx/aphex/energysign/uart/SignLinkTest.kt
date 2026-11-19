@@ -813,13 +813,17 @@ class SignLinkTest {
             inAnswer.countDown()
             letGo.await() // a reply that takes its time
         })
+        Thread.sleep(SignLink.CHOOSER_FRESH_MS + 30L)
         val thread = Thread(real, "sign-link-test").apply { start() }
-        assertTrue(inAnswer.await(2, TimeUnit.SECONDS))
-        real.stop()
-        Thread.sleep(100)
-        assertEquals(0, wire.closes.get()) // stop() itself closes nothing
-        letGo.countDown()
-        thread.join(2_000)
+        try {
+            assertTrue(inAnswer.await(2, TimeUnit.SECONDS))
+            real.stop()
+            assertEquals(0, wire.closes.get()) // stop() itself closes nothing
+        } finally {
+            real.stop()
+            letGo.countDown()
+            thread.join(2_000)
+        }
         assertFalse(thread.isAlive)
         assertEquals(1, wire.closes.get())
         assertSame(thread, wire.closedBy.get())

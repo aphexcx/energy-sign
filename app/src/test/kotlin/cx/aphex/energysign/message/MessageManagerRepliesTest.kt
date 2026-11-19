@@ -666,6 +666,24 @@ class MessageManagerRepliesTest {
     }
 
     @Test
+    fun `an answered failed query retries as its converted user before its heading without scheduling ads`() {
+        phone("!A1")
+        repo.oneTimeMessages.clear()
+        val query = ask()
+        assertSame(query, untilStored())
+        manager.returnUnsent(query)
+        replies.asked.single().answer(AIReplyResult.Reply("Loud enough."))
+        ownerRuns()
+
+        val converted = assertIs<Message.Marquee.User>(repo.marqueeMessages.first())
+        assertSame(converted, next())
+        assertEquals("RAVEGPT", next().str)
+        restOfHeading()
+        assertEquals("LOUD ENOUGH.", next().str)
+        assertEquals(1, replies.asked.size)
+    }
+
+    @Test
     fun `a reply that comes in time is still the next thing after its query, under its heading`() {
         val query = ask()
         assertEquals(query, untilStored())

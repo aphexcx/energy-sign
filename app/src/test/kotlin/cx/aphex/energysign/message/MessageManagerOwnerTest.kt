@@ -345,6 +345,43 @@ class MessageManagerOwnerTest {
     }
 
     @Test
+    fun `pushed commands interrupt a repeatedly failing stored frame and its ads run once afterward`() {
+        val app = startWithTwoStoredMessages()
+        app.phone("!A1")
+        ownerRuns()
+        app.repo.oneTimeMessages.clear()
+        val manager = app.manager
+        val first = manager.getNextMessage()
+        val ads = app.repo.oneTimeMessages.toList()
+        assertTrue(ads.isNotEmpty())
+        manager.returnUnsent(first)
+
+        app.phone("!micOff")
+        ownerRuns()
+        assertSame(Message.UtilityMessage.DisableMic, manager.getNextMessage())
+        assertSame(first, manager.getNextMessage())
+        manager.returnUnsent(first)
+        app.phone("!B3")
+        ownerRuns()
+        assertTrue(manager.getNextMessage() is Message.UtilityMessage.BrightnessShift)
+        assertSame(first, manager.getNextMessage())
+        ads.forEach { assertSame(it, manager.getNextMessage()) }
+        assertSame(app.repo.marqueeMessages.last(), manager.getNextMessage())
+    }
+
+    @Test
+    fun `a stored frame can fail three retries before the next stored frame gets its turn`() {
+        val app = startWithTwoStoredMessages()
+        val first = app.repo.marqueeMessages.first()
+        repeat(4) {
+            assertSame(first, app.manager.getNextMessage())
+            app.manager.returnUnsent(first)
+        }
+        assertSame(app.repo.marqueeMessages.last(), app.manager.getNextMessage())
+        assertSame(first, app.manager.getNextMessage(), "the failed frame stays in its normal rotation")
+    }
+
+    @Test
     fun `a link starting with main busy for five seconds writes the first stored frame whole`() {
         var clock = 0L
         var preparedOn: Thread? = null
