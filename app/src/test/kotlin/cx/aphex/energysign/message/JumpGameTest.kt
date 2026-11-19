@@ -158,10 +158,12 @@ class JumpGameTest {
                     if (before == null || after == null) null else Math.floorMod(after - before, 60)
                 }
             },
+            // (every way of asking ends with the request AT 30 s and has none after it: the same tick is looked at. The ground
+            // has moved 1,080.06 columns by then, a quarter of that is 270.015: column 30, and one tick earlier it is still 29)
             row("its place half a minute into a game is the same however the sign asks: every 10 ms, every 45, unevenly, once", List(4) { 30 }) {
                 listOf(every(10, 30_000), every(45, 30_000), unevenly(30_000), emptyList()).map { requests ->
                     val game = game(JumpGame.Rules(obstacles = listOf(JumpGame.Shape(listOf(0)))))
-                    requests.forEach { game.frame(it) }
+                    requests.filter { it < 30_000 }.forEach { game.frame(it) }
                     game.frame(30_000)?.stars
                 }
             },

@@ -255,7 +255,7 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
  * runner's column when it is not the usual one, the colours and the effect when they are not
  * the usual ones (the sign's own: a blue runner, red obstacles, so a game in play sends none).
  * Last, the starfield's place (`s` and a column: the sign draws its fixed pattern of dim stars
- * shifted left by that much; bead es-bxl, the note's next version). Whatever a frame holds,
+ * shifted left by that much; the note's version 4). Whatever a frame holds,
  * what is written here is a frame the sign can read: the sign draws nothing of a frame with a
  * fifth obstacle or a number out of range.
  */
@@ -265,11 +265,15 @@ fun gameFrame(frame: JumpGame.Frame): Message.GameFrame {
     frame.runnerAt?.let { text.append('r').append(it.coerceIn(-99, 99)) }
     frame.colours?.let { (runner, obstacles) -> text.append('p').append(runner.coerceIn(0, 7)).append(obstacles.coerceIn(0, 7)) }
     if (frame.effect in 1..2) text.append('e').append(frame.effect)
+    // THE STARFIELD NEEDS FIRMWARE OF THE CONTRACT NOTE'S VERSION 4. Firmware of versions 1 to 3 reads
+    // `s` as a letter it does not know and draws nothing of the frame. That is not guarded against
+    // here, by the owner's rule (one code path: no switch, no fallback for an older firmware): the
+    // app with the starfield and the firmware with it go on the sign together and come off together.
     frame.stars?.let { text.append('s').append(Math.floorMod(it, GAME_STAR_COLUMNS)) }
     return Message.GameFrame(text.toString())
 }
 
-/** The starfield's place on the wire is 0 to one less than this (the mayor's sketch for bead es-bxl, until the contract note's next version says it). */
+/** The starfield's place on the wire is 0 to one less than this (the contract note, version 4: `s` and 0 to 59; anything else is a bad frame). */
 const val GAME_STAR_COLUMNS: Int = 60
 
 /** One step of a show: a message of a kind the sign has, shown once; or game frames for [ms], each made for the time since the step began. */
