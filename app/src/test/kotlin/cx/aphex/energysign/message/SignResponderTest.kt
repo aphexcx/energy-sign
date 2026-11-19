@@ -1,6 +1,9 @@
 package cx.aphex.energysign.message
 
 import com.google.gson.JsonParser
+import com.google.gson.reflect.TypeToken
+import org.mockito.Mockito
+import kotlin.test.assertFailsWith
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -478,6 +481,22 @@ class SignResponderTest {
         val responder = SignResponder(nextMessage = { Message.Marquee.User(fits) }, write = { reply, _ -> written.add(reply) })
         assertEquals(fits, responder.onRequest("~".toByteArray(), 1)?.str)
         assertEquals(ChooserProtocol.MAX_FRAME_BYTES, written.single().toByteArray().size)
+    }
+
+    @Test
+    fun warmUpReportsTheFirstFailedAdapterAfterPreparingTheOthers() {
+        val unavailable = IllegalArgumentException("adapter unavailable")
+        val visited = linkedSetOf<Class<*>>()
+        Mockito.mockStatic(TypeToken::class.java) { invocation ->
+            val type = invocation.arguments.singleOrNull() as? Class<*>
+            if (invocation.method.name == "get" && type != null && Message::class.java.isAssignableFrom(type)) {
+                if (visited.add(type) && visited.size == 1) throw unavailable
+            }
+            invocation.callRealMethod()
+        }.use {
+            assertSame(unavailable, assertFailsWith<IllegalArgumentException> { SignResponder.warmUp() })
+            assertTrue(visited.size >= 20, "continue preparing the other message types")
+        }
     }
 
     // ---- the first write of every message class is prepared ahead of time
