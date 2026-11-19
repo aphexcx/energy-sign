@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import cx.aphex.energysign.bluetooth.BLUETOOTH_WRITE_TAG
+import cx.aphex.energysign.signClockMs
 import org.koin.core.context.GlobalContext
 
 /**
@@ -62,12 +63,14 @@ import org.koin.core.context.GlobalContext
 class AdbCommandReceiver : BroadcastReceiver() {
 
     /**
-     * Three statements, and then everything is AdbCommand.receive, which takes its deadline and
+     * Four statements, and then everything is AdbCommand.receive, which takes its deadline and
      * arms its timer before it does anything else: from there on the broadcast is answered within
-     * AdbCommand.ANSWER_WITHIN_MS whatever this thread is held up by. The three before it read a
-     * flag and take the broadcast's result object; they wait for nothing.
+     * AdbCommand.ANSWER_WITHIN_MS whatever this thread is held up by. The four before it read the
+     * clock (when the command arrived) and a flag and take the broadcast's result object; they
+     * wait for nothing.
      */
     override fun onReceive(context: Context, intent: Intent) {
+        val arrived = signClockMs() // first of all: the command arrived now, whatever this hook does before it hands it on
         // `am broadcast` sends an ordered broadcast; anything else has nowhere to put an answer.
         // Asked now: after goAsync() this receiver no longer knows.
         val ordered = isOrderedBroadcast
@@ -86,7 +89,7 @@ class AdbCommandReceiver : BroadcastReceiver() {
             command = { commandOf(intent) },
             // Null when the app is not up: the hook makes no message manager (Koin would, here,
             // when the main screen has not).
-            app = { AdbCommand.entryWhenUp(GlobalContext.getOrNull()) },
+            app = { AdbCommand.entryWhenUp(GlobalContext.getOrNull(), arrived) },
             late = ::log,
         ) { outcome, line ->
             try {

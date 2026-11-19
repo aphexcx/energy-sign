@@ -35,6 +35,8 @@ class MessageManager(
      * while the board sleeps (AppModule); this default is for tests on the JVM.
      */
     private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 },
+    /** The jump game. A test hands in one whose obstacles it knows. */
+    jumpGame: JumpGame = JumpGame(),
 ) :
     KoinComponent {
     private val advertisements: MutableList<Message> = mutableListOf()
@@ -243,6 +245,83 @@ class MessageManager(
 
     private var usrMsgCount: Int = 0
 
+    /** The jump game's switch and its best score, kept across a restart. */
+    private val gameStore = GameStore(filesDir, warn = { logW(it) })
+
+    /**
+     * The jump game. It answers the sign's requests before the queue and the list are looked
+     * at ([getNextMessage]) and takes from neither; the chooser and a typist take the sign from
+     * it. Owner thread only, like everything here.
+     */
+    private val game = GameOnTheSign(
+        GameShows(
+            runnerColour = context.getColor(R.color.icon_defaultblue),
+            crashColour = context.getColor(R.color.instahandle),
+            scoreColour = context.getColor(R.color.chonkyslide_defaultpink),
+        ),
+        best = gameStore.loadBest(),
+        on = gameStore.loadOn(),
+        say = { logD(it) },
+        bestIs = { best -> saveOfTheGame("the best score") { gameStore.saveBest(best) } },
+        game = jumpGame,
+    )
+
+    init {
+        logD("Game: switched ${if (game.on) "on" else "off"} at the start.")
+        keyboardManager.clock = nowMs
+        keyboardManager.takenByTheGame = { key, repeated, arrivedAt -> gameKey(key, repeated, arrivedAt) }
+    }
+
+    /**
+     * EVERY KEY THE GAME MAY TAKE, on the owner thread, with the time the press arrived. True
+     * when the key was the game's: then nothing is typed.
+     *
+     * The button is the up arrow, and the space bar while anything of a game is on. It starts
+     * a game when nothing of one is on (the up arrow only) and jumps while one is played; in
+     * the intro and in a closing show it does nothing (a jump that comes a moment after the
+     * hit is not a new game, and takes no score off the sign). Any other key is typing, repeats
+     * and all, and takes the sign from the game.
+     *
+     * A HELD KEY IS ONE PRESS, AND IT IS WHOSE ITS KEY-DOWN WAS. A key-down the game took makes
+     * the key the game's until it is pressed anew ([heldForTheGame]): its repeats do nothing
+     * and type nothing, whatever the game has become meanwhile. (A space bar held from a
+     * closing show into the messages would otherwise be typed there, and typing empties the
+     * queue.) A repeat is never a new press, so the next key-down that is none says the key
+     * was let go.
+     */
+    private fun gameKey(key: Char, repeated: Boolean, arrivedAt: Long): Boolean {
+        if (repeated && key in heldForTheGame) return true
+        val isTheButton = key == KeyboardManager.UP_ARROW || (key == ' ' && game.busy)
+        if (!repeated) {
+            if (isTheButton) heldForTheGame += key else heldForTheGame -= key
+        }
+        if (!isTheButton) {
+            game.end("somebody is typing", arrivedAt)
+            return false
+        }
+        if (!repeated) {
+            if (game.busy) game.jump(arrivedAt) else startGame(arrivedAt)
+        }
+        return true
+    }
+
+    /** The keys whose last key-down the game took. Owner thread only. */
+    private val heldForTheGame = mutableSetOf<Char>()
+
+    /** Not while the sign is somebody else's: a game behind the chooser or the echo would be played by nobody. */
+    private fun startGame(arrivedAt: Long) {
+        if (isInChooserMode || keyboardManager.typing) logD("Game: not started, the sign is taken (the chooser, or somebody typing).")
+        else game.start(arrivedAt)
+    }
+
+    private fun saveOfTheGame(what: String, write: () -> Unit) = msgRepo.saveLater {
+        try {
+            write()
+        } catch (e: Throwable) {
+            logW("Exception when saving $what of the game! ${e.message}")
+        }
+    }
+
     /** Pushes a new user message onto the top of the messages list. Returns when it is there. */
     fun processNewUserMessage(str: String, isQuery: Boolean = false): Unit =
         changeAndWait { addNewUserMessage(str, isQuery) }
@@ -303,6 +382,9 @@ class MessageManager(
             return getNextChooserMessage()
         }
         keyboardManager.handleKeyboardInput()?.let {
+            return it
+        }
+        game.answer(nowMs())?.let {
             return it
         }
 
@@ -482,6 +564,7 @@ class MessageManager(
      * place in the list. Owner thread only.
      */
     fun returnUnsent(message: Message) {
+        if (game.notWritten(message)) return
         val selection = takenFromList
         if (selection != null && message === selection.message) {
             // The owner reports this write before running another event. Between attempts
@@ -554,10 +637,26 @@ class MessageManager(
         }
     }
 
-    private fun processUartCommand(value: ByteArray) {
+    private fun processUartCommand(value: ByteArray, arrivedAt: Long) {
         when (val cmd = String(value)) {
+            // (the game gets every one of these with the time the command ARRIVED)
+            "!game" -> startGame(arrivedAt)
+
+            "!j",
+            "!jump" -> game.jump(arrivedAt)
+
+            "!game reset" -> game.forgetBest(arrivedAt)
+
+            "!game on",
+            "!game off" -> {
+                game.switch(cmd == "!game on", arrivedAt)
+                val on = game.on
+                saveOfTheGame("the switch") { gameStore.saveOn(on) }
+            }
+
             "!c",
             "!choose" -> {
+                game.end("the chooser takes the sign", arrivedAt)
                 isInChooserMode = true
             }
 
@@ -773,21 +872,27 @@ class MessageManager(
     }
 
 
-    /** A command or a new message, as the phone writes it. Posted: it has not been carried out when this returns. */
-    fun processNewBytes(value: ByteArray) = change(bytesChange(value))
+    /**
+     * A command or a new message, as the phone writes it. Posted: it has not been carried out
+     * when this returns. [arrivedAt] is when it entered the app, on this manager's clock: the
+     * caller read it before it did anything else (see signClockMs), and the game counts the
+     * command from then.
+     */
+    fun processNewBytes(value: ByteArray, arrivedAt: Long = nowMs()) = change(bytesChange(value, arrivedAt))
 
     /** The same, for a caller that says "done" to someone: returns when the owner has carried it out. Not from the main thread. */
-    fun processNewBytesAndWait(value: ByteArray): Unit = changeAndWait(bytesChange(value))
+    fun processNewBytesAndWait(value: ByteArray, arrivedAt: Long = nowMs()): Unit = changeAndWait(bytesChange(value, arrivedAt))
 
     /**
      * The same, for a caller that has to say which of three things happened (the adb hook): the
      * owner carried it out, the owner threw on it, or the owner never took it up and it was
      * withdrawn. See OwnerQueue.askFor. Not from the main thread.
      */
-    fun processNewBytesAndTell(value: ByteArray): OwnerQueue.Asked<Unit> = owner.askFor(change = bytesChange(value))
+    fun processNewBytesAndTell(value: ByteArray, arrivedAt: Long = nowMs()): OwnerQueue.Asked<Unit> =
+        owner.askFor(change = bytesChange(value, arrivedAt))
 
     /** What [value] asks for, as a change for the owner. What can be done here, on the caller's thread, is done here. */
-    private fun bytesChange(value: ByteArray): () -> Unit {
+    private fun bytesChange(value: ByteArray, arrivedAt: Long): () -> Unit {
         val cmd = String(value)
         return if (cmd.startsWith("!🅰")) {
             logD("Procesing Uart command $cmd")
@@ -796,7 +901,7 @@ class MessageManager(
         } else if (cmd.startsWith("!")) {
             // logged here, by the caller: the owner has the sign to answer
             logD("Procesing Uart command $cmd")
-            ({ processUartCommand(value) })
+            ({ processUartCommand(value, arrivedAt) })
         } else {
             ({ addNewUserMessage(cmd, isQuery = false) })
         }

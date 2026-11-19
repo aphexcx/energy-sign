@@ -24,7 +24,7 @@ internal class EnergySignBluetoothManager(
     val context: Context,
     val viewModel: MainViewModel,
     private val worker: StartWorker,
-    private val takeWrite: (ByteArray, Boolean) -> Boolean,
+    private val takeWrite: (ByteArray, Boolean, Long) -> Boolean,
 ) {
 
     private val warn: (String) -> Unit = { logW(it) }
