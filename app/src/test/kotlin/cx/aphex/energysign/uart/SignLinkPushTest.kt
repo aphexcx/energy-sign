@@ -634,6 +634,17 @@ class SignLinkPushTest {
     }
 
     @Test
+    fun `once a piece of the zeros may have come late nothing more of the run is offered`() {
+        // 24 zeros have left after 17 ms; the second 24 are called for at 2 ms and handed over at 30; the last 24 stay with the app
+        takesPerWrite = 24
+        stallAtWrite[2] = 28 * ms
+        command(0, "B")
+        runUntil(250)
+        assertEquals(listOf("tx[00x24]@0", "tx[00x24]@30"), wire())
+        assertTrue(warnings().single().contains("not taken in one run (48 of 72 bytes)"), warnings().toString())
+    }
+
+    @Test
     fun `a pushed frame whose second piece is taken late may have stood still too long for the sign, it is a failed push`() {
         val long = "L".repeat(100) // a frame of 102 bytes
         takesPerWrite = 72
