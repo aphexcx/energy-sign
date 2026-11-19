@@ -8,7 +8,7 @@ import cx.aphex.energysign.StartWorker
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
 
-internal class DnsSdAnnouncer(context: Context, private val worker: StartWorker) {
+internal class DnsSdAnnouncer(private val context: Context, private val worker: StartWorker) {
     private val manager get() = context.getSystemService(Context.NSD_SERVICE) as NsdManager
     internal var register: (Int, NsdManager.RegistrationListener) -> Unit = { port, listener ->
         val info = NsdServiceInfo().apply {
