@@ -1,12 +1,10 @@
 package cx.aphex.energysign.adb
 
-import android.app.Activity
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.util.Log
 import cx.aphex.energysign.bluetooth.BLUETOOTH_WRITE_TAG
-import cx.aphex.energysign.message.MessageManager
 import org.koin.core.context.GlobalContext
 
 /**
@@ -20,56 +18,81 @@ import org.koin.core.context.GlobalContext
  * app on the device cannot get it unless someone grants it over adb. The same commands are
  * accepted today from any Bluetooth device in range, so this door is the narrower one.
  *
- * One broadcast is one write. The bytes go to MessageManager.processNewBytesAndWait: the same
+ * One broadcast is one write. The bytes go to MessageManager.processNewBytesAndTell: the same
  * change as a Bluetooth write (MessageManager.processNewBytes), handed to the same owner of the
  * messages, which carries out the commands of both doors one after the other.
  *
- * The answer is the broadcast's result data, which `am broadcast` prints, and it says what the
- * owner DID: "ok <n> bytes" when it has run the command and nothing was thrown (a command the
- * app does not know is run as nothing, and is "ok" too); "refused: <why>" when nothing happened
- * at all (no extra, bad base64, nothing to send, the app is not ready, the sign link did not get
- * to it: sending it again is safe); "failed: the app threw ..." when the command threw, and
- * then part of it may have been done. A command that throws ends neither the app nor this door.
+ * The answer is the broadcast's result (`am broadcast` prints its code and its data), and it
+ * says what the owner DID. THE HOOK NEVER PROMISES WHAT NOTHING ALIVE HOLDS:
+ * - "ok <n> bytes" (code -1): the owner has run the command and nothing was thrown (a command
+ *   the app does not know is run as nothing, and is "ok" too).
+ * - "refused: <why>" (code 1): it is CERTAIN that nothing happened and that nothing will;
+ *   sending it again is safe. Every way to it, and why it is certain there:
+ *     the wrong action, extras that cannot be read, an extra of the wrong type or with an
+ *     unknown name, no extra, bad base64, nothing to send: decided before the app is touched;
+ *     "the app is not up yet, send it again": no sign link is running the owner's queue (the
+ *     process was started by this very broadcast, or the main screen has not got that far),
+ *     and the hook makes no message manager to carry the command out itself;
+ *     "the command was not handed to the app within 5000 ms, and it will not be": the
+ *     receiver's thread did not get to the hand-over in time, and when it gets there it finds
+ *     the command refused and hands nothing over;
+ *     the hook could not start its timer or the command's thread, or failed before the command
+ *     was handed to the app: the command's thread, which makes the hand-over, never ran;
+ *     the sign link did not get to it: the owner's queue withdrew the change, and says so with
+ *     a value only the queue makes (OwnerQueue.Asked.Withdrawn).
+ * - anything else: the command MAY have happened. "failed: ..." (code 2): the app threw on
+ *   the command, and part of it may have been done; or the call threw, and it is not known.
+ *   "underway: ..." (code 3): the running app has been handed the command and there is no
+ *   outcome within 5 s of the broadcast's arrival here; the command is not cut short, and
+ *   how it ends goes to the log, written by the app that the HOME activity keeps alive:
+ *   ONE line, "adb write, after its answer: ...", with the outcome, or with "gave up after
+ *   60 s" when the command has not ended a minute after the broadcast came.
+ *   And "result=0" with NO data is not an answer of this hook at all: the app died, or the
+ *   system's time limit for the broadcast ran out before the hook answered (see AdbCommand.Kind).
+ * A command that throws ends neither the app nor this door.
+ *
+ * The 5 s are ONE deadline, taken by the first statements of onReceive, before the extras are
+ * read and before the app is asked for its way in. What the system spends BEFORE onReceive
+ * (starting the app when it is not running, a busy main thread) is not the hook's to bound:
+ * see AdbCommand.ANSWER_WITHIN_MS for what happens then.
+ *
+ * Every line in the log has the outcome first and a bounded piece of the command behind it
+ * (AdbCommand.logLine): "adb write: ok 5 bytes [!next]".
  */
 class AdbCommandReceiver : BroadcastReceiver() {
 
+    /**
+     * Three statements, and then everything is AdbCommand.receive, which takes its deadline and
+     * arms its timer before it does anything else: from there on the broadcast is answered within
+     * AdbCommand.ANSWER_WITHIN_MS whatever this thread is held up by. The three before it read a
+     * flag and take the broadcast's result object; they wait for nothing.
+     */
     override fun onReceive(context: Context, intent: Intent) {
         // `am broadcast` sends an ordered broadcast; anything else has nowhere to put an answer.
         // Asked now: after goAsync() this receiver no longer knows.
         val ordered = isOrderedBroadcast
-
-        val bytes = when (val command = commandOf(intent)) {
-            is AdbCommand.Refused -> {
-                refuse(command.why, ordered)
-                return
-            }
-
-            is AdbCommand.Bytes -> command.bytes
-        }
-        // Here, on the main thread: MessageManager is built by its first use, and only the main
-        // thread may build it (it observes LiveData). Normally the main screen has done that.
-        val manager = try {
-            GlobalContext.getOrNull()?.get<MessageManager>()
-        } catch (e: Exception) {
-            Log.w(BLUETOOTH_WRITE_TAG, "adb write: the app has no MessageManager", e)
-            null
-        }
-        if (manager == null) {
-            refuse("the app is not ready (it has no MessageManager)", ordered)
+        // The broadcast stays open until some thread has an answer; this one need not be it.
+        val pending: PendingResult? = goAsync()
+        if (pending == null) {
+            // Not called for a broadcast at all: there is nothing to answer and nothing is done.
+            Log.w(BLUETOOTH_WRITE_TAG, "adb write refused: not called for a broadcast")
             return
         }
 
-        // The wait for the owner of the messages is not for the main thread: the broadcast stays
-        // open until the other thread has the outcome. That thread reads the command (an ad
-        // command is parsed there) and then waits for the owner: two seconds at most for the
-        // owner to start it, and then for as long as the owner takes to finish it.
-        val pending = goAsync()
-        AdbCommand.aside(bytes, manager) { outcome ->
+        fun log(outcome: AdbCommand.Outcome, line: String) {
+            if (outcome.accepted) Log.d(BLUETOOTH_WRITE_TAG, line) else Log.w(BLUETOOTH_WRITE_TAG, line, outcome.thrown)
+        }
+        AdbCommand.receive(
+            command = { commandOf(intent) },
+            // Null when the app is not up: the hook makes no message manager (Koin would, here,
+            // when the main screen has not).
+            app = { AdbCommand.entryWhenUp(GlobalContext.getOrNull()) },
+            late = ::log,
+        ) { outcome, line ->
             try {
-                val line = "adb write: [${String(bytes)}] ${outcome.answer}"
-                if (outcome.accepted) Log.d(BLUETOOTH_WRITE_TAG, line) else Log.w(BLUETOOTH_WRITE_TAG, line, outcome.thrown)
+                log(outcome, line)
                 if (ordered) {
-                    pending.resultCode = if (outcome.accepted) Activity.RESULT_OK else Activity.RESULT_CANCELED
+                    pending.resultCode = outcome.kind.resultCode
                     pending.resultData = outcome.answer
                 }
             } finally {
@@ -78,22 +101,15 @@ class AdbCommandReceiver : BroadcastReceiver() {
         }
     }
 
-    private fun commandOf(intent: Intent): AdbCommand =
-        if (intent.action != AdbCommand.ACTION) {
-            AdbCommand.Refused("the action must be ${AdbCommand.ACTION}")
-        } else {
-            AdbCommand.fromExtras(
-                text = intent.getStringExtra(AdbCommand.EXTRA_TEXT),
-                b64 = intent.getStringExtra(AdbCommand.EXTRA_B64),
-            )
+    private fun commandOf(intent: Intent): AdbCommand {
+        if (intent.action != AdbCommand.ACTION) return AdbCommand.Refused("the action must be ${AdbCommand.ACTION}")
+        // Every extra there is, with the value it has: getStringExtra would hand back null for
+        // one of another type, and "there, but not a string" must not read as "not there".
+        val extras: Map<String, Any?> = try {
+            intent.extras?.let { bundle -> bundle.keySet().associateWith { bundle.get(it) } } ?: emptyMap()
+        } catch (e: RuntimeException) {
+            return AdbCommand.Refused("the extras could not be read (${e.javaClass.simpleName})")
         }
-
-    /** An answer that needs no other thread: nothing was handed to the app. */
-    private fun refuse(why: String, ordered: Boolean) {
-        Log.w(BLUETOOTH_WRITE_TAG, "adb write refused: $why")
-        if (ordered) {
-            resultCode = Activity.RESULT_CANCELED
-            resultData = "refused: $why"
-        }
+        return AdbCommand.fromExtras(extras)
     }
 }
