@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds only: nothing in here reaches a release build. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <!--
+          Hands the app the bytes of a Bluetooth write, over adb (see AdbCommandReceiver).
+          Exported so that the adb shell can reach it, and closed to everyone who does not hold
+          DUMP: the shell does, an app on the device does not. No intent filter: only a broadcast
+          that names this class is delivered.
+        -->
+        <receiver
+            android:name=".adb.AdbCommandReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP" />
+    </application>
+</manifest>

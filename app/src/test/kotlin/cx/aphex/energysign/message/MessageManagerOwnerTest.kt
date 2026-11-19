@@ -6,8 +6,8 @@ import androidx.arch.core.executor.ArchTaskExecutor
 import androidx.arch.core.executor.TaskExecutor
 import com.google.gson.JsonParser
 import cx.aphex.energysign.beatlinkdata.BeatLinkTrack
-import cx.aphex.energysign.gpt.GPTViewModel
-import cx.aphex.energysign.gpt.PostedGptAnswer
+import cx.aphex.energysign.ai.AIReplySource
+import cx.aphex.energysign.ai.PostedAIAnswer
 import cx.aphex.energysign.keyboard.KeyboardManager
 import cx.aphex.energysign.uart.Attention
 import cx.aphex.energysign.uart.SignLink
@@ -78,7 +78,7 @@ class MessageManagerOwnerTest {
             modules(module {
                 single { repo }
                 single { owner }
-                single { GPTViewModel() }
+                single<AIReplySource> { FakeReplies() }
             })
         }
         manager = MessageManager(context, repo, owner)
@@ -197,7 +197,7 @@ class MessageManagerOwnerTest {
     }
 
     @Test
-    fun `everything from other threads goes through the owner, a new message, a GPT state, a GPT reply, a track`() {
+    fun `everything from other threads goes through the owner, a new message, an AI state, an AI reply, a track`() {
         val untouched = {
             assertEquals(5, repo.marqueeMessages.size)
             assertEquals(0, repo.oneTimeMessages.size)
@@ -210,7 +210,7 @@ class MessageManagerOwnerTest {
         }
         fromServer(stillOnlyThat) { manager.togglePersistentThinkingMessage(true) }
         repo.oneTimeMessages.clear()
-        fromServer(stillOnlyThat) { manager.onNewPostedGPTReply(PostedGptAnswer(answer = "an answer", inReplyTo = "MESSAGE 2")) }
+        fromServer(stillOnlyThat) { manager.onNewPostedAIReply(PostedAIAnswer(answer = "an answer", inReplyTo = "MESSAGE 2")) }
         fromServer({ assertEquals(0, repo.oneTimeMessages.size) }) {
             manager.processNowPlayingTrack(BeatLinkTrack(id = 1, title = "Title", artist = "Artist"))
         }
@@ -218,7 +218,7 @@ class MessageManagerOwnerTest {
         assertEquals(7, repo.marqueeMessages.size)
         assertEquals("AN ANSWER", repo.marqueeMessages[repo.marqueeMessages.indexOfFirst { it.str == "MESSAGE 2" } + 1].str)
         assertTrue(repo.oneTimeMessages.any { it is Message.NowPlayingTrackMessage })
-        assertTrue(repo.oneTimeMessages.none { it is Message.ColorMessage.GPTThinking })
+        assertTrue(repo.oneTimeMessages.none { it is Message.ColorMessage.AIThinking })
     }
 
     // ---- the HTTP server is told what happened
@@ -239,14 +239,14 @@ class MessageManagerOwnerTest {
 
     @Test
     fun `a posted reply is stored, and a reply for nothing or a blank one is refused, not thrown`() {
-        assertTrue(fromServer { manager.onNewPostedGPTReply(PostedGptAnswer(answer = "an answer", inReplyTo = "MESSAGE 2")) })
+        assertTrue(fromServer { manager.onNewPostedAIReply(PostedAIAnswer(answer = "an answer", inReplyTo = "MESSAGE 2")) })
         assertEquals(6, repo.marqueeMessages.size)
 
-        assertFalse(fromServer { manager.onNewPostedGPTReply(PostedGptAnswer(answer = "  ", inReplyTo = "MESSAGE 2")) })
+        assertFalse(fromServer { manager.onNewPostedAIReply(PostedAIAnswer(answer = "  ", inReplyTo = "MESSAGE 2")) })
         assertEquals(6, repo.marqueeMessages.size)
 
         repo.marqueeMessages.clear()
-        assertFalse(fromServer { manager.onNewPostedGPTReply(PostedGptAnswer(answer = "an answer", inReplyTo = "GONE")) })
+        assertFalse(fromServer { manager.onNewPostedAIReply(PostedAIAnswer(answer = "an answer", inReplyTo = "GONE")) })
         assertEquals(0, repo.marqueeMessages.size)
     }
 
@@ -351,7 +351,7 @@ class MessageManagerOwnerTest {
         KeyboardManager.submitKeyboardInput()
         ownerRuns() // the one step: nothing runs between taking the text and storing the message
         assertEquals("hello", repo.marqueeMessages.first().str)
-        assertTrue(repo.marqueeMessages.first() is Message.Marquee.GPTQuery)
+        assertTrue(repo.marqueeMessages.first() is Message.Marquee.AIQuery)
         assertNull(KeyboardManager.handleKeyboardInput())
         assertEquals(6, repo.marqueeMessages.size)
     }
@@ -489,11 +489,11 @@ class MessageManagerOwnerTest {
         fromServer { manager.processNewUserMessage("FRESH") }
         assertEquals(2, pushes)
         assertEquals("1/6 FRESH", manager.chooserShown()?.let { "${it.flashy} ${it.str}" })
-        fromServer { manager.onNewPostedGPTReply(PostedGptAnswer(answer = "an answer", inReplyTo = "MESSAGE 2")) }
+        fromServer { manager.onNewPostedAIReply(PostedAIAnswer(answer = "an answer", inReplyTo = "MESSAGE 2")) }
         assertEquals(3, pushes)
         assertEquals("1/7", manager.chooserShown()?.flashy)
         // a reply that was refused changed nothing
-        fromServer { manager.onNewPostedGPTReply(PostedGptAnswer(answer = " ", inReplyTo = "MESSAGE 2")) }
+        fromServer { manager.onNewPostedAIReply(PostedAIAnswer(answer = " ", inReplyTo = "MESSAGE 2")) }
         assertEquals(3, pushes)
     }
 
