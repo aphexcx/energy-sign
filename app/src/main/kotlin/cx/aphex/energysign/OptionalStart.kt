@@ -54,7 +54,7 @@ internal class OptionalStart(
         private set
 
     inner class Attempt internal constructor() {
-        private val began = worker.nowMs()
+        private var began = worker.nowMs()
         val confirmed get() = live && up
         val live get() = current === this
         fun pending(): Boolean {
@@ -62,6 +62,13 @@ internal class OptionalStart(
             if (worker.nowMs() - began < 20_000) return true
             expire()
             return false
+        }
+        fun renewDeadline(): Boolean {
+            if (!pending()) return false
+            cancel()
+            began = worker.nowMs()
+            cancel = worker.after(20_000, ::expire)
+            return true
         }
         fun done(): Boolean {
             if (!pending()) return false

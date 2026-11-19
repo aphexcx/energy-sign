@@ -134,6 +134,16 @@ class BluetoothWriteEntryTest {
     private fun stored(): List<String> = repo.marqueeMessages.map { it.str }
 
     @Test
+    fun malformedWritesNeverReachTheMessageOwner() {
+        val before = stored()
+        val delete = "!delete".toByteArray()
+        assertEquals(BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED, server.uartWriteStatus(delete, preparedWrite = true))
+        assertEquals(BluetoothGatt.GATT_INVALID_OFFSET, server.uartWriteStatus(delete, offset = 1))
+        ownerRuns()
+        assertEquals(before, stored())
+    }
+
+    @Test
     fun `a requested success acknowledges a command the owner has already executed`() {
         // BeforeEach drained the queue on this thread, so the owner can answer immediately.
         assertEquals(BluetoothGatt.GATT_SUCCESS, server.uartWriteStatus("!delete".toByteArray()))
