@@ -18,9 +18,11 @@ import io.ktor.util.toUpperCasePreservingASCIIRules
 import java.io.File
 import java.io.FileOutputStream
 import java.util.Collections.synchronizedList
+import java.util.RandomAccess
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicReference
+import java.util.function.Predicate
 
 class MessageRepository(
     /** Writes the files: one write at a time, in the order they were asked for. */
@@ -29,8 +31,43 @@ class MessageRepository(
     val marqueeMessages: MutableList<Message.Marquee> =
         synchronizedList(mutableListOf<Message.Marquee>())
 
-    val oneTimeMessages: MutableList<Message> =
-        synchronizedList(mutableListOf<Message>())
+    // The same heading, icon or command object can be queued more than once. Distinguish
+    // occurrences so a newly pushed one always precedes a stored retry, even in that case.
+    private class OneTimeQueue : AbstractMutableList<Message>(), RandomAccess {
+        private class Entry(val message: Message, val number: Long)
+        private val entries = ArrayList<Entry>()
+        var lastNumber = 0L
+            private set
+        fun frontIsNewerThan(number: Long) = (entries.firstOrNull()?.number ?: 0L) > number
+        override val size get() = entries.size
+        override fun get(index: Int) = entries[index].message
+        override fun add(index: Int, element: Message) {
+            entries.add(index, Entry(element, ++lastNumber))
+            modCount++
+        }
+        override fun set(index: Int, element: Message) = entries.set(index, Entry(element, ++lastNumber)).message
+        override fun removeAt(index: Int): Message {
+            val removed = entries.removeAt(index)
+            modCount++
+            return removed.message
+        }
+        override fun removeIf(filter: Predicate<in Message>): Boolean {
+            val removed = entries.removeIf { filter.test(it.message) }
+            if (removed) modCount++
+            return removed
+        }
+        override fun clear() {
+            entries.clear()
+            modCount++
+        }
+    }
+
+    private val queue = OneTimeQueue()
+    val oneTimeMessages: MutableList<Message> = synchronizedList(queue)
+
+    /** Owner only. The selection's own ads or notice have already been queued at this point. */
+    internal fun lastOneTimeNumber() = queue.lastNumber
+    internal fun hasNewerOneTimeAtFront(number: Long) = queue.frontIsNewerThan(number)
 
     fun pushOneTimeMessages(vararg messages: Message) {
         messages.reversed().forEach { pushOneTimeMessage(it) }
@@ -103,10 +140,13 @@ class MessageRepository(
      * [reply] comes ready ([replyMessage]): this runs on the thread that answers the sign, and
      * nothing here looks at the text. One pass over the list to find the query.
      */
-    fun insertAIReply(query: Message.Marquee.AIQuery, reply: Message.Marquee.AIReply, seenAt: Int? = null): Int {
+    fun insertAIReply(
+        query: Message.Marquee.AIQuery, reply: Message.Marquee.AIReply, seenAt: Int? = null,
+        asUser: (Message.Marquee.AIQuery) -> Message.Marquee.User = Message.Marquee.AIQuery::toUserMessage,
+    ): Int {
         val queryMsgIdx = indexOf(query, seenAt)
         if (queryMsgIdx < 0) return NOT_PUT_IN
-        marqueeMessages[queryMsgIdx] = query.toUserMessage()
+        marqueeMessages[queryMsgIdx] = asUser(query)
         marqueeMessages.add(queryMsgIdx + 1, reply)
         return queryMsgIdx + 1
     }
@@ -123,10 +163,13 @@ class MessageRepository(
      * [query] will get no reply: it stays where it is, as the plain message it was, and is not a
      * query any more. False when it is not in the list.
      */
-    fun retireQuery(query: Message.Marquee.AIQuery, seenAt: Int? = null): Boolean {
+    fun retireQuery(
+        query: Message.Marquee.AIQuery, seenAt: Int? = null,
+        asUser: (Message.Marquee.AIQuery) -> Message.Marquee.User = Message.Marquee.AIQuery::toUserMessage,
+    ): Boolean {
         val queryMsgIdx = indexOf(query, seenAt)
         if (queryMsgIdx < 0) return false
-        marqueeMessages[queryMsgIdx] = query.toUserMessage()
+        marqueeMessages[queryMsgIdx] = asUser(query)
         return true
     }
 
@@ -138,13 +181,16 @@ class MessageRepository(
      *
      * [reply] comes ready ([postedReplyMessage]), as for [insertAIReply]. One pass over the list.
      */
-    fun insertPostedAIReply(reply: Message.Marquee.AIReply, inReplyTo: String): Int {
+    fun insertPostedAIReply(
+        reply: Message.Marquee.AIReply, inReplyTo: String,
+        asUser: (Message.Marquee.AIQuery) -> Message.Marquee.User = Message.Marquee.AIQuery::toUserMessage,
+    ): Int {
         if (marqueeMessages.isEmpty()) return NOT_PUT_IN
         val found = marqueeMessages.indexOfFirst { it.str == inReplyTo }
         val queryMsgIdx = if (found >= 0) found else 0
         // Convert the AIQuery message to a user message
         (marqueeMessages[queryMsgIdx] as? Message.Marquee.AIQuery)?.let {
-            marqueeMessages[queryMsgIdx] = it.toUserMessage()
+            marqueeMessages[queryMsgIdx] = asUser(it)
         }
         marqueeMessages.add(queryMsgIdx + 1, reply)
         return queryMsgIdx + 1
