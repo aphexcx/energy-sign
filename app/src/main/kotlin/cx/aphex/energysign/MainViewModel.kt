@@ -39,7 +39,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
         startManager = EnergySignBluetoothManager::start,
         stopManager = EnergySignBluetoothManager::stop,
     )
-    private val beatLink = lazy { BeatLinkListener(application.applicationContext) }
+    private val worker by lazy { SignWorker { logW(it) } }
+    private val beatLink = lazy { BeatLinkListener(application.applicationContext, worker) }
     private var firstForeground = true
     private val energySignUartManager: EnergySignUartManager = EnergySignUartManager(this, owner)
 
@@ -61,7 +62,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
                 checkNotNull(messageManager)
             },
             startBluetooth = bluetooth::start,
-            startBeatLink = { beatLink.value.ensureListening() },
+            startBeatLink = { worker.post { beatLink.value.ensureListening() } },
             startLink = energySignUartManager::start,
         )
     }
@@ -71,7 +72,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
             firstForeground = false // init already attempted setup for this launch.
         } else {
             energySignUartManager.onForeground()
-            startup.optional("BeatLink startup") { beatLink.value.ensureListening() }
+            startup.optional("BeatLink startup") { worker.post { beatLink.value.ensureListening() } }
             val manager = bluetooth.manager
             if (manager == null) bluetooth.start() else startup.optional("Bluetooth foreground") { manager.onForeground() }
         }
@@ -81,7 +82,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
         super.onCleared()
         // Who brings changes stops first, then who carries them out
         try {
-            if (beatLink.isInitialized()) startup.optional("BeatLink cleanup") { beatLink.value.close() }
             bluetooth.manager?.stop()
         } finally {
             energySignUartManager.stop()

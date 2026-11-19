@@ -1,13 +1,10 @@
 package cx.aphex.energysign.beatlinkdata
 
 import android.content.Context
-import cx.aphex.energysign.StartAlarm
-import cx.aphex.energysign.startupAlarm
-import cx.aphex.energysign.BoundedStart
-import cx.aphex.energysign.serialWorker
-import cx.aphex.energysign.SignStartup
+import cx.aphex.energysign.OptionalStart
+import cx.aphex.energysign.StartWorker
+import cx.aphex.energysign.optional
 import java.util.concurrent.Executor
-import java.util.concurrent.atomic.AtomicBoolean
 import io.ktor.server.engine.ApplicationEngine
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
@@ -32,65 +29,41 @@ import org.koin.core.component.inject
 
 internal const val BEATLINK_PORT = 8080
 
-/** MainApplication owns the only listener. Binding the TCP port and closing Netty are serialized. */
+/** The shared worker owns publication. A slow Netty call occupies only its own attempt thread. */
 internal class BeatLinkListener(
     context: Context,
-    private val dispatch: Executor = serialWorker("beatlink-http"),
-    arm: StartAlarm = ::startupAlarm,
+    private val worker: StartWorker,
+    private val nettyWork: Executor = Executor { task -> Thread(task, "beatlink-netty").apply { isDaemon = true }.start() },
+    create: (() -> ApplicationEngine)? = null,
 ) : KoinComponent {
     private val messageManager: MessageManager by inject()
-    private val startup = SignStartup { logW(it) }
-    private val binding = BoundedStart(arm)
-    private val discovery = DnsSdAnnouncer(context, dispatch)
+    internal val discovery = DnsSdAnnouncer(context, worker)
+    private val createServer = create ?: ::createEngine
     private var server: ApplicationEngine? = null
-    private val queued = AtomicBoolean()
-    @Volatile private var closed = false
-
-    fun ensureListening(create: () -> ApplicationEngine = ::createEngine) {
-        if (closed || !queued.compareAndSet(false, true)) return
-        val job = Runnable {
-            queued.set(false)
-            if (closed) return@Runnable
-            if (server == null) {
-                val ticket = binding.begin { startup.failed("BeatLink listener startup", "bind deadline") }
-                    ?: return@Runnable
-                val engine = startup.optional("BeatLink listener construction", create)
-                if (engine == null) {
-                    ticket.fail()
-                    return@Runnable
-                }
-                val running = if (ticket.pending() && !closed) {
-                    startup.optional("BeatLink listener startup") { engine.start(wait = false) }
-                } else null
-                if (running == null || closed || !ticket.done()) {
-                    ticket.fail()
-                    startup.optional("BeatLink listener cleanup") { engine.stop(0, 0) }
-                    return@Runnable
-                }
-                server = engine
-                logD("HTTP listener bound on port $BEATLINK_PORT")
+    private val binding = OptionalStart("BeatLink listener startup", worker, { logW(it) }) { attempt ->
+        nettyWork.execute {
+            var engine: ApplicationEngine? = null
+            val result = runCatching {
+                createServer().also { engine = it; it.start(wait = false) }
             }
-            startup.optional("DNS-SD startup") { discovery.start() }
-        }
-        try {
-            dispatch.execute { startup.optional("BeatLink worker", job::run) }
-        } catch (failure: Throwable) {
-            queued.set(false)
-            throw failure
+            worker.post {
+                val running = result.getOrNull()
+                if (running != null && attempt.done()) {
+                    server = running
+                    logD("HTTP listener bound on port $BEATLINK_PORT")
+                    discovery.ensure()
+                } else {
+                    result.exceptionOrNull()?.let { attempt.fail(it.javaClass.name) }
+                    engine?.let { stale ->
+                        nettyWork.execute { optional("BeatLink listener cleanup", { logW(it) }) { stale.stop(0, 0) } }
+                    }
+                }
+            }
         }
     }
 
-    fun close() {
-        if (closed) return
-        closed = true
-        binding.reset()
-        dispatch.execute {
-            discovery.stop()
-            val old = server
-            server = null
-            startup.optional("BeatLink listener cleanup") { old?.stop(0, 0) }
-            (dispatch as? java.util.concurrent.ExecutorService)?.shutdown()
-        }
+    fun ensureListening() {
+        if (server == null) binding.ensure() else discovery.ensure()
     }
 
     private fun createEngine() = embeddedServer(Netty, BEATLINK_PORT) {
