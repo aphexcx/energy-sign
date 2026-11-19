@@ -49,7 +49,9 @@ internal class EnergySignBluetoothGattServer(
     }
 
     override fun onServiceAdded(status: Int, service: BluetoothGattService) {
-        if (!closed && service.uuid == NordicUartServiceProfile.NORDIC_UART_SERVICE_UUID) serviceAdded(status)
+        if (closed || service.uuid != NordicUartServiceProfile.NORDIC_UART_SERVICE_UUID) return
+        if (status == BluetoothGatt.GATT_SUCCESS) logD("Nordic UART service registered")
+        serviceAdded(status)
     }
 
     fun stop() {

@@ -48,22 +48,21 @@ internal class BluetoothSession(
     fun checkAdapter() {
         if (!listening || current != null) return
         startup.optional("Bluetooth adapter activation") {
-            if (enabled()) {
-                adapterOn()
-            } else {
-                val ticket = activation.begin {
-                    post {
-                        startup.optional("Bluetooth adapter activation") {
-                            if (listening && current == null && enabled()) adapterOn()
-                        }
+            val ticket = activation.begin {
+                post {
+                    startup.optional("Bluetooth adapter activation") {
+                        if (listening && current == null && enabled()) adapterOn()
                     }
-                } ?: return@optional
-                try {
-                    check(enable()) { "Bluetooth adapter refused to enable" }
-                } catch (failure: Throwable) {
-                    ticket.fail()
-                    throw failure
                 }
+            } ?: return@optional
+            try {
+                val radioOn = enabled()
+                if (ticket.pending()) {
+                    if (radioOn) adapterOn() else check(enable()) { "Bluetooth adapter refused to enable" }
+                }
+            } catch (failure: Throwable) {
+                ticket.fail()
+                throw failure
             }
         }
     }
@@ -75,8 +74,8 @@ internal class BluetoothSession(
         adapterOff()
         val attempt = Attempt()
         current = attempt
-        watch(attempt)
         val accepted = startup.optional("Bluetooth GATT registration") {
+            watch(attempt)
             check(openGatt { status -> serviceAdded(attempt, status) }) { "UART service submission refused" }
         }
         if (accepted == null && current === attempt) adapterOff()
@@ -109,8 +108,8 @@ internal class BluetoothSession(
     private fun submitAdvertisement(attempt: Attempt, includeName: Boolean) {
         val phase = if (includeName) Phase.STARTING_ADVERTISER else Phase.STARTING_UUID_ONLY
         attempt.phase = phase
-        watch(attempt)
         val submitted = startup.optional("Bluetooth advertising") {
+            watch(attempt)
             advertise(includeName) { status ->
                 if (current === attempt && attempt.phase == phase && attempt.ticket?.pending() == true) {
                     if (includeName && status == AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE) {

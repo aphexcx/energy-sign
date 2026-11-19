@@ -190,4 +190,29 @@ class BluetoothRegistrationTest {
         assertEquals(3, registrations.size)
         assertEquals(2, closed)
     }
+
+    @Test
+    fun missingEnableBroadcastRechecksTheRadioWithoutReopeningReadyServices() {
+        var radioOn = false
+        var enableCalls = 0
+        var timer: (() -> Unit)? = null
+        val recovery = BluetoothSession(SignStartup(warnings::add), {}, {}, { radioOn }, { enableCalls++; true },
+            openGatt = { added -> registrations += added; true },
+            advertise = { _, result -> advertisements += result },
+            closeServices = { closed++ },
+        )
+        recovery.arm = { action -> timer = action; { timer = null } }
+        recovery.start()
+        val enableTimeout = checkNotNull(timer)
+        recovery.checkAdapter()
+        assertEquals(1, enableCalls)
+        radioOn = true
+        enableTimeout()
+        registrations.single()(0)
+        advertisements.single()(0)
+        enableTimeout()
+        recovery.checkAdapter()
+        assertEquals(1, registrations.size)
+        assertEquals(0, closed)
+    }
 }

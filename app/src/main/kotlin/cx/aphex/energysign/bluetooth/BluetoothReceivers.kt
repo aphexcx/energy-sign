@@ -20,7 +20,6 @@ internal class BluetoothReceivers(private val context: Context) {
     fun registerAdapter(adapterState: BroadcastReceiver) {
         context.registerReceiver(adapterState, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED))
         registrations.add(Disposable.fromAction { context.unregisterReceiver(adapterState) })
-
     }
 
     fun ensurePairing(bondState: BroadcastReceiver) {
