@@ -6,6 +6,7 @@ import androidx.lifecycle.AndroidViewModel
 import cx.aphex.energysign.beatlinkdata.DnsSdAnnouncer
 import cx.aphex.energysign.bluetooth.BluetoothStatusUpdate
 import cx.aphex.energysign.bluetooth.EnergySignBluetoothManager
+import cx.aphex.energysign.bluetooth.deliverEachWrite
 import cx.aphex.energysign.ext.NonNullMutableLiveData
 import cx.aphex.energysign.ext.logE
 import cx.aphex.energysign.message.ChooserProtocol
@@ -62,9 +63,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
         energySignBluetoothManager = EnergySignBluetoothManager(application.applicationContext, this)
         energySignBluetoothManager.start()
 
-        energySignBluetoothManager.receivedBytes.subscribe { value ->
-            messageManager.processNewBytes(value)
-        }
+        energySignBluetoothManager.receivedBytes.deliverEachWrite(messageManager::processNewBytes)
 
         dnsSdAnnouncer = DnsSdAnnouncer(application.applicationContext)
         dnsSdAnnouncer.start()

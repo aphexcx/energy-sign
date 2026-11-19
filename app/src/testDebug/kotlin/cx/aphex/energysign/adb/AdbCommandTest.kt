@@ -1,0 +1,127 @@
+package cx.aphex.energysign.adb
+
+import org.junit.jupiter.api.Test
+import java.util.Base64
+import kotlin.test.assertContentEquals
+import kotlin.test.assertEquals
+import kotlin.test.assertIs
+import kotlin.test.assertTrue
+
+/** Turning the extras of the broadcast into the bytes a Bluetooth write would carry. */
+class AdbCommandTest {
+
+    private fun b64(text: String): String = Base64.getEncoder().encodeToString(text.toByteArray(Charsets.UTF_8))
+
+    private fun bytesOf(command: AdbCommand): ByteArray = assertIs<AdbCommand.Bytes>(command, "expected bytes, got $command").bytes
+
+    private fun refusal(command: AdbCommand): String = assertIs<AdbCommand.Refused>(command, "expected a refusal, got $command").why
+
+    @Test
+    fun `text is sent as its UTF-8 bytes`() {
+        assertContentEquals("!next".toByteArray(Charsets.UTF_8), bytesOf(AdbCommand.fromExtras(text = "!next", b64 = null)))
+        assertContentEquals(
+            "hello from the mayor".toByteArray(Charsets.UTF_8),
+            bytesOf(AdbCommand.fromExtras(text = "hello from the mayor", b64 = null)),
+        )
+    }
+
+    @Test
+    fun `b64 is decoded to the bytes it stands for`() {
+        assertContentEquals("!choose".toByteArray(Charsets.UTF_8), bytesOf(AdbCommand.fromExtras(text = null, b64 = b64("!choose"))))
+    }
+
+    @Test
+    fun `b64 wins when both are there`() {
+        assertContentEquals(
+            "!prev".toByteArray(Charsets.UTF_8),
+            bytesOf(AdbCommand.fromExtras(text = "!next", b64 = b64("!prev"))),
+        )
+    }
+
+    @Test
+    fun `bad b64 is refused even when text is there too - b64 wins, it is not skipped`() {
+        val why = refusal(AdbCommand.fromExtras(text = "!next", b64 = "this is *not* base64"))
+
+        assertTrue(why.contains("base64"), why)
+    }
+
+    @Test
+    fun `neither extra is refused, and the reason names both`() {
+        val why = refusal(AdbCommand.fromExtras(text = null, b64 = null))
+
+        assertTrue(why.contains("text") && why.contains("b64"), why)
+    }
+
+    @Test
+    fun `bad base64 is refused - a wrong character, a wrong length, wrong padding`() {
+        for (bad in listOf("!!!!", "IW5le*Q=", "=IW5leHQ=", "IW5leHQ==", "IW5le", "IW5leHQ=IW5leHQ=")) {
+            val why = refusal(AdbCommand.fromExtras(text = null, b64 = bad))
+            assertTrue(why.contains("base64"), "$bad: $why")
+        }
+    }
+
+    @Test
+    fun `base64 without its padding is read - it can only mean one thing`() {
+        assertContentEquals("!next".toByteArray(Charsets.UTF_8), bytesOf(AdbCommand.fromExtras(text = null, b64 = "IW5leHQ")))
+        assertContentEquals("!next".toByteArray(Charsets.UTF_8), bytesOf(AdbCommand.fromExtras(text = null, b64 = "IW5leHQ=")))
+    }
+
+    @Test
+    fun `an empty string is refused, as text and as b64`() {
+        assertTrue(refusal(AdbCommand.fromExtras(text = "", b64 = null)).contains("empty"))
+        assertTrue(refusal(AdbCommand.fromExtras(text = null, b64 = "")).contains("empty"))
+        assertTrue(refusal(AdbCommand.fromExtras(text = "!next", b64 = "")).contains("empty"), "an empty b64 still wins")
+    }
+
+    @Test
+    fun `base64 broken into lines, as some encoders write it, is read`() {
+        val long = "!🅰️\n" + (1..12).joinToString("\n") { "🆑LINE NUMBER $it" }
+        val wrapped = Base64.getMimeEncoder(76, "\n".toByteArray()).encodeToString(long.toByteArray(Charsets.UTF_8)) + "\n"
+        assertTrue(wrapped.trim().contains("\n"), "the fixture must be wrapped")
+
+        assertContentEquals(long.toByteArray(Charsets.UTF_8), bytesOf(AdbCommand.fromExtras(text = null, b64 = wrapped)))
+    }
+
+    @Test
+    fun `an emoji with a variation selector arrives byte for byte`() {
+        // U+1F170 U+FE0F: the "A button" the ad command starts with, with its variation selector.
+        val ad = "!🅰️"
+        val expected = byteArrayOf(
+            0x21,
+            0xF0.toByte(), 0x9F.toByte(), 0x85.toByte(), 0xB0.toByte(),
+            0xEF.toByte(), 0xB8.toByte(), 0x8F.toByte(),
+        )
+
+        assertContentEquals(expected, bytesOf(AdbCommand.fromExtras(text = null, b64 = b64(ad))))
+        assertContentEquals(expected, bytesOf(AdbCommand.fromExtras(text = ad, b64 = null)))
+    }
+
+    @Test
+    fun `a multi-line ad command arrives whole - every line break and every emoji`() {
+        val ad = listOf(
+            "!🅰️",
+            "🆑🕰DREAM",
+            "🆑STATE",
+            "🅾️💗YOUR DJ:",
+            "🅾️🕰💗Aphex",
+            "🛤️",
+            "👾",
+        ).joinToString("\n")
+
+        val bytes = bytesOf(AdbCommand.fromExtras(text = null, b64 = b64(ad)))
+
+        assertContentEquals(ad.toByteArray(Charsets.UTF_8), bytes)
+        assertEquals(ad, String(bytes, Charsets.UTF_8))
+        assertEquals(7, String(bytes, Charsets.UTF_8).lines().size)
+    }
+
+    @Test
+    fun `the bytes are not touched - a trailing line break stays, and the answer says so`() {
+        // `echo '!next' | base64` sends "!next\n", which the app does not know as a command.
+        val withBreak = bytesOf(AdbCommand.fromExtras(text = null, b64 = b64("!next\n")))
+
+        assertContentEquals("!next\n".toByteArray(Charsets.UTF_8), withBreak)
+        assertEquals("ok 6 bytes (the last one is a line break)", AdbCommand.accepted(withBreak))
+        assertEquals("ok 5 bytes", AdbCommand.accepted("!next".toByteArray(Charsets.UTF_8)))
+    }
+}
