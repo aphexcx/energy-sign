@@ -20,6 +20,7 @@ import org.koin.dsl.module
 import java.io.File
 import java.nio.file.Files
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.Semaphore
@@ -48,7 +49,25 @@ class AdbCommandOwnerTest {
     private val context: Context = object : ContextWrapper(null) {
         override fun getFilesDir(): File = dir
     }
-    private val repo = MessageRepository(saver = Executor { it.run() })
+    /**
+     * The save runs where it is asked for, on the owner: that lets a test hold the owner in the
+     * MIDDLE of a command ([saveWaitsFor]), or make a command throw when part of it is done
+     * ([saveThrows]).
+     */
+    @Volatile
+    private var saveReached: CountDownLatch? = null
+
+    @Volatile
+    private var saveWaitsFor: CountDownLatch? = null
+
+    @Volatile
+    private var saveThrows = false
+    private val repo = MessageRepository(saver = Executor {
+        saveReached?.countDown()
+        saveWaitsFor?.await(30, TimeUnit.SECONDS)
+        it.run()
+        if (saveThrows) throw IllegalStateException("the card failed")
+    })
     private val owner = OwnerQueue()
     private lateinit var manager: MessageManager
 
@@ -100,6 +119,9 @@ class AdbCommandOwnerTest {
 
     @BeforeEach
     fun fresh() {
+        saveReached = null
+        saveWaitsFor = null
+        saveThrows = false
         linkRuns = true
         owner.neverWaitsOn(Thread({}, "nobody"))
         hook("!endchoose")
@@ -170,7 +192,7 @@ class AdbCommandOwnerTest {
 
         val refused = hook("!delete")
 
-        assertTrue(refused.startsWith("refused: the app threw "), refused)
+        assertTrue(refused.startsWith("failed: the app threw "), refused)
         assertTrue(refused.contains("IndexOutOfBounds"), refused)
         assertEquals(3, stored().size, "nothing was deleted")
 
@@ -195,6 +217,42 @@ class AdbCommandOwnerTest {
         assertEquals(5, stored().size, "a refused command is not carried out behind the sender's back")
     }
 
+    // ---- "refused" means that nothing happened (round 2 of the gate)
+
+    @Test
+    fun `a command the owner had started when the wait ran out is answered with what the owner did - it is not called refused`() {
+        val reached = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        saveReached = reached
+        saveWaitsFor = release
+
+        val outcomes = hookStarts("!delete")
+
+        assertTrue(reached.await(5, TimeUnit.SECONDS), "the owner has started the delete: the message is out of the list")
+        // The owner is held in the middle of the command, for longer than the hook waits for a
+        // command to be STARTED. "refused" now would be a lie, and whoever believed it would
+        // send the delete again and lose a second message.
+        assertNull(outcomes.poll(OwnerQueue.ASK_TIMEOUT_MS + 700, TimeUnit.MILLISECONDS), "no answer while the owner is at it")
+
+        saveReached = null
+        saveWaitsFor = null
+        release.countDown()
+
+        assertEquals("ok 7 bytes", outcomes.poll(5, TimeUnit.SECONDS)?.answer)
+        assertEquals(listOf("MESSAGE 2", "MESSAGE 3", "MESSAGE 4", "MESSAGE 5"), stored(), "one delete, and it was said")
+    }
+
+    @Test
+    fun `a command that throws when part of it is done is not called refused - the answer says it may have happened`() {
+        saveThrows = true
+
+        val answer = hook("!delete")
+
+        saveThrows = false
+        assertEquals("failed: the app threw IllegalStateException (the card failed); the command may have been carried out in part", answer)
+        assertEquals(4, stored().size, "the message was deleted before the throw: 'refused' would invite a second delete")
+    }
+
     @Test
     fun `from the main thread, which must never wait for the owner, the command is carried out aside`() {
         owner.neverWaitsOn(Thread.currentThread())
@@ -204,7 +262,7 @@ class AdbCommandOwnerTest {
 
         // What it must not do: the owner refuses to be waited for here, and says so.
         val onMain = AdbCommand.carriedOut("!delete".toByteArray(), manager::processNewBytesAndWait).answer
-        assertTrue(onMain.startsWith("refused: the app threw IllegalStateException"), onMain)
+        assertTrue(onMain.startsWith("failed: the app threw IllegalStateException"), onMain)
 
         owner.neverWaitsOn(Thread({}, "nobody"))
         assertEquals(4, stored().size, "one delete was carried out, the one that waited aside")

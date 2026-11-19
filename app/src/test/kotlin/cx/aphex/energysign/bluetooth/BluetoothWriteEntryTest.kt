@@ -167,11 +167,15 @@ class BluetoothWriteEntryTest {
     fun `a command that throws on the Bluetooth thread, while it is read, does not end the app, and the next command is carried out`() {
         // The ad command is parsed on the thread that delivers the write. No input was found that
         // makes the parser throw today, so the emoji library it calls is made to, with an Exception.
+        // The parser asks that library for an icon line only (the 👾 line), so there is one here;
+        // and the test says that the library WAS asked, or it would prove nothing.
         Mockito.mockStatic(EmojiParser::class.java).use { emoji ->
             emoji.`when`<List<String>> { EmojiParser.extractEmojis(anyString()) }
                 .thenThrow(IllegalStateException("the emoji table could not be read"))
 
-            phoneWrites("!🅰️\n🆑🕰DREAM\n🆑STATE")
+            phoneWrites("!🅰️\n🆑🕰DREAM\n🆑STATE\n👾💥")
+
+            emoji.verify({ EmojiParser.extractEmojis(anyString()) }, Mockito.atLeastOnce())
         }
         ownerRuns()
 

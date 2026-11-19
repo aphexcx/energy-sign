@@ -26,6 +26,9 @@ sealed class AdbCommand {
          */
         const val EXTRA_B64 = "b64"
 
+        /** The end of every answer for a command the app threw on. */
+        const val MAYBE_IN_PART = "; the command may have been carried out in part"
+
         /**
          * The bytes are never changed: nothing is trimmed and no line break is added or taken
          * away, because a Bluetooth write is not either. Only white space INSIDE the base64 text
@@ -56,13 +59,20 @@ sealed class AdbCommand {
 
         /**
          * Hands [bytes] to [carryOut] and says what came of it. [carryOut] is
-         * MessageManager.processNewBytesAndWait: it returns when the thread that owns the messages
-         * has carried the command out, throws what that thread threw, and throws a
-         * TimeoutException when that thread did not get to the command (no sign link is running).
-         * So "ok" means that the owner has run the command and it did not throw; it does not mean
-         * queued. It does not mean the app knew the command either: one it does not know
-         * ("!nxet", or "!next" with a line break behind it) is run as nothing and is "ok" too,
-         * as it is over Bluetooth.
+         * MessageManager.processNewBytesAndWait, which waits by OwnerQueue.ask: it returns when
+         * the thread that owns the messages has carried the command out, however long that takes
+         * once that thread has STARTED it; it throws what that thread threw; and it throws a
+         * TimeoutException only when that thread did not get to the command in time (no sign
+         * link is running), and then the command has been withdrawn and is never carried out.
+         *
+         * Three answers, and each says what is known:
+         * - "ok": the owner has run the command and it did not throw. Not "queued". It does not
+         *   mean the app knew the command either: one it does not know ("!nxet", or "!next" with
+         *   a line break behind it) is run as nothing and is "ok" too, as it is over Bluetooth.
+         * - "refused": NOTHING happened, for certain, and sending it again is safe.
+         * - "failed": the app threw. Where in the command it threw is not known here, so part of
+         *   it may have been done (a message deleted, and then the save failed): look before
+         *   sending it again.
          *
          * Nothing is thrown on from here, an Error included. Whatever the command threw has been
          * thrown and caught where it happened; the caller is the hook's own thread, and to let it
@@ -74,7 +84,7 @@ sealed class AdbCommand {
         } catch (e: TimeoutException) {
             Outcome("refused: ${e.message} (is the sign link running?)", e)
         } catch (e: Throwable) {
-            Outcome("refused: the app threw ${e.javaClass.simpleName} (${e.message})", e)
+            Outcome("failed: the app threw ${e.javaClass.simpleName} (${e.message})$MAYBE_IN_PART", e)
         }
 
         /**

@@ -26,9 +26,10 @@ import org.koin.core.context.GlobalContext
  *
  * The answer is the broadcast's result data, which `am broadcast` prints, and it says what the
  * owner DID: "ok <n> bytes" when it has run the command and nothing was thrown (a command the
- * app does not know is run as nothing, and is "ok" too), "refused: <why>" when not (no extra,
- * bad base64, nothing to send, the app threw, the sign link is not running). A command that
- * throws ends neither the app nor this door.
+ * app does not know is run as nothing, and is "ok" too); "refused: <why>" when nothing happened
+ * at all (no extra, bad base64, nothing to send, the app is not ready, the sign link did not get
+ * to it: sending it again is safe); "failed: the app threw ..." when the command threw, and
+ * then part of it may have been done. A command that throws ends neither the app nor this door.
  */
 class AdbCommandReceiver : BroadcastReceiver() {
 
@@ -60,7 +61,8 @@ class AdbCommandReceiver : BroadcastReceiver() {
 
         // The wait for the owner of the messages is not for the main thread: the broadcast stays
         // open until the other thread has the outcome. That thread reads the command (an ad
-        // command is parsed there) and then waits for the owner, two seconds at most.
+        // command is parsed there) and then waits for the owner: two seconds at most for the
+        // owner to start it, and then for as long as the owner takes to finish it.
         val pending = goAsync()
         AdbCommand.aside(bytes, manager) { outcome ->
             try {

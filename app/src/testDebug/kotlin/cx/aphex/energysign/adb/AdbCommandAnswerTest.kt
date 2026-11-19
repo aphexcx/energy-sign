@@ -36,7 +36,11 @@ class AdbCommandAnswerTest {
 
         val outcome = AdbCommand.carriedOut(next) { throw boom }
 
-        assertEquals("refused: the app threw IndexOutOfBoundsException (Index -1 out of bounds for length 3)", outcome.answer)
+        assertEquals(
+            "failed: the app threw IndexOutOfBoundsException (Index -1 out of bounds for length 3); the command may have been carried out in part",
+            outcome.answer,
+        )
+        assertFalse(outcome.answer.startsWith("refused"), "refused is only said when nothing happened")
         assertFalse(outcome.accepted)
         assertSame(boom, outcome.thrown)
     }
@@ -45,7 +49,7 @@ class AdbCommandAnswerTest {
     fun `an Error of the app is an answer too - this thread is the hook's, and nothing is gained by dying on it`() {
         val outcome = AdbCommand.carriedOut(next) { throw NoClassDefFoundError("some/Table") }
 
-        assertEquals("refused: the app threw NoClassDefFoundError (some/Table)", outcome.answer)
+        assertEquals("failed: the app threw NoClassDefFoundError (some/Table); the command may have been carried out in part", outcome.answer)
         assertFalse(outcome.accepted)
     }
 
@@ -59,6 +63,7 @@ class AdbCommandAnswerTest {
             "refused: the sign link did not get to the change within 2000 ms (is the sign link running?)",
             outcome.answer,
         )
+        assertFalse(outcome.answer.contains("in part"), "this one is definite: the change was withdrawn and nothing was done")
         assertFalse(outcome.accepted)
         assertNotNull(outcome.thrown)
     }
@@ -83,7 +88,7 @@ class AdbCommandAnswerTest {
 
         val thread = AdbCommand.aside(next, carryOut = { throw IllegalStateException("no") }, done = { outcomes.put(it) })
 
-        assertEquals("refused: the app threw IllegalStateException (no)", outcomes.poll(5, TimeUnit.SECONDS)?.answer)
+        assertEquals("failed: the app threw IllegalStateException (no); the command may have been carried out in part", outcomes.poll(5, TimeUnit.SECONDS)?.answer)
         thread.join(5_000)
         assertFalse(thread.isAlive)
     }
