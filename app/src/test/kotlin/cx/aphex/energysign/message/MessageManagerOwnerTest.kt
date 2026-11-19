@@ -370,6 +370,58 @@ class MessageManagerOwnerTest {
     }
 
     @Test
+    fun `a new occurrence of an ad can preempt its own stored retry while the original and the tail stay ordered`() {
+        val app = startWithTwoStoredMessages()
+        app.phone("!A1")
+        ownerRuns()
+        app.repo.oneTimeMessages.clear()
+        val first = app.manager.getNextMessage()
+        val generated = app.repo.oneTimeMessages.toList()
+        app.manager.returnUnsent(first)
+
+        val sameIcon = generated.first()
+        val track = Message.NowPlayingTrackMessage("tail")
+        app.repo.pushOneTimeMessage(sameIcon)
+        app.repo.enqueueOneTimeMessage(track)
+        assertSame(sameIcon, app.manager.getNextMessage())
+        assertSame(first, app.manager.getNextMessage())
+        generated.forEach { assertSame(it, app.manager.getNextMessage()) }
+        assertSame(track, app.manager.getNextMessage())
+    }
+
+    @Test
+    fun `track updates between attempts keep their queued order and the failed stored cursor`() {
+        val app = startWithTwoStoredMessages()
+        val first = app.manager.getNextMessage()
+        app.manager.returnUnsent(first)
+        app.post(BeatLinkTrack(id = 1, artist = "DJ", title = "Old"))
+        app.post(BeatLinkTrack(id = 2, artist = "DJ", title = "New"))
+
+        val queued = app.repo.oneTimeMessages.toList()
+        assertEquals(listOf("DJ - New"), queued.filterIsInstance<Message.NowPlayingTrackMessage>().map { it.str })
+        queued.forEach { assertSame(it, app.manager.getNextMessage()) }
+        assertSame(first, app.manager.getNextMessage())
+        assertSame(app.repo.marqueeMessages.last(), app.manager.getNextMessage())
+    }
+
+    @Test
+    fun `a queued heading and reply stay together ahead of a retry and the command behind them`() {
+        val app = startWithTwoStoredMessages()
+        val first = app.manager.getNextMessage()
+        app.manager.returnUnsent(first)
+        val heading = Message.ColorMessage.ChonkySlide("SAYS", 0x123456)
+        val reply = Message.Marquee.Chonky("ANSWER")
+        app.repo.pushInOnePiece(listOf(heading, reply))
+        app.phone("!micOff")
+        ownerRuns()
+
+        assertSame(heading, app.manager.getNextMessage())
+        assertSame(reply, app.manager.getNextMessage())
+        assertSame(Message.UtilityMessage.DisableMic, app.manager.getNextMessage())
+        assertSame(first, app.manager.getNextMessage())
+    }
+
+    @Test
     fun `a stored frame can fail three retries before the next stored frame gets its turn`() {
         val app = startWithTwoStoredMessages()
         val first = app.repo.marqueeMessages.first()

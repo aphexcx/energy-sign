@@ -801,19 +801,26 @@ class SignLinkTest {
         val inAnswer = CountDownLatch(1)
         val letGo = CountDownLatch(1)
         val wire = object : QuietWire() {
-            var asked = false
             override fun read(buffer: ByteArray, length: Int): Int {
-                if (asked) return 0
-                asked = true
+                if (reads.incrementAndGet() != 2) return 0 // establish freshness, then ask once
                 buffer[0] = '~'.code.toByte()
                 return 1
             }
         }
-        val real = sleepy(wire, answer = { _, _ ->
-            inAnswer.countDown()
-            letGo.await() // a reply that takes its time
-        })
-        Thread.sleep(SignLink.CHOOSER_FRESH_MS + 30L)
+        var clock = 0L
+        val real = SignLink(
+            wire = wire, baud = baud, name = "UART", events = {},
+            prepareAnswers = { clock += 611 * ms },
+            nanoTime = { clock }, sleepNanos = { nanos ->
+                clock += nanos
+                LockSupport.parkNanos(nanos)
+            },
+            timing = UartTimingLog(isEnabled = { false }, emit = {}),
+            answer = { _, _ ->
+                inAnswer.countDown()
+                letGo.await() // the port must stay open until this reply returns
+            },
+        )
         val thread = Thread(real, "sign-link-test").apply { start() }
         try {
             assertTrue(inAnswer.await(2, TimeUnit.SECONDS))

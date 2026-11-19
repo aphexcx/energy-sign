@@ -72,6 +72,7 @@ class MessageManagerRepliesTest {
     private fun build(warmUp: Boolean) {
         runSaves()
         File(dir, "signstrings.bin").delete()
+        File(dir, AdStore.PERIOD_FILE_NAME).delete()
         repo.marqueeMessages.clear()
         repo.oneTimeMessages.clear()
         replies.asked.clear()
@@ -681,6 +682,55 @@ class MessageManagerRepliesTest {
         restOfHeading()
         assertEquals("LOUD ENOUGH.", next().str)
         assertEquals(1, replies.asked.size)
+    }
+
+    @Test
+    fun `a posted answer carries the retry to the converted query without refreshing its budget`() {
+        val query = ask()
+        assertSame(query, untilStored())
+        manager.returnUnsent(query)
+        assertSame(query, next(), "retry precedes the notice created by the query")
+        manager.returnUnsent(query)
+        manager.onNewPostedAIReply(PostedAIAnswer("Posted answer", inReplyTo = query.str))
+        ownerRuns()
+        val converted = assertIs<Message.Marquee.User>(repo.marqueeMessages.first())
+        repeat(2) {
+            assertSame(converted, next())
+            manager.returnUnsent(converted)
+        }
+        // The original query's notice expires. The next stored slot is the posted answer.
+        nowMs += 31_000
+        assertEquals("RAVEGPT", next().str)
+        restOfHeading()
+        assertEquals("POSTED ANSWER", next().str)
+        assertEquals(1, replies.asked.size)
+    }
+
+    @Test
+    fun `retiring a failed query retries its replacement without counting it as another stored selection`() {
+        phone("!A2")
+        repo.oneTimeMessages.clear()
+        val query = ask()
+        assertSame(query, untilStored())
+        manager.returnUnsent(query)
+        replies.asked.single().answer(AIReplyResult.NoReply(NoReplyReason.REFUSED))
+        ownerRuns()
+        assertSame(assertIs<Message.Marquee.User>(repo.marqueeMessages.first()), next())
+        assertTrue(repo.oneTimeMessages.isEmpty(), "retrying the first item must not trigger the second item's ad round")
+        assertEquals("NEWEST", next().str)
+        assertTrue(repo.oneTimeMessages.isNotEmpty())
+    }
+
+    @Test
+    fun `a reply inserted just before a failed stored selection leaves the retry on the same object`() {
+        assertEquals("NEWEST", next().str)
+        val middle = next()
+        assertEquals("MIDDLE", middle.str)
+        manager.returnUnsent(middle)
+        manager.onNewPostedAIReply(PostedAIAnswer("For newest", inReplyTo = "NEWEST"))
+        ownerRuns()
+        assertSame(middle, next())
+        assertEquals("OLDEST", next().str)
     }
 
     @Test

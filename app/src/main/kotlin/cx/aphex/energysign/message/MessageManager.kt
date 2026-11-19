@@ -41,10 +41,14 @@ class MessageManager(
     private var nowPlayingTrack: Message.NowPlayingTrackMessage? = null
 
     private val currentIdx = atomic<Int>(0)
-    /** Set only if this request took its message from the stored list (a queued reply can be in both). */
-    private var takenFromList: Message.Marquee? = null
-    /** This stored selection already counted towards ads or started a query on its first attempt. */
-    private var retryStored: Message.Marquee? = null
+    private class StoredSelection(var message: Message.Marquee, val lastFollowUpNumber: Long) {
+        // The busy start lost three consecutive writes. A fourth failure yields to the next slot.
+        var retriesLeft = 3
+    }
+
+    /** A queued reply may also be in the list. Only an actual stored selection may rewind it. */
+    private var takenFromList: StoredSelection? = null
+    private var retryStored: StoredSelection? = null
 
     // Message type state mess **
     private var isInChooserMode: Boolean = false
@@ -280,23 +284,26 @@ class MessageManager(
             return it
         }
 
-        retryStored?.let { retry ->
-            retryStored = null
-            // A command may have moved the cursor, or a reply may have replaced the query.
-            // Retry only the same selection, before the ads or thinking notice it scheduled.
-            if (msgRepo.marqueeMessages.getOrNull(currentIdx.value) === retry) {
-                getIdxAndAdvance()
-                takenFromList = retry
-                return retry
-            }
-        }
-
         // A thinking notice whose time is up goes first of all, so that everything below sees
         // the queue as it is: the heading of a reply and the advertisements for an empty list
         // are both decided by whether anything is waiting to be shown. (The time limit is for
         // the notice, not for the call: the reply is put in when it comes.)
         if (msgRepo.oneTimeMessages.any { it is Message.ColorMessage.AIThinking } && !thinkingWanted()) {
             msgRepo.oneTimeMessages.removeIf { it is Message.ColorMessage.AIThinking }
+        }
+
+        retryStored?.let { retry ->
+            if (msgRepo.marqueeMessages.getOrNull(currentIdx.value) !== retry.message) {
+                retryStored = null // deleted or another place was selected
+            } else if (!msgRepo.hasNewerOneTimeAtFront(retry.lastFollowUpNumber)) {
+                // The queue is empty or its front is an effect of this selection. Anything
+                // pushed ahead of that effect gets the normal one-time path below.
+                getIdxAndAdvance()
+                retry.retriesLeft--
+                retryStored = null
+                takenFromList = retry
+                return retry.message
+            }
         }
 
         if (msgRepo.oneTimeMessages.isEmpty()) {
@@ -378,7 +385,6 @@ class MessageManager(
         msgRepo.onePieceShown() // the queue is empty: whatever was one piece has been shown or dropped
         val idx = getIdxAndAdvance()
         val currentMsg: Message.Marquee = msgRepo.marqueeMessages[idx]
-        takenFromList = currentMsg
         logD("getNextMessage: messages[$idx] = $currentMsg")
         usrMsgCount++
         if (currentMsg is Message.Marquee.AIQuery) {
@@ -395,6 +401,9 @@ class MessageManager(
 //                    msgRepo.marqueeMessages.filterIsInstance<Message.Marquee.User>().takeLast(5))
 //            }
         }
+        // We took this from the list with an empty one-time queue. Every item queued since
+        // then belongs to this first selection. The retry must not generate those effects again.
+        takenFromList = StoredSelection(currentMsg, msgRepo.lastOneTimeNumber())
         return currentMsg
 
     }
@@ -450,11 +459,14 @@ class MessageManager(
      * place in the list. Owner thread only.
      */
     fun returnUnsent(message: Message) {
-        if (message is Message.Marquee && message === takenFromList) {
-            val place = msgRepo.marqueeMessages.indexOfFirst { it === message }
-            if (place >= 0) {
-                currentIdx.value = place
-                retryStored = message
+        val selection = takenFromList
+        if (selection != null && message === selection.message) {
+            if (selection.retriesLeft > 0) {
+                val place = msgRepo.marqueeMessages.indexOfFirst { it === message }
+                if (place >= 0) {
+                    currentIdx.value = place
+                    retryStored = selection
+                }
             }
             return
         }
@@ -478,7 +490,13 @@ class MessageManager(
     private fun madeRoomAt(place: Int) {
         if (place < 0) return
         val at = currentIdx.value
-        if (place < at || (isInChooserMode && place == at)) currentIdx.update { it + 1 }
+        // A retry already took this slot. An insertion there must still follow the selected
+        // object, just as the normal, already-advanced cursor would have done.
+        val retry = retryStored
+        val insertedBeforeRetry = retry != null && msgRepo.marqueeMessages.getOrNull(place + 1) === retry.message
+        if (place < at || (place == at && (isInChooserMode || insertedBeforeRetry))) {
+            currentIdx.update { it + 1 }
+        }
     }
 
     private fun getIdxAndAdvance(): Int {
@@ -863,7 +881,7 @@ class MessageManager(
     private fun insertPostedAIReply(reply: Message.Marquee.AIReply?, inReplyTo: String): Boolean {
         thinkingFromOutside = false
         endThinkingUnlessWanted()
-        val place = if (reply == null) MessageRepository.NOT_PUT_IN else msgRepo.insertPostedAIReply(reply, inReplyTo)
+        val place = if (reply == null) MessageRepository.NOT_PUT_IN else msgRepo.insertPostedAIReply(reply, inReplyTo, ::convertQuery)
         if (place == MessageRepository.NOT_PUT_IN) {
             logW("AI Answer is blank, or there is no message to reply to; not adding to messages.")
             return false
@@ -890,7 +908,7 @@ class MessageManager(
             // call that fails must not leave a result half dealt with or unsaved.
             when (val outcome = desk.finished(query, result, nowMs())) {
                 is AIQueryDesk.Outcome.Reply -> {
-                    val place = if (reply == null) MessageRepository.NOT_PUT_IN else msgRepo.insertAIReply(query, reply, seenAt[query])
+                    val place = if (reply == null) MessageRepository.NOT_PUT_IN else msgRepo.insertAIReply(query, reply, seenAt[query], ::convertQuery)
                     if (place != MessageRepository.NOT_PUT_IN) {
                         madeRoomAt(place)
                         msgRepo.saveMarqueeMessages(filesDir)
@@ -902,7 +920,7 @@ class MessageManager(
 
                 is AIQueryDesk.Outcome.Retired -> {
                     // Asking again would change nothing: it stays on the sign as the message it was.
-                    if (msgRepo.retireQuery(query, seenAt[query])) msgRepo.saveMarqueeMessages(filesDir)
+                    if (msgRepo.retireQuery(query, seenAt[query], ::convertQuery)) msgRepo.saveMarqueeMessages(filesDir)
                     logW("No AI reply (${outcome.why}); the message stays as a plain message and is not asked again.")
                 }
 
@@ -935,6 +953,13 @@ class MessageManager(
         } finally {
             endThinkingUnlessWanted()
         }
+    }
+
+    /** A query becomes a plain message in the same slot, including for a pending write retry. */
+    private fun convertQuery(query: Message.Marquee.AIQuery): Message.Marquee.User {
+        val user = query.toUserMessage()
+        retryStored?.let { if (it.message === query) it.message = user }
+        return user
     }
 
     private fun warmUpEnded() {
