@@ -8,6 +8,7 @@ import cx.aphex.energysign.bluetooth.BluetoothStatusUpdate
 import cx.aphex.energysign.bluetooth.EnergySignBluetoothManager
 import cx.aphex.energysign.bluetooth.deliverEachWrite
 import cx.aphex.energysign.ext.NonNullMutableLiveData
+import cx.aphex.energysign.ext.logW
 import cx.aphex.energysign.ext.logE
 import cx.aphex.energysign.message.ChooserProtocol
 import cx.aphex.energysign.message.Message
@@ -32,7 +33,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
 
     private val owner: OwnerQueue by inject()
     private val messageManager: MessageManager by inject()
-    private val energySignBluetoothManager: EnergySignBluetoothManager
+    private lateinit var energySignBluetoothManager: EnergySignBluetoothManager
     private val energySignUartManager: EnergySignUartManager = EnergySignUartManager(this, owner)
 
     /** The answer to a REQUEST of the sign, and the only way to MessageManager.getNextMessage. */
@@ -44,32 +45,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
             logE("Not sent: a message of $bytes bytes is more than the sign can take (${ChooserProtocol.MAX_FRAME_BYTES}): ${message.str.take(40)}...")
         },
     )
-    private val dnsSdAnnouncer: DnsSdAnnouncer
-
     init {
-//        currentBytes.value = messageManager.getNextMessage().bytes
-
-        // First, before anything can deliver a command: MessageManager is built by its first
-        // use, and that must be here on the main thread (it observes LiveData). Commands that
-        // arrive before the link thread runs wait in the owner's queue.
-        owner.neverWaitsOn(Looper.getMainLooper().thread)
-        checkNotNull(messageManager)
-        Thread({ SignResponder.warmUp() }, "sign-json-warmup").apply {
-            isDaemon = true
-            priority = Thread.MIN_PRIORITY
-            start()
-        }
-
-        energySignBluetoothManager = EnergySignBluetoothManager(application.applicationContext, this)
-        energySignBluetoothManager.start()
-
-        energySignBluetoothManager.receivedBytes.deliverEachWrite(messageManager::processNewBytes)
-
-        dnsSdAnnouncer = DnsSdAnnouncer(application.applicationContext)
-        dnsSdAnnouncer.start()
-
-        // From here on the sign link thread owns the message state and asks it for messages.
-        energySignUartManager.start()
+        SignStartup { logW(it) }.start(
+            prepareMessages = {
+                // Resolve MessageManager on the main thread, before commands or UART requests arrive.
+                owner.neverWaitsOn(Looper.getMainLooper().thread)
+                checkNotNull(messageManager)
+            },
+            launchWarmUp = { work ->
+                Thread(work, "sign-json-warmup").apply {
+                    isDaemon = true
+                    priority = Thread.MIN_PRIORITY
+                    start()
+                }
+            },
+            warmUp = { SignResponder.warmUp() },
+            startBluetooth = {
+                energySignBluetoothManager = EnergySignBluetoothManager(application.applicationContext, this)
+                energySignBluetoothManager.start()
+            },
+            subscribeToWrites = {
+                energySignBluetoothManager.receivedBytes.deliverEachWrite(messageManager::processNewBytes)
+            },
+            startDnsSd = { DnsSdAnnouncer(application.applicationContext).start() },
+            startLink = energySignUartManager::start,
+        )
     }
 
     override fun onCleared() {
