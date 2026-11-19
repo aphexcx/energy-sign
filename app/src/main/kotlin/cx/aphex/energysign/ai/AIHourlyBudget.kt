@@ -25,25 +25,42 @@ class AIHourlyBudget(
     private val sentAt = ArrayDeque<Long>()
     private var reserved = 0
 
-    private enum class State { RESERVED, STAMPED, RELEASED }
+    private enum class State { RESERVED, IN_FLIGHT, STAMPED, RELEASED }
+
+    internal enum class BeginResult { OK, ALREADY_SENT, RELEASED }
 
     inner class Reservation internal constructor() {
         private var state = State.RESERVED
 
         internal fun isReserved(): Boolean = synchronized(lock) { state == State.RESERVED }
 
+        internal fun beginSend(): BeginResult = synchronized(lock) {
+            when (state) {
+                State.RESERVED -> {
+                    state = State.IN_FLIGHT
+                    BeginResult.OK
+                }
+                State.IN_FLIGHT, State.STAMPED -> BeginResult.ALREADY_SENT
+                State.RELEASED -> BeginResult.RELEASED
+            }
+        }
+
+        internal fun abortPreWrite() = synchronized(lock) {
+            if (state == State.IN_FLIGHT) state = State.RESERVED
+        }
+
         /** Records a send using [nowMs] under [lock]. Returns false if already stamped or released. */
         fun stamp(): Boolean = synchronized(lock) {
-            if (state != State.RESERVED) return false
-            val now = nowMs()
-            pruneLocked(now)
-            reserved--
-            sentAt.addLast(now)
-            state = State.STAMPED
+            if (state != State.RESERVED && state != State.IN_FLIGHT) return false
+            stampLocked()
             true
         }
 
-        /** Ends this reservation. Returns true if stamped (kept for [HOUR_MS]), false if returned and poisoned. */
+        /**
+         * Ends this reservation. Returns true if a request was sent (or is still in flight on an
+         * async transport such as Ktor-OkHttp after timeout cancellation, stamped conservatively),
+         * or false if nothing left (place returned and handle poisoned).
+         */
         fun release(): Boolean = synchronized(lock) {
             when (state) {
                 State.RESERVED -> {
@@ -51,9 +68,21 @@ class AIHourlyBudget(
                     state = State.RELEASED
                     false
                 }
+                State.IN_FLIGHT -> {
+                    stampLocked()
+                    true
+                }
                 State.STAMPED -> true
                 State.RELEASED -> false
             }
+        }
+
+        private fun stampLocked() {
+            val now = nowMs()
+            pruneLocked(now)
+            reserved--
+            sentAt.addLast(now)
+            state = State.STAMPED
         }
     }
 
@@ -133,14 +162,18 @@ class WireBudgetInterceptor : Interceptor {
                 "not sent: ${leftMs / 1000} s of the query's time were left",
             )
         }
-        if (!reservation.isReserved()) {
-            throw WireSendBlockedException(NoReplyReason.WITHDRAWN, "not sent: budget place is no longer open")
+        when (reservation.beginSend()) {
+            AIHourlyBudget.BeginResult.OK -> Unit
+            AIHourlyBudget.BeginResult.ALREADY_SENT ->
+                throw WireSendBlockedException(NoReplyReason.PROVIDER_ERROR, "not sent: budget place already used")
+            AIHourlyBudget.BeginResult.RELEASED ->
+                throw WireSendBlockedException(NoReplyReason.WITHDRAWN, "not sent: budget place was released")
         }
 
         return try {
             chain.proceed(request).also { reservation.stamp() }
         } catch (e: Throwable) {
-            if (!isPreWriteFailure(e)) reservation.stamp()
+            if (isPreWriteFailure(e)) reservation.abortPreWrite() else reservation.stamp()
             throw e
         }
     }

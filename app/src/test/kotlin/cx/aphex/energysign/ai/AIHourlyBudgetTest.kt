@@ -136,7 +136,7 @@ class AIHourlyBudgetTest {
         MockWebServer().use { server ->
             server.dispatcher = object : Dispatcher() { override fun dispatch(request: RecordedRequest) = onRequest(request) }
             server.start()
-            block(server, server.url("/").toString().trimEnd('/'))
+            block(server, server.url("/").toString().trimEnd('/').replace("localhost", "127.0.0.1"))
         }
     }
 
@@ -260,9 +260,59 @@ class AIHourlyBudgetTest {
                 assertTrue(rPost.release()); assertEquals(usedBefore + 1, budget.usedCount())
             }
 
-            // 7. Reused stamped reservation, untagged POST, free tag on POST: all refused WITHDRAWN, 0 wire.
+            // 7a. Deterministic Finding #1 (release()-beats-stamp() race during in-flight proceed, as in OpenAI withTimeoutOrNull):
+            // Calling release() while chain.proceed() is in-flight MUST stamp & keep the send counted (never drop to 0).
+            run {
+                val raceBudget = AIHourlyBudget(nowMs = { nowMs }, callsPerHour = 10)
+                val rRace = assertNotNull(raceBudget.reserve())
+                val inProceed = CountDownLatch(1)
+                val allowExit = CountDownLatch(1)
+                val raceClient = client(Interceptor { c ->
+                    inProceed.countDown()
+                    assertTrue(allowExit.await(5, TimeUnit.SECONDS))
+                    c.proceed(c.request())
+                })
+                val bg = Thread {
+                    runCatching { raceClient.newCall(post(WireCallContext(okDeadline, Duration.ofSeconds(15), rRace))).execute().close() }
+                }.apply { isDaemon = true; start() }
+                assertTrue(inProceed.await(5, TimeUnit.SECONDS), "must enter chain.proceed")
+                val kept = rRace.release()
+                allowExit.countDown()
+                bg.join(5_000)
+                assertTrue(kept, "release() racing ahead of stamp() during in-flight proceed must keep send counted")
+                assertEquals(1, raceBudget.usedCount(), "in-flight send cannot be dropped from hourly budget")
+            }
+
+            // 7b. OpenAI wire gate: pre-headers withTimeoutOrNull keeps sent POST counted,
+            // and wire-layer TOO_LATE_TO_SEND maps cleanly through Ktor/OpenAIReplyGenerator with 0 wire & 0 budget.
+            val slowHits = AtomicInteger(0)
+            withMockServer({
+                slowHits.incrementAndGet()
+                MockResponse().setResponseCode(200).setHeadersDelay(3_000, TimeUnit.MILLISECONDS).setBody(okOpenAiSse())
+            }) { _, slowUrl ->
+                val oaBudget = AIHourlyBudget(nowMs = { nowMs }, callsPerHour = 10)
+                val oaGen = OpenAIReplyGenerator("test-key", log = {}, baseUrl = "$slowUrl/v1/", requestTimeout = Duration.ofMillis(400), minTimeToSend = Duration.ofMillis(100), budget = oaBudget)
+                val timeoutRes = runBlocking { oaGen.generateReply(AIReplyRequest("s", "u", Deadline.after(Duration.ofSeconds(10)))) }
+                assertEquals(NoReplyReason.TIMEOUT, assertIs<AIReplyResult.NoReply>(timeoutRes).reason)
+                assertEquals(1, slowHits.get(), "OpenAI POST reached server before timeout")
+                assertEquals(1, oaBudget.usedCount(), "OpenAI pre-headers timeout after wire POST must keep budget place counted")
+
+                // OpenAI wire-layer TOO_LATE_TO_SEND: first read (pre-call) = 20 s left; third read (WireBudgetInterceptor) = 14 s left.
+                val reads = AtomicInteger(0)
+                val steppingDeadline = Deadline.after(Duration.ofSeconds(20)) { if (reads.incrementAndGet() <= 2) 0L else 6_000_000_000L }
+                val lateOaGen = OpenAIReplyGenerator("test-key", log = {}, baseUrl = "$slowUrl/v1/", budget = oaBudget)
+                val lateOaRes = runBlocking { lateOaGen.generateReply(AIReplyRequest("s", "u", steppingDeadline)) }
+                val lateNoReply = assertIs<AIReplyResult.NoReply>(lateOaRes)
+                assertEquals(NoReplyReason.TOO_LATE_TO_SEND, lateNoReply.reason, "got $lateNoReply (reads=${reads.get()}, slowHits=${slowHits.get()})")
+                assertEquals(1, slowHits.get(), "OpenAI wire-layer TOO_LATE_TO_SEND must send 0 additional POSTs")
+                assertEquals(1, oaBudget.usedCount(), "OpenAI wire-layer TOO_LATE_TO_SEND must return its budget place")
+            }
+
+            // 7c. Reused stamped reservation -> PROVIDER_ERROR; untagged / free-tag POST -> WITHDRAWN; 0 wire.
             val reqBeforeBad = server.requestCount
-            for (badCtx in listOf(WireCallContext(okDeadline, Duration.ofSeconds(15), r1), null, WireCallContext(okDeadline, Duration.ofSeconds(1), null))) {
+            val reusedErr = runCatching { client().newCall(post(WireCallContext(okDeadline, Duration.ofSeconds(15), r1))).execute().close() }.exceptionOrNull()
+            assertEquals(NoReplyReason.PROVIDER_ERROR, assertNotNull(reusedErr?.let(WireSendBlockedException::findIn)).reason)
+            for (badCtx in listOf(null, WireCallContext(okDeadline, Duration.ofSeconds(1), null))) {
                 val err = runCatching { client().newCall(post(badCtx)).execute().close() }.exceptionOrNull()
                 assertEquals(NoReplyReason.WITHDRAWN, assertNotNull(err?.let(WireSendBlockedException::findIn)).reason)
             }
@@ -382,12 +432,15 @@ class AIHourlyBudgetTest {
             expectedReason?.let(testedReasons::add)
             FakeMessagesApi().use { api ->
                 val clockMs = AtomicLong(1_000_000L)
+                lateinit var query: Query
+                var wanted: () -> Boolean = { true }
                 var wireCounter: () -> Int = { api.received.size }
                 DeskRig(clockMs = clockMs, callsPerHour = 10, coolDownsMs = listOf(0)) { b, clk, s ->
-                    val (src, _, hooks) = setup(api, clk, b, s); wireCounter = hooks.second; src
+                    val (src, q, hooks) = setup(api, clk, b, s)
+                    query = q; wanted = hooks.first; wireCounter = hooks.second
+                    src
                 }.use { rig ->
-                    val (_, query, hooks) = setup(api, clockMs, rig.budget, rig.scope)
-                    rig.stillWanted = hooks.first
+                    rig.stillWanted = wanted
                     val (res, outcome) = assertNotNull(rig.askAndFinish(query), "$label: admitted")
                     if (expectedReason == null) {
                         assertIs<AIReplyResult.Reply>(res, label); assertIs<AIQueryDesk.Outcome.Reply>(outcome, label)
@@ -395,7 +448,7 @@ class AIHourlyBudgetTest {
                         assertEquals(expectedReason, assertIs<AIReplyResult.NoReply>(res, label).reason, label)
                     }
                     assertEquals(if (expectBudget) 1 else 0, rig.budget.usedCount(), "$label: budget")
-                    if (expectWire) assertTrue(wireCounter() >= 1, "$label: wire >= 1") else assertEquals(0, wireCounter(), "$label: wire == 0")
+                    assertEquals(if (expectWire) 1 else 0, wireCounter(), "$label: wire count")
 
                     if (expectedReason != null && expectedReason.askAgain) {
                         assertIs<AIQueryDesk.Outcome.Failed>(outcome, "$label: attempt 1")

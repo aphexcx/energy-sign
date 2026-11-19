@@ -17,7 +17,6 @@ import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
-import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okio.BufferedSink
 import java.io.ByteArrayInputStream
@@ -89,7 +88,7 @@ internal class BudgetedOkHttpClient(
         // Materialize URL and body FIRST: body.contentLength() lazily serializes JSON in the SDK.
         val url = toUrl(request)
         val body = request.body().orElse(null)?.let(::toOkHttpRequestBody)
-            ?: if (request.method in BODY_METHODS) "".toRequestBody(null) else null
+            ?: if (request.method in BODY_METHODS) EMPTY_ONE_SHOT_BODY else null
 
         val leftMs = context.deadline.remainingMs()
         val limit = if (context.reservation != null) {
@@ -162,5 +161,11 @@ internal class BudgetedOkHttpClient(
 
     private companion object {
         val BODY_METHODS = setOf(HttpMethod.POST, HttpMethod.PUT, HttpMethod.PATCH)
+        val EMPTY_ONE_SHOT_BODY = object : RequestBody() {
+            override fun contentType() = null
+            override fun contentLength() = 0L
+            override fun isOneShot() = true
+            override fun writeTo(sink: BufferedSink) {}
+        }
     }
 }

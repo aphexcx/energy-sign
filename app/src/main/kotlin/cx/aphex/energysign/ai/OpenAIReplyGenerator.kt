@@ -101,12 +101,17 @@ class OpenAIReplyGenerator(
         host = baseUrl?.let { OpenAIHost(baseUrl = it) } ?: OpenAIHost.OpenAI,
         retry = RetryStrategy(maxRetries = 0),
         httpClientConfig = {
+            followRedirects = false
             engine {
                 val okHttp = this as? OkHttpConfig
                     ?: error("OpenAIReplyGenerator requires Ktor OkHttp engine so WireBudgetInterceptor gates every wire send")
-                // One call is at most one request on the wire: disable connection-failure retries
-                // and mark every POST body one-shot so OkHttp never replays 503 Retry-After: 0 / 408 / 421.
-                okHttp.config { retryOnConnectionFailure(false) }
+                // One call is at most one request on the wire: disable redirects and connection-failure
+                // retries and mark every POST body one-shot so OkHttp never replays 503/408/421.
+                okHttp.config {
+                    retryOnConnectionFailure(false)
+                    followRedirects(false)
+                    followSslRedirects(false)
+                }
                 okHttp.addInterceptor { chain ->
                     if (chain.call().isCanceled()) throw IOException("Canceled")
                     val req = chain.request()
