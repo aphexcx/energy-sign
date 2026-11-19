@@ -85,17 +85,19 @@ class FileReplaceTest {
     private fun state(): String =
         "beside " + (if (beside.exists()) beside.readText() else null) + ", in place " + (if (file.exists()) file.readText() else null)
 
-    // ---- the order of the steps (with steps of the test's own, to look from inside them)
+    // ---- the order of the steps. A test can stand in the data step; of the directory step it can
+    // only hand in the channel that is opened, so the force is always the production call.
 
     @Test
     fun `the data is forced to storage, then the file is renamed, then the directory is forced to storage`() {
         file.writeText("old")
         val seen = mutableListOf<String>()
+        val channel = WatchedChannel(onForce = { seen += "directory forced: " + state() })
 
         file.replaceContent(
             SaveSteps(
                 syncData = { seen += "data: " + state() },
-                syncDirectory = { directory -> seen += "directory ${directory.canonicalFile == dir.canonicalFile}: " + state() },
+                openDirectory = { directory -> seen += "directory ${directory.canonicalFile == dir.canonicalFile} opened: " + state(); channel },
             ),
             warn = { seen += "warned: $it" },
         ) { it.write("new".toByteArray()) }
@@ -103,10 +105,13 @@ class FileReplaceTest {
         assertEquals(
             listOf(
                 "data: beside new, in place old",
-                "directory true: beside null, in place new",
+                "directory true opened: beside null, in place new",
+                "directory forced: beside null, in place new",
             ),
             seen
         )
+        assertEquals(listOf(true), channel.forced, "one force, metadata included")
+        assertTrue(channel.closed)
     }
 
     @Test
@@ -114,7 +119,7 @@ class FileReplaceTest {
         val seen = mutableListOf<String>()
 
         file.replaceContent(
-            SaveSteps(syncData = { seen += "data: " + state() }, syncDirectory = { seen += "directory: " + state() }),
+            SaveSteps(syncData = { seen += "data: " + state() }, openDirectory = { WatchedChannel(onForce = { seen += "directory: " + state() }) }),
         ) { it.write("new".toByteArray()) }
 
         assertEquals(listOf("data: beside new, in place null", "directory: beside null, in place new"), seen)
@@ -125,7 +130,7 @@ class FileReplaceTest {
         file.writeText("old\n")
         val seen = mutableListOf<String>()
 
-        file.replaceWith(listOf("one", "two"), SaveSteps(syncDirectory = { seen += "directory: " + state() }))
+        file.replaceWith(listOf("one", "two"), SaveSteps(openDirectory = { WatchedChannel(onForce = { seen += "directory: " + state() }) }))
 
         val twoLines = "one" + System.lineSeparator() + "two" + System.lineSeparator()
         assertEquals(listOf("directory: beside null, in place $twoLines"), seen)
@@ -140,7 +145,7 @@ class FileReplaceTest {
         val warnings = mutableListOf<String>()
 
         file.replaceContent(
-            SaveSteps(syncDirectory = { throw IOException("not supported here") }),
+            SaveSteps(openDirectory = { throw IOException("not supported here") }),
             warn = { warnings += it },
         ) { it.write("new".toByteArray()) } // does not throw
 
@@ -155,7 +160,7 @@ class FileReplaceTest {
     fun `the default report of that goes to the log and the save is still done`() {
         file.writeText("old")
 
-        file.replaceWith(listOf("new"), SaveSteps(syncDirectory = { throw IOException("not supported here") }))
+        file.replaceWith(listOf("new"), SaveSteps(openDirectory = { throw IOException("not supported here") }))
 
         assertEquals(listOf("new"), file.readLines())
     }
@@ -167,7 +172,7 @@ class FileReplaceTest {
 
         assertFailsWith<IOException> {
             file.replaceContent(
-                SaveSteps(syncData = { throw IOException("no space left") }, syncDirectory = { directorySynced = true }),
+                SaveSteps(syncData = { throw IOException("no space left") }, openDirectory = { directorySynced = true; WatchedChannel() }),
             ) { it.write("new".toByteArray()) }
         }
 
@@ -198,7 +203,7 @@ class FileReplaceTest {
 
         // only the way the file is opened is the test's; the data step is the default one
         assertFailsWith<IOException> {
-            file.replaceContent(SaveSteps(open = ::ClosesAfterWrite, syncDirectory = { directorySynced = true })) {
+            file.replaceContent(SaveSteps(open = ::ClosesAfterWrite, openDirectory = { directorySynced = true; WatchedChannel() })) {
                 it.write("new".toByteArray())
             }
         }
@@ -276,9 +281,9 @@ class FileReplaceTest {
         val channel = WatchedChannel(onForce = { throw IOException("the disk would not") })
         val warnings = mutableListOf<String>()
 
-        // the production function for the directory, with nothing but the channel of the test's
+        // the save sequence as it is, with nothing of the test's but the channel that is opened
         file.replaceContent(
-            SaveSteps(syncDirectory = { directory -> directory.syncDirectory(open = { channel }) }),
+            SaveSteps(openDirectory = { channel }),
             warn = { warnings += it },
         ) { it.write("new".toByteArray()) } // does not throw
 
@@ -291,6 +296,18 @@ class FileReplaceTest {
     }
 
     @Test
+    fun `the lines of a message file force the directory too, with the save sequence as it is`() {
+        file.writeText("old\n")
+        val channel = WatchedChannel()
+
+        file.replaceWith(listOf("new"), SaveSteps(openDirectory = { channel }))
+
+        assertEquals(listOf(true), channel.forced)
+        assertTrue(channel.closed)
+        assertEquals(listOf("new"), file.readLines())
+    }
+
+    @Test
     fun `a rename that fails is a failed save, the target stays as it is and the directory is never forced`() {
         // a directory with something in it, where the file should be: nothing can be renamed over it
         file.mkdir()
@@ -299,7 +316,7 @@ class FileReplaceTest {
         var dataForced = false
 
         val e = assertFailsWith<IOException> {
-            file.replaceContent(SaveSteps(syncData = { dataForced = true }, syncDirectory = { directoryForced = true })) {
+            file.replaceContent(SaveSteps(syncData = { dataForced = true }, openDirectory = { directoryForced = true; WatchedChannel() })) {
                 it.write("new".toByteArray())
             }
         }

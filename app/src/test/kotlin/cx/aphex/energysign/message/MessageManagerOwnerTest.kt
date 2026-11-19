@@ -5,9 +5,13 @@ import android.content.ContextWrapper
 import androidx.arch.core.executor.ArchTaskExecutor
 import androidx.arch.core.executor.TaskExecutor
 import cx.aphex.energysign.beatlinkdata.BeatLinkTrack
+import cx.aphex.energysign.beatlinkdata.currentTrack
 import cx.aphex.energysign.gpt.GPTViewModel
 import cx.aphex.energysign.gpt.PostedGptAnswer
 import cx.aphex.energysign.keyboard.KeyboardManager
+import io.ktor.serialization.gson.gson
+import io.ktor.server.application.install
+import io.ktor.server.routing.routing
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
@@ -196,7 +200,7 @@ class MessageManagerOwnerTest {
         repo.oneTimeMessages.clear()
         fromServer(stillOnlyThat) { manager.onNewPostedGPTReply(PostedGptAnswer(answer = "an answer", inReplyTo = "MESSAGE 2")) }
         fromServer({ assertEquals(0, repo.oneTimeMessages.size) }) {
-            manager.processNowPlayingTrack(BeatLinkTrack(id = 1, title = "Title", artist = "Artist"))
+            manager.processNowPlayingTrack(BeatLinkTrack(id = 1, title = "Title", artist = "Artist"), manager.acceptTrackUpdate())
         }
         assertEquals("FRESH", repo.marqueeMessages.first().str)
         assertEquals(7, repo.marqueeMessages.size)
@@ -431,6 +435,11 @@ class MessageManagerOwnerTest {
         }
 
         fun phone(command: String) = manager.processNewBytes(command.toByteArray())
+
+        /** A track update as the route makes it: it takes its turn, then the public entry, on a thread of its own, while the owner (this thread) takes its turns. */
+        fun post(track: BeatLinkTrack, turn: MessageManager.TrackTurn = manager.acceptTrackUpdate()) =
+            waitingCall("beatlink") { manager.processNowPlayingTrack(track, turn) }
+
         fun saverRuns() {
             while (unsaved.isNotEmpty()) unsaved.removeAt(0).run()
         }
@@ -765,7 +774,7 @@ class MessageManagerOwnerTest {
     fun `the line of a track holds only what the sign can show, in the ad round and in the announcement`() {
         // a bell in the artist; a NUL and a vertical tab in the title: the tab is a thin space and stays
         val app = App(newFilesDir())
-        app.manager.processNowPlayingTrack(BeatLinkTrack(id = 2, title = "A\u0000B\u000bC", artist = "D\u0007J"))
+        app.post(BeatLinkTrack(id = 2, title = "A\u0000B\u000bC", artist = "D\u0007J"))
         ownerRuns()
         app.phone("!$A\n\uD83D\uDEE4")
         ownerRuns()
@@ -806,30 +815,52 @@ class MessageManagerOwnerTest {
         return lines.toList()
     }
 
+    private val stopOfTheTrack = BeatLinkTrack(id = 0, title = "", artist = "", isEmpty = true)
+
     @Test
-    fun `the line of a track is made, and cut to fit, without the owner, the owner only takes it in`() {
+    fun `the line of a track is made, and cut to fit, by the thread that brings it, while the owner does nothing`() {
+        // Through the public entry. When the line is made, a line of the log says so, with the
+        // length the line was cut to: so the thread that logs it is the thread that made it.
         val app = App(newFilesDir())
+        val turn = app.manager.acceptTrackUpdate()
+        val madeBy = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val watching = cx.aphex.energysign.ScreenLogger.logLines.subscribe { line ->
+            if ("Track update ${turn.number}: its line is made" in line) madeBy += Thread.currentThread().name + ": " + line.substringAfter("made, ")
+        }
+        madeBy.clear() // (a new listener is handed the last line of before)
+        try {
+            val call = FutureTask(Callable {
+                app.manager.processNowPlayingTrack(BeatLinkTrack(id = 7, title = "B".repeat(750), artist = "DJ"), turn)
+            })
+            Thread(call, "beatlink").start()
 
-        // the caller's part, on the caller's thread; the owner (this thread) runs nothing meanwhile
-        val prepared = FutureTask(Callable { app.manager.prepareTrack(BeatLinkTrack(id = 7, title = "B".repeat(750), artist = "DJ")) })
-        Thread(prepared, "beatlink").start()
-        val update = prepared.get(5, java.util.concurrent.TimeUnit.SECONDS) // it does not wait for the owner
+            // The owner is this thread, and it runs nothing here: it only waits to see the line made.
+            val deadline = System.currentTimeMillis() + 5_000
+            while (madeBy.isEmpty() && System.currentTimeMillis() < deadline) Thread.sleep(1)
+            // {"str":"","type":"T"} is 21 bytes: 479 characters make 500, "DJ - " and 474 of the 750 B
+            assertEquals(listOf("beatlink: 479 characters."), madeBy.toList())
+            assertFalse(call.isDone, "the caller waits for the owner to take the track in")
+            assertEquals(0, app.repo.oneTimeMessages.size, "the owner has done nothing yet")
 
-        assertEquals(500, SignResponder.GSON.toJson(update.line).toByteArray(Charsets.UTF_8).size, "the line is fitted already")
-        assertEquals(1, update.notes.size, "and what there is to say about the cut is with it")
-        assertEquals(0, app.repo.oneTimeMessages.size)
+            while (!call.isDone) {
+                ownerRuns()
+                Thread.sleep(1)
+            }
+            call.get()
+        } finally {
+            watching.dispose()
+        }
 
-        waitingCall("beatlink") { app.manager.takeIn(update) }
-
-        // the owner queued that very message and made none of its own
+        assertEquals(1, madeBy.size, "the line was made once: the owner made none of its own")
         val track = app.repo.oneTimeMessages.filterIsInstance<Message.NowPlayingTrackMessage>().single()
-        assertSame(update.line, track)
+        assertEquals("DJ - " + "B".repeat(474), track.str)
+        assertEquals(500, SignResponder.GSON.toJson(track).toByteArray(Charsets.UTF_8).size)
         // and the ad round takes that same message: nothing is fitted again for it
         app.phone("!$A\n\uD83D\uDEE4")
         ownerRuns()
         val lines = app.repo.oneTimeMessages.filterIsInstance<Message.NowPlayingTrackMessage>()
         assertEquals(2, lines.size)
-        assertTrue(lines.all { it === update.line })
+        assertTrue(lines.all { it === track })
     }
 
     @Test
@@ -839,14 +870,13 @@ class MessageManagerOwnerTest {
         ownerRuns()
         app.repo.oneTimeMessages.clear()
 
-        // The long track comes in first and gets its number; while its line is made, the stop
-        // comes in, and the stop is at the owner first.
-        val track = app.manager.prepareTrack(BeatLinkTrack(id = 9, title = "C".repeat(750), artist = "DJ"))
-        val stop = app.manager.prepareTrack(BeatLinkTrack(id = 0, title = "", artist = "", isEmpty = true))
-        assertTrue(track.number < stop.number)
-        waitingCall("beatlink-2") { app.manager.takeIn(stop) }
+        // The long track comes in first and takes its turn; before it is taken in, the stop
+        // comes in, takes the next turn, and is at the owner first.
+        val turnOfTheTrack = app.manager.acceptTrackUpdate()
+        val turnOfTheStop = app.manager.acceptTrackUpdate()
+        app.post(stopOfTheTrack, turnOfTheStop)
         app.repo.oneTimeMessages.clear() // the ad round a stop asks for
-        waitingCall("beatlink-1") { app.manager.takeIn(track) }
+        app.post(BeatLinkTrack(id = 9, title = "C".repeat(750), artist = "DJ"), turnOfTheTrack)
 
         // the stopped track is not announced and is not playing
         assertEquals(emptyList(), app.repo.oneTimeMessages.toList())
@@ -856,20 +886,32 @@ class MessageManagerOwnerTest {
     }
 
     @Test
-    fun `track updates that come in order are all taken in, each number once`() {
+    fun `turns are given in the order they are asked for, and updates that come in order are all taken in`() {
         val app = App(newFilesDir())
-        val first = app.manager.prepareTrack(BeatLinkTrack(id = 11, title = "One", artist = "DJ"))
-        val second = app.manager.prepareTrack(BeatLinkTrack(id = 12, title = "Two", artist = "DJ"))
-        assertEquals(first.number + 1, second.number)
+        val before = app.manager.trackTurnsTaken
+        val first = app.manager.acceptTrackUpdate()
+        val second = app.manager.acceptTrackUpdate()
+        assertEquals(before + 2, app.manager.trackTurnsTaken)
 
-        waitingCall("beatlink") { app.manager.takeIn(first) }
-        waitingCall("beatlink") { app.manager.takeIn(second) }
+        app.post(BeatLinkTrack(id = 11, title = "One", artist = "DJ"), first)
+        app.post(BeatLinkTrack(id = 12, title = "Two", artist = "DJ"), second)
 
         // the newer track took the place of the older one in the queue
         assertEquals(listOf("DJ - Two"), app.repo.oneTimeMessages.filterIsInstance<Message.NowPlayingTrackMessage>().map { it.str })
-        // and the entry the server calls does both parts
-        waitingCall("beatlink") { app.manager.processNowPlayingTrack(BeatLinkTrack(id = 13, title = "Three", artist = "DJ")) }
+        app.post(BeatLinkTrack(id = 13, title = "Three", artist = "DJ"))
         assertEquals(listOf("DJ - Three"), app.repo.oneTimeMessages.filterIsInstance<Message.NowPlayingTrackMessage>().map { it.str })
+    }
+
+    @Test
+    fun `a track that arrives after a newer track is left out too, not only one that arrives after a stop`() {
+        val app = App(newFilesDir())
+        val older = app.manager.acceptTrackUpdate()
+        val newer = app.manager.acceptTrackUpdate()
+
+        app.post(BeatLinkTrack(id = 31, title = "Newer", artist = "DJ"), newer)
+        app.post(BeatLinkTrack(id = 32, title = "Older", artist = "DJ"), older)
+
+        assertEquals(listOf("DJ - Newer"), app.repo.oneTimeMessages.filterIsInstance<Message.NowPlayingTrackMessage>().map { it.str })
     }
 
     @Test
@@ -878,8 +920,8 @@ class MessageManagerOwnerTest {
         val long = BeatLinkTrack(id = 21, title = "Q".repeat(750), artist = "DJ")
 
         val cuts = logged("DJ - QQQQ") {
-            waitingCall("beatlink") { app.manager.processNowPlayingTrack(long) }
-            waitingCall("beatlink") { app.manager.processNowPlayingTrack(long) } // the same track again: it is not shown again
+            app.post(long)
+            app.post(long) // the same track again: it is not shown again
         }
 
         assertEquals(1, cuts.size, cuts.toString())
@@ -890,12 +932,12 @@ class MessageManagerOwnerTest {
     @Test
     fun `a track update that is left out reports nothing about its line`() {
         val app = App(newFilesDir())
-        val track = app.manager.prepareTrack(BeatLinkTrack(id = 22, title = "Z".repeat(750), artist = "DJ"))
-        val stop = app.manager.prepareTrack(BeatLinkTrack(id = 0, title = "", artist = "", isEmpty = true))
+        val turnOfTheTrack = app.manager.acceptTrackUpdate()
+        val turnOfTheStop = app.manager.acceptTrackUpdate()
 
         val cuts = logged("DJ - ZZZZ") {
-            waitingCall("beatlink") { app.manager.takeIn(stop) }
-            waitingCall("beatlink") { app.manager.takeIn(track) }
+            app.post(stopOfTheTrack, turnOfTheStop)
+            app.post(BeatLinkTrack(id = 22, title = "Z".repeat(750), artist = "DJ"), turnOfTheTrack)
         }
 
         assertEquals(emptyList(), cuts)
@@ -944,6 +986,73 @@ class MessageManagerOwnerTest {
         assertEquals(listOf("HELLO"), AdCodec.decode(app.adsFile.readText()).map { it.str })
     }
 
+    // ---- POST /currentTrack, the real route on a real server: the order of two posts that overlap
+
+    /** One HTTP exchange on a socket of its own: [send] writes the request, in as many parts as it likes. Returns the status line. */
+    private class Post(port: Int) {
+        private val socket = java.net.Socket("127.0.0.1", port)
+        private val out = socket.getOutputStream()
+
+        fun headers(bodyLength: Int) {
+            out.write(
+                ("POST /currentTrack HTTP/1.1\r\nHost: sign\r\nContent-Type: application/json\r\n" +
+                        "Content-Length: $bodyLength\r\nConnection: close\r\n\r\n").toByteArray()
+            )
+            out.flush()
+        }
+
+        fun body(json: String) {
+            out.write(json.toByteArray())
+            out.flush()
+        }
+
+        /** The first line of the answer, e.g. "HTTP/1.1 200 OK". Waits for it. */
+        fun status(): String = socket.getInputStream().bufferedReader().readLine().also { socket.close() }
+    }
+
+    @Test
+    fun `of two posts to currentTrack that overlap, the one that was accepted later wins, a stop is not undone by the track before it`() {
+        val app = App(newFilesDir())
+        app.phone("!$A\n🛤\n${O}AD")
+        ownerRuns()
+        app.repo.oneTimeMessages.clear()
+        val server = io.ktor.server.engine.embeddedServer(io.ktor.server.netty.Netty, port = 0) {
+            install(io.ktor.server.plugins.contentnegotiation.ContentNegotiation) { gson {} }
+            routing { currentTrack(app.manager) }
+        }.start(wait = false)
+        try {
+            val port = kotlinx.coroutines.runBlocking { server.resolvedConnectors().first().port }
+            val trackJson = """{"id":9,"title":"${"C".repeat(750)}","artist":"DJ"}"""
+            val stopJson = """{"id":0,"title":"","artist":"","isEmpty":true}"""
+
+            // The track's post is accepted: its headers are there, the route has it. Its body is still on the way.
+            val track = Post(port)
+            track.headers(trackJson.toByteArray().size)
+            // (the route gives the update its place in the order when it accepts the request; this waits for that)
+            val deadline = System.currentTimeMillis() + 2_000
+            while (app.manager.trackTurnsTaken < 1 && System.currentTimeMillis() < deadline) Thread.sleep(5)
+
+            // Now the stop comes, whole, and is answered.
+            val stop = Post(port)
+            stop.headers(stopJson.toByteArray().size)
+            stop.body(stopJson)
+            assertEquals("HTTP/1.1 200 OK", waitingCall("test-reads-stop") { stop.status() })
+            app.repo.oneTimeMessages.clear() // the ad round a stop asks for
+
+            // Only now does the rest of the track's post arrive.
+            track.body(trackJson)
+            assertEquals("HTTP/1.1 200 OK", waitingCall("test-reads-track") { track.status() })
+
+            // The stop was the later of the two: nothing is playing, the track is not announced
+            assertEquals(emptyList(), app.repo.oneTimeMessages.toList())
+            app.phone("!$A\n🛤\n${O}AD")
+            ownerRuns()
+            assertEquals(listOf("AD"), app.repo.oneTimeMessages.map { it.str }, "no track line in the ad round")
+        } finally {
+            server.stop(100, 500)
+        }
+    }
+
     @Test
     fun `an empty track from the caller's thread ends the now-playing line`() {
         val app = App(newFilesDir())
@@ -951,13 +1060,9 @@ class MessageManagerOwnerTest {
         ownerRuns()
         app.repo.oneTimeMessages.clear()
 
-        val playing = FutureTask(Callable { app.manager.processNowPlayingTrack(BeatLinkTrack(id = 8, title = "Song", artist = "DJ")) })
-        Thread(playing, "beatlink").start()
-        while (!playing.isDone) { ownerRuns(); Thread.sleep(1) }
+        app.post(BeatLinkTrack(id = 8, title = "Song", artist = "DJ"))
         app.repo.oneTimeMessages.clear()
-        val stopped = FutureTask(Callable { app.manager.processNowPlayingTrack(BeatLinkTrack(id = 0, title = "", artist = "", isEmpty = true)) })
-        Thread(stopped, "beatlink").start()
-        while (!stopped.isDone) { ownerRuns(); Thread.sleep(1) }
+        app.post(stopOfTheTrack)
 
         // the ad round an empty track asks for has no track in it any more
         assertEquals(listOf("AD"), app.repo.oneTimeMessages.map { it.str })
@@ -975,7 +1080,7 @@ class MessageManagerOwnerTest {
     fun `the now-playing line is held to the limit, in the ad round and when the track is announced`() {
         // A track with a title of 750 characters, then an ad list that is the place of the track.
         val app = App(newFilesDir())
-        app.manager.processNowPlayingTrack(BeatLinkTrack(id = 1, title = "A".repeat(750), artist = "DJ"))
+        app.post(BeatLinkTrack(id = 1, title = "A".repeat(750), artist = "DJ"))
         ownerRuns()
         app.phone("!$A\n🛤")
         ownerRuns()

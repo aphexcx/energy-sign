@@ -620,41 +620,63 @@ class MessageManager(
         }
     }
 
-    /** Returns when the owner has taken the track in. */
-    fun processNowPlayingTrack(track: BeatLinkTrack) = takeIn(prepareTrack(track))
+    /**
+     * The place of a track update in the order the updates came in. There is one way to get
+     * one, [acceptTrackUpdate], and no track update is taken without it.
+     */
+    class TrackTurn internal constructor(internal val number: Long)
+
+    /** Counts the track updates in the order they came in. From any thread. */
+    private val trackUpdates = AtomicLong()
+
+    /** How many track updates have been given their place in that order (a test waits for one). */
+    internal val trackTurnsTaken: Long get() = trackUpdates.get()
+
+    /** The number of the newest update the owner has taken in. Owner only. */
+    private var newestTrackUpdate: Long = 0
 
     /**
-     * A track as it goes to the owner: [number] says which update came first, [line] is its line
-     * for the sign (null for an empty track) and [notes] what there is to say about that line.
+     * Gives a track update its place in the order. To be called the moment the update comes in,
+     * before anything else is done with it (see the route, POST /currentTrack): whatever is done
+     * between its coming in and this call is time in which a later update can get ahead of it.
      */
-    internal class TrackUpdate(
+    fun acceptTrackUpdate(): TrackTurn = TrackTurn(trackUpdates.incrementAndGet())
+
+    /**
+     * Takes [track] in, at the place [turn] gives it: when a later update is in already, this
+     * one is left out. Returns when the owner has dealt with it. Not from the owner's thread
+     * with a long title, and never from the main thread: the caller does the slow part.
+     */
+    fun processNowPlayingTrack(track: BeatLinkTrack, turn: TrackTurn) {
+        val update = prepareTrack(track, turn)
+        changeAndWait { takeInTrack(update) }
+    }
+
+    /**
+     * A track as it goes to the owner: [number] is its place in the order, [line] its line for
+     * the sign (null for an empty track) and [notes] what there is to say about that line.
+     */
+    private class TrackUpdate(
         val number: Long,
         val track: BeatLinkTrack,
         val line: Message.NowPlayingTrackMessage?,
         val notes: List<String>,
     )
 
-    /** Counts the track updates in the order they came in. From any thread. */
-    private val trackUpdates = AtomicLong()
-
-    /** The number of the newest update the owner has taken in. Owner only. */
-    private var newestTrackUpdate: Long = 0
-
     /**
-     * The caller's part of a track update, on the caller's thread. The update gets its number
-     * FIRST. Then its line is made: fitting a long title to the sign serialises it more than
-     * once, and the owner has the sign to answer. Because that takes a while, a later update (a
-     * stop) can be at the owner before this one: the number is how the owner knows.
+     * The caller's part of a track update, on the caller's thread: its line is made here.
+     * Fitting a long title to the sign serialises it more than once, and the owner has the sign
+     * to answer.
      */
-    internal fun prepareTrack(track: BeatLinkTrack): TrackUpdate {
-        val number = trackUpdates.incrementAndGet()
+    private fun prepareTrack(track: BeatLinkTrack, turn: TrackTurn): TrackUpdate {
         val notes = mutableListOf<String>()
         val line = if (track.isEmpty) null else AdRules.nowPlaying(track.artist, track.title, note = { notes += it })
-        return TrackUpdate(number, track, line, notes)
+        logD(
+            "Track update ${turn.number}: " +
+                    if (line == null) "a stop." else "its line is made, ${line.str.length} characters."
+        )
+        return TrackUpdate(turn.number, track, line, notes)
     }
-
-    /** Hands [update] to the owner and returns when the owner has dealt with it. */
-    internal fun takeIn(update: TrackUpdate): Unit = changeAndWait { takeInTrack(update) }
 
     /** Owner only. */
     private fun takeInTrack(update: TrackUpdate) {

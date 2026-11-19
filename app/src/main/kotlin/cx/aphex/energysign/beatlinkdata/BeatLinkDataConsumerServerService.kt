@@ -10,7 +10,6 @@ import cx.aphex.energysign.gpt.PostedGptAnswer
 import cx.aphex.energysign.message.MessageManager
 import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.gson.gson
-import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.call
 import io.ktor.server.application.install
 import io.ktor.server.engine.embeddedServer
@@ -105,36 +104,12 @@ class BeatLinkDataConsumerServerService : Service(), KoinComponent {
                     logW("Received new POSTed GPT Reply: ${answer}")
                     call.answer { messageManager.onNewPostedGPTReply(answer) }
                 }
-                post("/currentTrack") {
-                    val track: BeatLinkTrack = call.receive()
-                    logW("Received new BeatLinkTrack: $track")
-                    call.answer {
-                        messageManager.processNowPlayingTrack(track)
-                        true
-                    }
-                }
+                currentTrack(messageManager)
             }
 
         }.start(wait = false)
         logD("Embedded server started")
         super.onCreate()
-    }
-
-    /**
-     * Has the owner of the messages make [change] and answers the client with what happened:
-     * success only when the change has been made. [change] returns false when it was refused
-     * (a reply with nothing to reply to) and throws when the owner did not get to it.
-     * Waits off the server's own threads.
-     */
-    private suspend fun ApplicationCall.answer(change: () -> Boolean) {
-        val done = try {
-            withContext(Dispatchers.IO) { change() }
-        } catch (e: Exception) {
-            logW("A posted change was not made: $e")
-            respond(HttpStatusCode.ServiceUnavailable, mapOf("success" to false, "error" to e.toString()))
-            return
-        }
-        respond(if (done) HttpStatusCode.OK else HttpStatusCode.Conflict, mapOf("success" to done))
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
