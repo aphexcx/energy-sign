@@ -2,6 +2,7 @@ package cx.aphex.energysign.uart
 
 import cx.aphex.energysign.message.ChooserProtocol
 import cx.aphex.energysign.message.Reply
+import cx.aphex.energysign.message.SignResponder
 import java.io.IOException
 import java.util.concurrent.locks.LockSupport
 
@@ -72,6 +73,7 @@ class SignLink(
     /** What was read and written, after it was written: the log must not hold up a reply. */
     private val log: (line: String) -> Unit = {},
     private val warn: (line: String) -> Unit = {},
+    private val prepareAnswers: () -> Unit = { SignResponder.warmUp() },
 ) : Runnable {
     @Volatile
     private var stopped = false
@@ -117,6 +119,14 @@ class SignLink(
     override fun run() {
         thread = Thread.currentThread()
         try {
+            // Pay the cold JSON cost before taking a request. Keep the previous read time:
+            // a request buffered during preparation may already be too old to answer.
+            try {
+                if (!stopped) prepareAnswers()
+            } catch (e: Exception) {
+                // An adapter can still be built on demand. Keep the port serving requests.
+                complain("preparing answers", e)
+            }
             while (!stopped && !Thread.currentThread().isInterrupted) {
                 step()
             }
