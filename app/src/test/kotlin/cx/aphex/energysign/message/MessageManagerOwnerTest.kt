@@ -11,6 +11,7 @@ import cx.aphex.energysign.ai.PostedAIAnswer
 import cx.aphex.energysign.beatlinkdata.currentTrack
 import cx.aphex.energysign.keyboard.KeyboardManager
 import cx.aphex.energysign.uart.Attention
+import cx.aphex.energysign.uart.AttentionSwitch
 import cx.aphex.energysign.uart.SignLink
 import cx.aphex.energysign.uart.SignWire
 import cx.aphex.energysign.uart.UartTimingLog
@@ -924,6 +925,72 @@ class MessageManagerOwnerTest {
         } finally {
             manager.onChooserChanged = countPushes
         }
+    }
+
+    /**
+     * The real manager, the real switch (on a file of its own, off) and the real link on a line
+     * that takes everything: [commands] are sent by the phone and run by ONE turn of the link,
+     * then the link runs on for more than the distance two pushes keep. What was written.
+     */
+    private fun writtenAfterOneTurnOf(vararg commands: String): List<ByteArray> {
+        var now = 0L
+        val written = mutableListOf<ByteArray>()
+        val wire = object : SignWire {
+            override fun read(buffer: ByteArray, length: Int): Int = 0
+            override fun write(buffer: ByteArray, length: Int): Int = length.also { written += buffer.copyOf(length) }
+            override fun sendBreak(millis: Int) = error("the break is not the attention")
+            override fun close() {}
+        }
+        val switch = AttentionSwitch(
+            file = File(newFilesDir(), AttentionSwitch.FILE_NAME),
+            property = { null },
+            saveLater = {},
+            log = {},
+        )
+        assertEquals(Attention.OFF, switch.inForce())
+        val push = ChooserPush(shown = { manager.chooserShown() }, sent = {})
+        val link = SignLink(
+            wire = wire, baud = 14400, name = "UART",
+            events = { owner.drain(onError = { throw it }) },
+            answer = { _, _ -> },
+            chooserFrame = push::frame,
+            pushed = push::written,
+            attention = switch::inForce,
+            timing = UartTimingLog(isEnabled = { false }, emit = {}),
+            nanoTime = { now },
+            sleepNanos = { now += it },
+        )
+        manager.onChooserChanged = link::requestPush
+        manager.onAttentionCommand = { switch.set(it) }
+        try {
+            commands.forEach(::phone)
+            repeat(300) { link.step() }
+            return written
+        } finally {
+            manager.onChooserChanged = countPushes
+            manager.onAttentionCommand = { attnWords += it }
+        }
+    }
+
+    @Test
+    fun `the gate's case, choose and then attn auto in one turn of the owner, the change made while pushes were off is not pushed`() {
+        assertEquals(emptyList(), writtenAfterOneTurnOf("!choose", "!attn auto"))
+        assertEquals("1/5", manager.chooserShown()?.flashy) // the command was carried out; the sign's next request gets it
+    }
+
+    @Test
+    fun `attn auto and then choose in one turn of the owner, the change is pushed, zeros and its frame`() {
+        val written = writtenAfterOneTurnOf("!attn auto", "!choose")
+        assertEquals(2, written.size)
+        assertEquals(72, written[0].size)
+        assertTrue(written[0].all { it == 0.toByte() })
+        assertEquals(SignResponder.GSON.toJson(manager.chooserShown()), String(written[1]))
+    }
+
+    @Test
+    fun `choose and then attn off in one turn of the owner, nothing is pushed`() {
+        assertEquals(2, writtenAfterOneTurnOf("!attn auto", "!choose").size)
+        assertEquals(emptyList(), writtenAfterOneTurnOf("!attn auto", "!next", "!attn off"))
     }
 
     // ---- ads: the command, the restart, the period (PR 5)
