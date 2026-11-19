@@ -76,7 +76,7 @@ class MessageManager(
     private val filesDir: File = context.filesDir
 
     /** The ads and the ad period as they were last set, kept across a restart. */
-    private val adStore = AdStore(filesDir, warn = { logW(it) })
+    private val adStore = startup.optional("Ad storage") { AdStore(filesDir, warn = { logW(it) }) }
 
     /*
      * THREADS. ONE thread owns everything in here, the lists of MessageRepository and the input
@@ -155,8 +155,43 @@ class MessageManager(
     init {
 
         msgRepo.marqueeMessages.addAll(msgRepo.loadUserMessages(filesDir))
-        adStore.loadPeriod()?.let { advertiseEvery = it }
-        advertisements.addAll(startup.optional("Saved ads", ::loadAds) ?: defaultAds)
+        adStore?.loadPeriod()?.let { advertiseEvery = it }
+        advertisements.addAll(
+            adStore?.let { startup.optional("Saved ads") { loadAds(it) } } ?: defaultAds
+//            listOf(
+//                Message.ColorMessage.ChonkySlide("QUARAN", context.getColor(R.color.instagram)),
+//                Message.ColorMessage.ChonkySlide("TRANCE", context.getColor(R.color.instagram)),
+//                Message.ColorMessage.ChonkySlide(" LIVE ", context.getColor(R.color.instagram)),
+//                Message.ColorMessage.ChonkySlide(" LEDS ", context.getColor(R.color.instagram)),
+//                Message.NowPlayingTrackMessage(""),
+//                Message.ColorMessage.OneByOneMessage(
+//                    "INSTAGRAM:",
+//                    context.getColor(R.color.instagram)
+//                ),
+//                Message.ColorMessage.OneByOneMessage(
+//                    "@APHEXCX",
+//                    context.getColor(R.color.instahandle),
+//                    delayMs = 1000
+//                ),
+//                Message.ColorMessage.OneByOneMessage("TWITTER:", context.getColor(R.color.twitter)),
+//                Message.ColorMessage.OneByOneMessage(
+//                    "@APHEX",
+//                    context.getColor(R.color.twitter),
+//                    delayMs = 1000
+//                ),
+//                Message.ColorMessage.OneByOneMessage(
+//                    "SOUNDCLOUD",
+//                    context.getColor(R.color.soundcloud)
+//                ),
+//                Message.ColorMessage.OneByOneMessage(
+//                    "@APHEXCX",
+//                    context.getColor(R.color.soundcloud),
+//                    delayMs = 1000
+//                ),
+//                Message.Icon.Invaders
+//            )
+        )
+//        pushAdvertisements()
 
         // On the owner thread, in the same step that took the text and ended the input
         keyboardManager.onSubmitted = { msg ->
@@ -593,8 +628,8 @@ class MessageManager(
      * The ads as they were last set. Nothing is written here: a file that cannot be read stays
      * as it is until the next ad command replaces the list.
      */
-    private fun loadAds(): List<Message> =
-        when (val saved = adStore.loadAds(note = { logW("${AdStore.ADS_FILE_NAME}, $it") })) {
+    private fun loadAds(store: AdStore): List<Message> =
+        when (val saved = store.loadAds(note = { logW("${AdStore.ADS_FILE_NAME}, $it") })) {
             is AdStore.SavedAds.Ads -> {
                 logD("Loaded ${saved.ads.size} ads from ${AdStore.ADS_FILE_NAME}.")
                 saved.ads
@@ -608,7 +643,7 @@ class MessageManager(
             is AdStore.SavedAds.Unreadable -> {
                 logW(
                     "Could not load ${AdStore.ADS_FILE_NAME} (${saved.why}); showing the default ads for this run. " +
-                            "The file is left as it is until the next ad command."
+                            "The sign link continues. The file is left as it is until the next ad command."
                 )
                 defaultAds
             }
@@ -622,10 +657,11 @@ class MessageManager(
      * an earlier save.
      */
     private fun saveAds() {
+        val store = adStore ?: return
         val snapshot = ArrayList(advertisements)
         msgRepo.saveLater {
             try {
-                adStore.saveAds(snapshot)
+                store.saveAds(snapshot)
                 logD("Wrote ${snapshot.size} ads to ${AdStore.ADS_FILE_NAME}.")
             } catch (e: Throwable) {
                 logW("Exception when saving ${AdStore.ADS_FILE_NAME}! ${e.message}")
@@ -635,10 +671,11 @@ class MessageManager(
 
     /** The period is read here, by the owner; the saver writes it. */
     private fun saveAdPeriod() {
+        val store = adStore ?: return
         val period = advertiseEvery
         msgRepo.saveLater {
             try {
-                adStore.savePeriod(period)
+                store.savePeriod(period)
             } catch (e: Throwable) {
                 logW("Exception when saving ${AdStore.PERIOD_FILE_NAME}! ${e.message}")
             }

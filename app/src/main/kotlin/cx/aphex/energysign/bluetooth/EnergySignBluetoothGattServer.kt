@@ -30,8 +30,11 @@ class EnergySignBluetoothGattServer(
 
     fun start() {
         gattServer = bluetoothManager.openGattServer(context, this)
-        gattServer?.addService(NordicUartServiceProfile.createNordicUartService())
-            ?: logW("Unable to create GATT server")
+        checkNotNull(gattServer) { "Bluetooth GATT server unavailable" }.let { server ->
+            check(server.addService(NordicUartServiceProfile.createNordicUartService())) {
+                "Bluetooth GATT service registration refused"
+            }
+        }
     }
 
     fun stop() {

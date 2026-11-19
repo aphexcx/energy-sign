@@ -17,7 +17,7 @@ import java.nio.charset.CodingErrorAction
  */
 class AdStore(
     private val dir: File,
-    /** Gets one line when a save is in place but its directory could not be forced to storage. */
+    /** Reports period read failures and saves whose directory could not be forced to storage. */
     private val warn: (String) -> Unit = {},
     /** The steps of a save that touch storage: the app's real ones, unless a test stands in one. */
     private val steps: SaveSteps = SaveSteps(),

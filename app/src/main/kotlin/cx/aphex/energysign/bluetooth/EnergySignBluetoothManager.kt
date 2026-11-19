@@ -144,7 +144,7 @@ class EnergySignBluetoothManager(
     private fun registerAndStart() {
         // We can't continue without proper Bluetooth support
         if (!context.checkBluetoothSupport(bluetoothAdapter)) {
-            throw RuntimeException("No bluetooth support, exiting")
+            throw UnsupportedOperationException("Bluetooth LE unavailable")
         }
 
         receivers.register(bluetoothReceiver, bondStateReceiver)
@@ -178,7 +178,6 @@ class EnergySignBluetoothManager(
         }
 
         override fun onStartFailure(errorCode: Int) {
-            logW("LE Advertise Failed: $errorCode")
             val error = when (errorCode) {
                 ADVERTISE_FAILED_ALREADY_STARTED ->
                     "ADVERTISE_FAILED_ALREADY_STARTED\n" +
@@ -197,7 +196,7 @@ class EnergySignBluetoothManager(
                             "Operation failed due to an internal error."
                 else -> "Unknown Advertise Error, error code not part of the AdvertiseCallback enum "
             }
-            logW(error)
+            logW("Bluetooth advertising failed ($errorCode, $error), sign link continues")
             viewModel.updateAdvertiseStatus("💔$error")
         }
     }
@@ -225,7 +224,7 @@ class EnergySignBluetoothManager(
 
             advertiser = it
             it.startAdvertising(settings, data, advertiseCallback)
-        } ?: logW("Failed to create advertiser")
+        } ?: logW("Bluetooth advertiser unavailable, sign link continues")
     }
 
     /**
@@ -244,17 +243,5 @@ class EnergySignBluetoothManager(
  * @param bluetoothAdapter System [BluetoothAdapter].
  * @return true if Bluetooth is properly supported, false otherwise.
  */
-fun Context.checkBluetoothSupport(bluetoothAdapter: BluetoothAdapter?): Boolean {
-
-    if (bluetoothAdapter == null) {
-        logW("Bluetooth is not supported")
-        return false
-    }
-
-    if (!packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE)) {
-        logW("Bluetooth LE is not supported")
-        return false
-    }
-
-    return true
-}
+fun Context.checkBluetoothSupport(bluetoothAdapter: BluetoothAdapter?): Boolean =
+    bluetoothAdapter != null && packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE)
