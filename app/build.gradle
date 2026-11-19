@@ -6,6 +6,11 @@ plugins {
     id 'org.jetbrains.kotlinx.atomicfu' version '0.33.0'
 }
 
+// Mockito's jar alone, to hand to the unit tests' JVM as an agent
+configurations {
+    mockitoAgent
+}
+
 android {
     compileSdk {
         version = release(37) { minorApiLevel = 2 }
@@ -117,6 +122,7 @@ android {
             useJUnitPlatform()
             // a test that hangs fails, it does not hold the build
             systemProperty 'junit.jupiter.execution.timeout.default', '60 s'
+            jvmArgs "-javaagent:${configurations.mockitoAgent.asPath}"
         }
         // android.util.Log and friends return 0/null in JVM tests instead of throwing
         // (MessageManagerOwnerTest runs the real MessageManager, which logs)
@@ -197,19 +203,21 @@ dependencies {
     // The official Anthropic SDK (Kotlin uses the Java SDK).
     implementation 'com.anthropic:anthropic-java:3.10.0'
 
-    // JUnit 5
-    testImplementation 'org.junit.jupiter:junit-jupiter-api:5.11.3'
-    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.11.3'
+    // JUnit
+    testImplementation 'org.junit.jupiter:junit-jupiter-api:6.1.3'
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:6.1.3'
     // Gradle 9 no longer brings the launcher itself
-    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.11.3'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:6.1.3'
 
     // Kotlin Test
     testImplementation "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
 
-    // Mockito 5 mocks final classes itself (no mockito-inline artifact) and reads the class files of Java 17 and 21
+    // Mockito 5 mocks final classes itself (no mockito-inline artifact). It is loaded as an agent when the
+    // test JVM starts (testOptions above): attaching itself to a running JVM is what newer JDKs warn about and will forbid.
     testImplementation 'org.mockito:mockito-core:5.24.0'
+    mockitoAgent('org.mockito:mockito-core:5.24.0') { transitive = false }
     // The tests build Android objects without their constructors; Mockito 5 has Objenesis at run time only
-    testImplementation 'org.objenesis:objenesis:3.3'
+    testImplementation 'org.objenesis:objenesis:3.6'
 
     // A local stand-in for the Messages API: the SDK client is tested over real HTTP, never against the live service.
     testImplementation 'com.squareup.okhttp3:mockwebserver:5.5.1'
