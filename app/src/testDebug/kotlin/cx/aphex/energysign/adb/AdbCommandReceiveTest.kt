@@ -266,18 +266,18 @@ class AdbCommandReceiveTest {
         }.koin
 
         // The app has not got as far as starting Koin.
-        assertNull(AdbCommand.entryWhenUp(null))
+        assertNull(AdbCommand.entryWhenUp(null, 0))
         // This broadcast started the process: there is a queue, and no sign link has run it.
-        assertNull(AdbCommand.entryWhenUp(appWith(OwnerQueue())))
+        assertNull(AdbCommand.entryWhenUp(appWith(OwnerQueue()), 0))
         // The link was stopped: the thread that ran the queue has ended.
         val stopped = OwnerQueue()
         Thread({ stopped.drain() }, "a-link-that-ended").apply { start() }.join()
-        assertNull(AdbCommand.entryWhenUp(appWith(stopped)))
+        assertNull(AdbCommand.entryWhenUp(appWith(stopped), 0))
         assertEquals(0, made.get(), "the manager was asked for, and Koin makes it then, for a command that is refused")
 
         // Up: the main screen made the manager before it started the link; it is there to be taken.
         val running = OwnerQueue().also { it.drain() }
-        assertFails { AdbCommand.entryWhenUp(appWith(running)) }
+        assertFails { AdbCommand.entryWhenUp(appWith(running), 0) }
         assertEquals(1, made.get())
     }
 

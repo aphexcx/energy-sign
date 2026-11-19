@@ -27,6 +27,7 @@ import java.util.concurrent.Executor
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -150,7 +151,7 @@ class AdbCommandOwnerTest {
         val outcomes = LinkedBlockingQueue<AdbCommand.Outcome>()
         AdbCommand.receive(
             command = { AdbCommand.Bytes(command.toByteArray(Charsets.UTF_8)) },
-            app = { AdbCommand.entryWhenUp(GlobalContext.get()) },
+            app = { AdbCommand.entryWhenUp(GlobalContext.get(), 0) },
             answerWithinMs = answerWithinMs,
             late = { outcome, _ -> late(outcome) },
         ) { outcome, _ -> outcomes.put(outcome) }
@@ -181,20 +182,36 @@ class AdbCommandOwnerTest {
     }
 
     @Test
-    fun `the commands of the phone do through the hook what they do over Bluetooth`() {
-        assertEquals("ok 7 bytes", hook("!choose"))
-        assertEquals("ok 5 bytes", hook("!next"))
-        assertEquals("ok 5 bytes", hook("!next"))
-        assertEquals("3/5 MESSAGE 3", shown())
-        assertEquals("ok 5 bytes", hook("!prev"))
-        assertEquals("2/5 MESSAGE 2", shown())
-        assertEquals("ok 7 bytes", hook("!delete"))
-        assertEquals(listOf("MESSAGE 1", "MESSAGE 3", "MESSAGE 4", "MESSAGE 5"), stored())
-        assertEquals("ok 10 bytes", hook("!endchoose"))
+    fun `the commands of the phone do through the hook what they do over Bluetooth, and each change of what the chooser shows asks for its push`() {
+        // What the sign link is told (MainViewModel wires this to the push): once for every change of
+        // what the chooser shows, as for a Bluetooth write. A hook that says "ok" and asks for no push
+        // leaves a sign that does not poll on the selection of before.
+        val pushes = AtomicInteger()
+        manager.onChooserChanged = { pushes.incrementAndGet() }
+        try {
+            assertEquals("ok 7 bytes", hook("!choose"))
+            assertEquals(1, pushes.get(), "entering")
+            assertEquals("ok 5 bytes", hook("!next"))
+            assertEquals(2, pushes.get(), "a step")
+            assertEquals("ok 5 bytes", hook("!next"))
+            assertEquals("3/5 MESSAGE 3", shown())
+            assertEquals(3, pushes.get(), "a step; looking at it is no change")
+            assertEquals("ok 5 bytes", hook("!prev"))
+            assertEquals("2/5 MESSAGE 2", shown())
+            assertEquals(4, pushes.get(), "a step back")
+            assertEquals("ok 7 bytes", hook("!delete"))
+            assertEquals(listOf("MESSAGE 1", "MESSAGE 3", "MESSAGE 4", "MESSAGE 5"), stored())
+            assertEquals(5, pushes.get(), "another message and another count")
+            assertEquals("ok 10 bytes", hook("!endchoose"))
+            assertEquals(6, pushes.get(), "leaving")
 
-        assertEquals("ok 18 bytes", hook("hello from adb ✨"))
-        assertEquals(5, stored().size)
-        assertTrue(stored().first().startsWith("hello from adb", ignoreCase = true), stored().first())
+            assertEquals("ok 18 bytes", hook("hello from adb ✨"))
+            assertEquals(5, stored().size)
+            assertTrue(stored().first().startsWith("hello from adb", ignoreCase = true), stored().first())
+            assertEquals(6, pushes.get(), "outside chooser mode the chooser shows nothing: no push")
+        } finally {
+            manager.onChooserChanged = {}
+        }
     }
 
     @Test

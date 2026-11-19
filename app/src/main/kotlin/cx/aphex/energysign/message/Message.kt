@@ -209,6 +209,15 @@ sealed class Message {
         override val type: MSGTYPE = MSGTYPE.CHOOSER
     }
 
+    /**
+     * One frame of the jump game ([JumpGame.Frame]), as the sign reads it: it draws the frame
+     * and asks again at once. Two keys and no more, the frame's text and the kind; the text is
+     * made at one place, [gameFrame], which follows the contract note.
+     */
+    class GameFrame(override val str: String) : Message() {
+        override val type: MSGTYPE = MSGTYPE.GAME
+    }
+
     sealed class KeyboardEcho(currentString: String, val mode: Char) : Message() {
         override val str: String = currentString.takeLast(19) + '_'
         override val type: MSGTYPE = MSGTYPE.KEYBOARD
@@ -230,6 +239,7 @@ sealed class Message {
         STARFIELD('S'),
         UTILITY('U'),
         KEYBOARD('K'),
+        GAME('G'),
         CHOOSER('H'),
         ICON('I'),
         TRACKID('T'),
@@ -295,6 +305,7 @@ sealed class Message {
                     MSGTYPE.UTILITY -> context.deserialize(json, UtilityMessage::class.java)
                     MSGTYPE.CHOOSER -> context.deserialize(json, Chooser::class.java)
                     MSGTYPE.KEYBOARD -> context.deserialize(json, KeyboardEcho::class.java)
+                    MSGTYPE.GAME -> context.deserialize(json, GameFrame::class.java)
                     MSGTYPE.STARFIELD -> context.deserialize(json, Starfield::class.java)
                     MSGTYPE.TRACKID -> context.deserialize(json, NowPlayingTrackMessage::class.java)
                     MSGTYPE.CHONKYMARQUEE -> context.deserialize(json, Marquee.Chonky::class.java)

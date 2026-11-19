@@ -90,6 +90,9 @@ class SignLinkTest {
             return take
         }
 
+        // no test in this file asks for a push: those are in SignLinkPushTest
+        override fun sendBreak(millis: Int) = throw IOException("no break was asked for")
+
         override fun close() {}
     }
 
@@ -730,6 +733,7 @@ class SignLinkTest {
         val closes = AtomicInteger()
         override fun read(buffer: ByteArray, length: Int): Int = 0.also { reads.incrementAndGet() }
         override fun write(buffer: ByteArray, length: Int): Int = length
+        override fun sendBreak(millis: Int) {}
         override fun close() {
             closes.incrementAndGet()
             closedBy.set(Thread.currentThread())

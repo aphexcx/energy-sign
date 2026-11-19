@@ -113,6 +113,34 @@ object ChooserProtocol {
 }
 
 /**
+ * The frame of a push (contract VERSION 3.1), and what is told when it has been written.
+ *
+ * A push sends the chooser message unasked. [shown] is all it can reach, and by its type that is
+ * the chooser message or nothing: a push cannot take a message from a queue or move an index.
+ * [sent] hears of the message once the link says the sign can have it ([written]), as it would
+ * hear of a reply: the screen and the Bluetooth read characteristics show what the sign has.
+ * A push that failed tells nothing. Link thread only.
+ */
+class ChooserPush(
+    private val shown: () -> Message.Chooser?,
+    private val sent: (message: Message.Chooser) -> Unit,
+) {
+    private var framed: Message.Chooser? = null
+
+    /** The chooser message as it is now, as JSON; null outside chooser mode (the push is then the attention alone). */
+    fun frame(): String? {
+        framed = shown()
+        return framed?.let(SignResponder.GSON::toJson)
+    }
+
+    /** The frame that [frame] last gave is on the wire, whole and in time, at a sign that listens for it. */
+    fun written() {
+        framed?.let(sent)
+        framed = null
+    }
+}
+
+/**
  * Does [cleanUp] after this failure and returns this failure, for the caller to throw on. When
  * the clean-up fails too, its failure is attached to this one (suppressed): it does not take
  * its place, as it would when thrown from a `catch` or a `finally`. An Error of the clean-up
@@ -145,7 +173,8 @@ internal inline fun <T : Throwable> T.keptThrough(crossinline cleanUp: () -> Uni
  * in the list.
  *
  * Called on the sign link thread, one call at a time, and only for a request the sign really
- * made: [nextMessage] takes the message it returns.
+ * made: [nextMessage] takes the message it returns. A push (contract VERSION 3.1) does not come
+ * through here: it sends the chooser message alone ([ChooserPush]), which takes nothing.
  */
 class SignResponder(
     private val nextMessage: () -> Message,

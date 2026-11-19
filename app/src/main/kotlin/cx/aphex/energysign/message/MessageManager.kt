@@ -28,13 +28,16 @@ import java.util.concurrent.atomic.AtomicLong
 class MessageManager(
     private val context: Context,
     val msgRepo: MessageRepository,
-    private val owner: OwnerQueue,
+    /** The owner of the message state. Not kept: every way to it from here is [toOwner]. */
+    owner: OwnerQueue,
     /**
      * A clock that only counts, in milliseconds: for how long the sign has said "thinking", and
      * for the pauses and the hourly budget of the queries. The app gives the one that also counts
      * while the board sleeps (AppModule); this default is for tests on the JVM.
      */
     private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 },
+    /** The jump game. A test hands in one whose obstacles it knows. */
+    jumpGame: JumpGame = JumpGame(),
 ) :
     KoinComponent {
     private val advertisements: MutableList<Message> = mutableListOf()
@@ -119,8 +122,8 @@ class MessageManager(
 
     /*
      * THREADS. ONE thread owns everything in here, the lists of MessageRepository and the input
-     * of KeyboardManager: the sign link thread (see OwnerQueue). It alone calls getNextMessage,
-     * and it runs every change. All other entry points are called from other
+     * of KeyboardManager: the sign link thread (see OwnerQueue). It alone calls getNextMessage
+     * and chooserShown, and it runs every change. All other entry points are called from other
      * threads. Bluetooth, the main thread (keys) and the threads AI answers come from post their change to the owner
      * and return, so the change has NOT been made yet when they return; they have nobody to
      * tell. The BeatLink server's entry points (a posted message, a posted reply, the thinking
@@ -130,15 +133,30 @@ class MessageManager(
      * thread starts.
      */
 
-    /** Hands [change], which may alter the messages, the index or the mode, to the owner. */
-    private fun change(change: () -> Unit) = owner.post(change)
+    /**
+     * Called once whenever what the chooser should show has changed (entering chooser mode,
+     * another message or count, leaving it): the sign link then pushes it to the sign, if
+     * pushes are switched on. Called on the owner thread.
+     */
+    @Volatile
+    var onChooserChanged: () -> Unit = {}
+
+    /** Gets the word of an `!attn` command (off, auto, break, zeros; or whatever was typed). Called on the owner thread. */
+    @Volatile
+    var onAttentionCommand: (word: String) -> Unit = {}
+
+    /** The only door to the owner: whatever goes through it runs under the chooser watch (see WatchedOwner). */
+    private val toOwner = WatchedOwner(owner, ChooserChangeWatch(view = { chooserShown() }) { onChooserChanged() })
+
+    /** Hands [change], which may alter the messages, the index or the mode, to the owner; it runs under the chooser watch. */
+    private fun change(change: () -> Unit) = toOwner.post(change)
 
     /**
      * The same, for a caller that tells someone what happened (the HTTP server): waits until the
      * owner has made the change and returns its result or throws its error. Not from the main
      * thread (see OwnerQueue.ask).
      */
-    private fun <T> changeAndWait(change: () -> T): T = owner.ask(change = change)
+    private fun <T> changeAndWait(change: () -> T): T = toOwner.ask(change)
 
     /**
      * When a query is asked and for how long the sign says "thinking" for it (see AIQueryDesk for
@@ -184,7 +202,7 @@ class MessageManager(
      */
     private fun stillListed(query: Message.Marquee.AIQuery): Boolean =
         try {
-            owner.ask { msgRepo.marqueeMessages.any { it === query } }
+            toOwner.ask { msgRepo.marqueeMessages.any { it === query } }
         } catch (e: Exception) {
             false
         }
@@ -238,19 +256,98 @@ class MessageManager(
         // On the owner thread, in the same step that took the text and ended the input
         keyboardManager.onSubmitted = { msg ->
             logD("Processing new submitted keyboard message: $msg")
-            addNewUserMessage(msg, isQuery = true)
+            // (the key was posted by KeyboardManager itself, not through change(): this is the
+            // owner asking itself, answered at once, and under the chooser watch like every change)
+            toOwner.ask { addNewUserMessage(msg, isQuery = true) }
         }
 
     }
 
     private var usrMsgCount: Int = 0
 
+    /** The jump game's switch and its best score, kept across a restart. */
+    private val gameStore = GameStore(filesDir, warn = { logW(it) })
+
+    /**
+     * The jump game. It answers the sign's requests before the queue and the list are looked
+     * at ([getNextMessage]) and takes from neither; the chooser and a typist take the sign from
+     * it. Owner thread only, like everything here.
+     */
+    private val game = GameOnTheSign(
+        GameShows(
+            runnerColour = context.getColor(R.color.icon_defaultblue),
+            crashColour = context.getColor(R.color.instahandle),
+            scoreColour = context.getColor(R.color.chonkyslide_defaultpink),
+        ),
+        best = gameStore.loadBest(),
+        on = gameStore.loadOn(),
+        say = { logD(it) },
+        bestIs = { best -> saveOfTheGame("the best score") { gameStore.saveBest(best) } },
+        game = jumpGame,
+    )
+
+    init {
+        logD("Game: switched ${if (game.on) "on" else "off"} at the start.")
+        keyboardManager.clock = nowMs
+        keyboardManager.takenByTheGame = { key, repeated, arrivedAt -> gameKey(key, repeated, arrivedAt) }
+    }
+
+    /**
+     * EVERY KEY THE GAME MAY TAKE, on the owner thread, with the time the press arrived. True
+     * when the key was the game's: then nothing is typed.
+     *
+     * The button is the up arrow, and the space bar while anything of a game is on. It starts
+     * a game when nothing of one is on (the up arrow only) and jumps while one is played; in
+     * the intro and in a closing show it does nothing (a jump that comes a moment after the
+     * hit is not a new game, and takes no score off the sign). Any other key is typing, repeats
+     * and all, and takes the sign from the game.
+     *
+     * A HELD KEY IS ONE PRESS, AND IT IS WHOSE ITS KEY-DOWN WAS. A key-down the game took makes
+     * the key the game's until it is pressed anew ([heldForTheGame]): its repeats do nothing
+     * and type nothing, whatever the game has become meanwhile. (A space bar held from a
+     * closing show into the messages would otherwise be typed there, and typing empties the
+     * queue.) A repeat is never a new press, so the next key-down that is none says the key
+     * was let go.
+     */
+    private fun gameKey(key: Char, repeated: Boolean, arrivedAt: Long): Boolean {
+        if (repeated && key in heldForTheGame) return true
+        val isTheButton = key == KeyboardManager.UP_ARROW || (key == ' ' && game.busy)
+        if (!repeated) {
+            if (isTheButton) heldForTheGame += key else heldForTheGame -= key
+        }
+        if (!isTheButton) {
+            game.end("somebody is typing", arrivedAt)
+            return false
+        }
+        if (!repeated) {
+            if (game.busy) game.jump(arrivedAt) else startGame(arrivedAt)
+        }
+        return true
+    }
+
+    /** The keys whose last key-down the game took. Owner thread only. */
+    private val heldForTheGame = mutableSetOf<Char>()
+
+    /** Not while the sign is somebody else's: a game behind the chooser or the echo would be played by nobody. */
+    private fun startGame(arrivedAt: Long) {
+        if (isInChooserMode || keyboardManager.typing) logD("Game: not started, the sign is taken (the chooser, or somebody typing).")
+        else game.start(arrivedAt)
+    }
+
+    private fun saveOfTheGame(what: String, write: () -> Unit) = msgRepo.saveLater {
+        try {
+            write()
+        } catch (e: Throwable) {
+            logW("Exception when saving $what of the game! ${e.message}")
+        }
+    }
+
     /** Pushes a new user message onto the top of the messages list. Returns when it is there. */
     fun processNewUserMessage(str: String, isQuery: Boolean = false): Unit =
         changeAndWait { addNewUserMessage(str, isQuery) }
 
     /** The stored messages as the owner has them now, newest first. Returns a copy. */
-    fun storedMessages(): List<Message.Marquee> = owner.ask { msgRepo.marqueeMessages.toList() }
+    fun storedMessages(): List<Message.Marquee> = toOwner.ask { msgRepo.marqueeMessages.toList() }
 
     private fun addNewUserMessage(str: String, isQuery: Boolean) {
         // The new message is what the sign shows next, and in chooser mode the one that is
@@ -305,6 +402,9 @@ class MessageManager(
             return getNextChooserMessage()
         }
         keyboardManager.handleKeyboardInput()?.let {
+            return it
+        }
+        game.answer(nowMs())?.let {
             return it
         }
 
@@ -484,6 +584,7 @@ class MessageManager(
      * place in the list. Owner thread only.
      */
     fun returnUnsent(message: Message) {
+        if (game.notWritten(message)) return
         val selection = takenFromList
         if (selection != null && message === selection.message) {
             // The owner reports this write before running another event. Between attempts
@@ -502,6 +603,13 @@ class MessageManager(
             if (message === NowPlayingAnnouncement) announcementNotWritten()
         }
     }
+
+    /**
+     * What the chooser shows now, null outside chooser mode. It reads the list, the index and
+     * the mode and changes nothing: this, and not getNextMessage, is what a push sends, so a
+     * push cannot take a message. Owner thread only.
+     */
+    fun chooserShown(): Message.Chooser? = if (isInChooserMode) getNextChooserMessage() else null
 
     /**
      * The sign takes the announcement of a track: its line is played. THE ONE PLACE where a line
@@ -556,10 +664,26 @@ class MessageManager(
         }
     }
 
-    private fun processUartCommand(value: ByteArray) {
+    private fun processUartCommand(value: ByteArray, arrivedAt: Long) {
         when (val cmd = String(value)) {
+            // (the game gets every one of these with the time the command ARRIVED)
+            "!game" -> startGame(arrivedAt)
+
+            "!j",
+            "!jump" -> game.jump(arrivedAt)
+
+            "!game reset" -> game.forgetBest(arrivedAt)
+
+            "!game on",
+            "!game off" -> {
+                game.switch(cmd == "!game on", arrivedAt)
+                val on = game.on
+                saveOfTheGame("the switch") { gameStore.saveOn(on) }
+            }
+
             "!c",
             "!choose" -> {
+                game.end("the chooser takes the sign", arrivedAt)
                 isInChooserMode = true
             }
 
@@ -642,6 +766,10 @@ class MessageManager(
 //                        🛤️
 //                        👾
                     }
+
+                    // before "!A", which it also begins with: whether and how the chooser is pushed to the sign
+                    cmd.startsWith(ATTENTION_COMMAND, ignoreCase = true) ->
+                        onAttentionCommand(cmd.drop(ATTENTION_COMMAND.length).trim().lowercase())
 
                     cmd.startsWith("!B", ignoreCase = true) -> {
                         msgRepo.pushOneTimeMessage(
@@ -775,21 +903,27 @@ class MessageManager(
     }
 
 
-    /** A command or a new message, as the phone writes it. Posted: it has not been carried out when this returns. */
-    fun processNewBytes(value: ByteArray) = change(bytesChange(value))
+    /**
+     * A command or a new message, as the phone writes it. Posted: it has not been carried out
+     * when this returns. [arrivedAt] is when it entered the app, on this manager's clock: the
+     * caller read it before it did anything else (see signClockMs), and the game counts the
+     * command from then.
+     */
+    fun processNewBytes(value: ByteArray, arrivedAt: Long = nowMs()) = change(bytesChange(value, arrivedAt))
 
     /** The same, for a caller that says "done" to someone: returns when the owner has carried it out. Not from the main thread. */
-    fun processNewBytesAndWait(value: ByteArray): Unit = changeAndWait(bytesChange(value))
+    fun processNewBytesAndWait(value: ByteArray, arrivedAt: Long = nowMs()): Unit = changeAndWait(bytesChange(value, arrivedAt))
 
     /**
      * The same, for a caller that has to say which of three things happened (the adb hook): the
      * owner carried it out, the owner threw on it, or the owner never took it up and it was
      * withdrawn. See OwnerQueue.askFor. Not from the main thread.
      */
-    fun processNewBytesAndTell(value: ByteArray): OwnerQueue.Asked<Unit> = owner.askFor(change = bytesChange(value))
+    fun processNewBytesAndTell(value: ByteArray, arrivedAt: Long = nowMs()): OwnerQueue.Asked<Unit> =
+        toOwner.askFor(bytesChange(value, arrivedAt))
 
     /** What [value] asks for, as a change for the owner. What can be done here, on the caller's thread, is done here. */
-    private fun bytesChange(value: ByteArray): () -> Unit {
+    private fun bytesChange(value: ByteArray, arrivedAt: Long): () -> Unit {
         val cmd = String(value)
         return if (cmd.startsWith("!🅰")) {
             logD("Procesing Uart command $cmd")
@@ -798,7 +932,7 @@ class MessageManager(
         } else if (cmd.startsWith("!")) {
             // logged here, by the caller: the owner has the sign to answer
             logD("Procesing Uart command $cmd")
-            ({ processUartCommand(value) })
+            ({ processUartCommand(value, arrivedAt) })
         } else {
             ({ addNewUserMessage(cmd, isQuery = false) })
         }
@@ -1082,6 +1216,9 @@ class MessageManager(
     companion object {
         /** How many lines are remembered as played (see [playedLines]). */
         private const val PLAYED_LINES_REMEMBERED: Int = 5
+
+        /** `!attn off|auto|break|zeros`: the push switch (AttentionSwitch). */
+        private const val ATTENTION_COMMAND: String = "!attn"
 
     }
 }
