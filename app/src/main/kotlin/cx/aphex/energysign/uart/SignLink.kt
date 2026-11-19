@@ -73,7 +73,7 @@ class SignLink(
     /** What was read and written, after it was written: the log must not hold up a reply. */
     private val log: (line: String) -> Unit = {},
     private val warn: (line: String) -> Unit = {},
-    private val prepareAnswers: () -> Unit = { SignResponder.warmUp() },
+    private val prepareAnswers: (stopped: () -> Boolean) -> Unit = { SignResponder.warmUp(it) },
 ) : Runnable {
     @Volatile
     private var stopped = false
@@ -122,7 +122,7 @@ class SignLink(
             // Pay the cold JSON cost before taking a request. Keep the previous read time:
             // a request buffered during preparation may already be too old to answer.
             try {
-                if (!stopped) prepareAnswers()
+                if (!stopped) prepareAnswers { stopped }
             } catch (e: Exception) {
                 // An adapter can still be built on demand. Keep the port serving requests.
                 complain("preparing answers", e)

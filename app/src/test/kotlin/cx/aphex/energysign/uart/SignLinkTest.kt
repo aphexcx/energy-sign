@@ -1,6 +1,7 @@
 package cx.aphex.energysign.uart
 
 import cx.aphex.energysign.message.Reply
+import cx.aphex.energysign.message.SignResponder
 import org.junit.jupiter.api.Test
 import java.io.IOException
 import java.util.concurrent.CountDownLatch
@@ -748,6 +749,30 @@ class SignLinkTest {
         assertTrue(System.nanoTime() - stopAt < 1_000 * ms, "stop took ${(System.nanoTime() - stopAt) / ms} ms")
         assertEquals(1, quiet.closes.get())
         assertSame(thread, quiet.closedBy.get())
+    }
+
+    @Test
+    fun `stop during adapter preparation finishes only the adapter already started and closes the wire`() {
+        val quiet = QuietWire()
+        var prepared = 0
+        lateinit var real: SignLink
+        real = SignLink(
+            wire = quiet, baud = baud, name = "UART", events = {}, answer = { _, _ -> },
+            timing = UartTimingLog(isEnabled = { false }, emit = {}),
+            prepareAnswers = { stopped ->
+                prepared = SignResponder.warmUp {
+                    val wasStopped = stopped()
+                    // The first preparation has permission to start. Stop before the next one.
+                    if (!wasStopped) real.stop()
+                    wasStopped
+                }
+            },
+        )
+        real.run()
+        assertEquals(1, prepared, "only the in-flight adapter should finish")
+        assertEquals(0, quiet.reads.get())
+        assertEquals(1, quiet.closes.get())
+        assertSame(Thread.currentThread(), quiet.closedBy.get())
     }
 
     @Test

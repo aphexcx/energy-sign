@@ -174,7 +174,8 @@ class SignResponder(
          * the first icon. The link does this once before its first read, so an answer never
          * races a background warm-up. Returns how many classes it prepared.
          */
-        fun warmUp(): Int {
+        fun warmUp(stopped: () -> Boolean = { false }): Int {
+            if (stopped()) return 0
             var prepared = 0
             fun visit(type: Class<*>) {
                 if (Message::class.java.isAssignableFrom(type) && !Modifier.isAbstract(type.modifiers)) {
