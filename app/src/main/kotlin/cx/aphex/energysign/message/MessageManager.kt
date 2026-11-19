@@ -326,22 +326,12 @@ class MessageManager(
 //        }
 //    }
 
-    private fun getNextChooserMessage(): Message.Chooser {
-        val idx = currentIdx.value
-        val trimmedMessage: Message.Marquee =
-            msgRepo.marqueeMessages.getOrNull(idx)?.let {
-                when (it) {
-                    is Message.Marquee.User -> Message.Marquee.User(str = it.str.take(7))
-                    is Message.Marquee.GPTQuery -> Message.Marquee.GPTQuery(str = it.str.take(7))
-                    is Message.Marquee.Chonky -> Message.Marquee.Chonky(str = it.str.take(5))
-                    is Message.Marquee.GPTReply -> Message.Marquee.GPTReply(str = it.str.take(5))
-                }
-            }
-                ?: Message.Marquee.User("<empty>")
-        logD("getNextMessage: messages[$idx] = $trimmedMessage")
-        logD("Sending messages[$idx] as chooser!")
-        return Message.Chooser(idx + 1, msgRepo.marqueeMessages.lastIndex + 1, trimmedMessage)
-    }
+    /**
+     * The chooser message for the current index. No side effects and no logging: the sign polls
+     * about five times a second in chooser mode and every poll evaluates this without sending it.
+     */
+    private fun getNextChooserMessage(): Message.Chooser =
+        ChooserProtocol.chooserMessage(msgRepo.marqueeMessages, currentIdx.value)
 
     private fun getIdxAndAdvance(): Int {
         return currentIdx.getAndUpdate {
