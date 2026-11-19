@@ -566,7 +566,7 @@ class SignLink(
         if (whole) chooserDisplay = reply != Reply.MESSAGE
         frameWritten(if (reply == Reply.REPORT) null else answerCarries)
         // Where the sign is behind its request: in its chooser display when it has a chooser message for it
-        if (reply != Reply.REPORT) signInChooser = reply == Reply.CHOOSER && provenLast
+        signInChooser = reply == Reply.CHOOSER && provenLast
         return whole
     }
 

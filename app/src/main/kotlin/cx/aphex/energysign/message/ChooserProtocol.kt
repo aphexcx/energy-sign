@@ -117,7 +117,7 @@ object ChooserProtocol {
  *
  * A push sends the chooser message unasked. [shown] is all it can reach, and by its type that is
  * the chooser message or nothing: a push cannot take a message from a queue or move an index.
- * [sent] hears of the message once its frame is on the wire in full ([written]), as it would
+ * [sent] hears of the message once the link says the sign can have it ([written]), as it would
  * hear of a reply: the screen and the Bluetooth read characteristics show what the sign has.
  * A push that failed tells nothing. Link thread only.
  */
@@ -133,7 +133,7 @@ class ChooserPush(
         return framed?.let(SignResponder.GSON::toJson)
     }
 
-    /** The frame that [frame] last gave has been written in full. */
+    /** The frame that [frame] last gave is on the wire, whole and in time, at a sign that listens for it. */
     fun written() {
         framed?.let(sent)
         framed = null

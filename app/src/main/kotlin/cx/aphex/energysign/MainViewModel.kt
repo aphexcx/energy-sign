@@ -101,7 +101,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
         signResponder.onRequest(buffer, count)?.let(::published)
     }
 
-    /** [message] is on the wire in full, as a reply or as a push: the screen and Bluetooth show it. */
+    /** [message] is on the wire in full, as a reply, or as a push to a sign that listens for one: the screen and Bluetooth show it. */
     private fun published(message: Message) {
         sentString = message.str
         currentString.postValue(message.str)
@@ -115,7 +115,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
      */
     fun chooserFrame(): String? = chooserPush.frame()
 
-    /** The frame of the push has been written in full. Called on the sign link thread. */
+    /** The frame of the push is on the wire, whole and in time, at a sign known to be in its chooser display (SignLink decides). Called on the sign link thread. */
     fun onChooserPushed() = chooserPush.written()
 
     fun updateAdvertiseStatus(status: String) {
