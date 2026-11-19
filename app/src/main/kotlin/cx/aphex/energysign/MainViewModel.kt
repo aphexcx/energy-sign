@@ -9,6 +9,7 @@ import cx.aphex.energysign.bluetooth.EnergySignBluetoothManager
 import cx.aphex.energysign.ext.NonNullMutableLiveData
 import cx.aphex.energysign.ext.logE
 import cx.aphex.energysign.message.ChooserProtocol
+import cx.aphex.energysign.message.ChooserPush
 import cx.aphex.energysign.message.Message
 import cx.aphex.energysign.message.MessageManager
 import cx.aphex.energysign.message.OwnerQueue
@@ -32,7 +33,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
     private val owner: OwnerQueue by inject()
     private val messageManager: MessageManager by inject()
     private val energySignBluetoothManager: EnergySignBluetoothManager
-    private val energySignUartManager: EnergySignUartManager = EnergySignUartManager(this, owner)
+    private val energySignUartManager: EnergySignUartManager = EnergySignUartManager(
+        viewModel = this,
+        owner = owner,
+        filesDir = application.filesDir,
+        saveLater = { write -> messageManager.msgRepo.saveLater(write) },
+    )
 
     /** The answer to a REQUEST of the sign, and the only way to MessageManager.getNextMessage. */
     private val signResponder = SignResponder(
@@ -43,16 +49,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
             logE("Not sent: a message of $bytes bytes is more than the sign can take (${ChooserProtocol.MAX_FRAME_BYTES}): ${message.str.take(40)}...")
         },
     )
+
+    /** The frame of a PUSH. It can reach the chooser message and nothing else. */
+    private val chooserPush = ChooserPush(
+        shown = { messageManager.chooserShown() },
+        sent = ::published,
+    )
     private val dnsSdAnnouncer: DnsSdAnnouncer
 
     init {
 //        currentBytes.value = messageManager.getNextMessage().bytes
 
         // First, before anything can deliver a command: MessageManager is built by its first
-        // use, and that must be here on the main thread (it observes LiveData). Commands that
-        // arrive before the link thread runs wait in the owner's queue.
+        // use, and that must be here on the main thread (it observes LiveData), with the push
+        // already wired. Commands that arrive before the link thread runs wait in the owner's queue.
         owner.neverWaitsOn(Looper.getMainLooper().thread)
-        checkNotNull(messageManager)
+        messageManager.onChooserChanged = energySignUartManager::requestPush
+        messageManager.onAttentionCommand = { word -> energySignUartManager.setAttention(word) }
         Thread({ SignResponder.warmUp() }, "sign-json-warmup").apply {
             isDaemon = true
             priority = Thread.MIN_PRIORITY
@@ -79,6 +92,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
         energySignBluetoothManager.stop()
 
         energySignUartManager.stop()
+        // MessageManager outlives this view model: it must not keep the stopped link
+        messageManager.onChooserChanged = {}
+        messageManager.onAttentionCommand = {}
     }
 
     /**
@@ -91,11 +107,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
         signResponder.onRequest(buffer, count)?.let(::published)
     }
 
-    /** [message] is on the wire in full: the screen and Bluetooth show it. */
+    /** [message] is on the wire in full, as a reply or as a push: the screen and Bluetooth show it. */
     private fun published(message: Message) {
         sentString = message.str
         currentString.postValue(message.str)
     }
+
+    /**
+     * The frame of a push (contract VERSION 3.1): the chooser message as it is now, or null
+     * outside chooser mode, when a push is the attention alone. It goes through ChooserPush,
+     * which can only reach MessageManager.chooserShown, and not through the responder: a push
+     * cannot take a message. Called on the sign link thread.
+     */
+    fun chooserFrame(): String? = chooserPush.frame()
+
+    /** The frame of the push has been written in full. Called on the sign link thread. */
+    fun onChooserPushed() = chooserPush.written()
 
     fun updateAdvertiseStatus(status: String) {
         btAdvertiseStatus.postValue(status)

@@ -69,8 +69,8 @@ class MessageManager(
 
     /*
      * THREADS. ONE thread owns everything in here, the lists of MessageRepository and the input
-     * of KeyboardManager: the sign link thread (see OwnerQueue). It alone calls getNextMessage,
-     * and it runs every change. All other entry points are called from other
+     * of KeyboardManager: the sign link thread (see OwnerQueue). It alone calls getNextMessage
+     * and chooserShown, and it runs every change. All other entry points are called from other
      * threads. Bluetooth and the main thread (keys, GPT answers) post their change to the owner
      * and return, so the change has NOT been made yet when they return; they have nobody to
      * tell. The BeatLink server's entry points (a posted message, a posted reply, the thinking
@@ -80,15 +80,29 @@ class MessageManager(
      * thread starts.
      */
 
-    /** Hands [change], which may alter the messages, the index or the mode, to the owner. */
-    private fun change(change: () -> Unit) = owner.post(change)
+    /**
+     * Called once whenever what the chooser should show has changed (entering chooser mode,
+     * another message or count, leaving it): the sign link then pushes it to the sign, if
+     * pushes are switched on. Called on the owner thread.
+     */
+    @Volatile
+    var onChooserChanged: () -> Unit = {}
+
+    /** Gets the word of an `!attn` command (off, auto, break, zeros; or whatever was typed). Called on the owner thread. */
+    @Volatile
+    var onAttentionCommand: (word: String) -> Unit = {}
+
+    private val chooserWatch = ChooserChangeWatch(view = { chooserShown() }) { onChooserChanged() }
+
+    /** Hands [change], which may alter the messages, the index or the mode, to the owner; it runs under the chooser watch. */
+    private fun change(change: () -> Unit) = owner.post { chooserWatch.watch(change) }
 
     /**
      * The same, for a caller that tells someone what happened (the HTTP server): waits until the
      * owner has made the change and returns its result or throws its error. Not from the main
      * thread (see OwnerQueue.ask).
      */
-    private fun <T> changeAndWait(change: () -> T): T = owner.ask(change = change)
+    private fun <T> changeAndWait(change: () -> T): T = owner.ask { chooserWatch.watch(change) }
 
 
     init {
@@ -136,7 +150,8 @@ class MessageManager(
         // On the owner thread, in the same step that took the text and ended the input
         keyboardManager.onSubmitted = { msg ->
             logD("Processing new submitted keyboard message: $msg")
-            addNewUserMessage(msg, isQuery = true)
+            // (the key was posted by KeyboardManager itself, not through change())
+            chooserWatch.watch { addNewUserMessage(msg, isQuery = true) }
         }
 
         gptViewModel.GPTResponse.observeForever { reply ->
@@ -376,6 +391,13 @@ class MessageManager(
         }
     }
 
+    /**
+     * What the chooser shows now, null outside chooser mode. It reads the list, the index and
+     * the mode and changes nothing: this, and not getNextMessage, is what a push sends, so a
+     * push cannot take a message. Owner thread only.
+     */
+    fun chooserShown(): Message.Chooser? = if (isInChooserMode) getNextChooserMessage() else null
+
     private fun getIdxAndAdvance(): Int {
         return currentIdx.getAndUpdate {
             if (isPaused) {
@@ -471,6 +493,10 @@ class MessageManager(
 //                        🛤️
 //                        👾
                     }
+
+                    // before "!A", which it also begins with: whether and how the chooser is pushed to the sign
+                    cmd.startsWith(ATTENTION_COMMAND, ignoreCase = true) ->
+                        onAttentionCommand(cmd.drop(ATTENTION_COMMAND.length).trim().lowercase())
 
                     cmd.startsWith("!B", ignoreCase = true) -> {
                         msgRepo.pushOneTimeMessage(
@@ -710,6 +736,9 @@ class MessageManager(
 
     companion object {
         private const val MAX_PLAYED_TRACKS_MEMORY: Int = 4
+
+        /** `!attn off|auto|break|zeros`: the push switch (AttentionSwitch). */
+        private const val ATTENTION_COMMAND: String = "!attn"
 
     }
 }

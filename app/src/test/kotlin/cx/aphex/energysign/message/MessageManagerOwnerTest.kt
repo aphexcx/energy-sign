@@ -4,10 +4,15 @@ import android.content.Context
 import android.content.ContextWrapper
 import androidx.arch.core.executor.ArchTaskExecutor
 import androidx.arch.core.executor.TaskExecutor
+import com.google.gson.JsonParser
 import cx.aphex.energysign.beatlinkdata.BeatLinkTrack
 import cx.aphex.energysign.gpt.GPTViewModel
 import cx.aphex.energysign.gpt.PostedGptAnswer
 import cx.aphex.energysign.keyboard.KeyboardManager
+import cx.aphex.energysign.uart.Attention
+import cx.aphex.energysign.uart.SignLink
+import cx.aphex.energysign.uart.SignWire
+import cx.aphex.energysign.uart.UartTimingLog
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
@@ -55,6 +60,13 @@ class MessageManagerOwnerTest {
     private val owner = OwnerQueue()
     private lateinit var manager: MessageManager
 
+    /** How often the manager said that what the chooser shows has changed (each is a push, when pushes are on). */
+    private var pushes = 0
+
+    /** The words of the `!attn` commands the manager handed on. */
+    private val attnWords = mutableListOf<String>()
+    private val countPushes: () -> Unit = { pushes++ }
+
     @BeforeAll
     fun android() {
         ArchTaskExecutor.getInstance().setDelegate(object : TaskExecutor() {
@@ -70,6 +82,8 @@ class MessageManagerOwnerTest {
             })
         }
         manager = MessageManager(context, repo, owner)
+        manager.onChooserChanged = countPushes
+        manager.onAttentionCommand = { attnWords += it }
     }
 
     @AfterAll
@@ -92,6 +106,8 @@ class MessageManagerOwnerTest {
         repo.oneTimeMessages.clear()
         unsaved.forEach { it.run() } // the saver gets through what the test before left it
         unsaved.clear()
+        pushes = 0
+        attnWords.clear()
     }
 
     /** Escape twice, as at the sign: the first press turns the echo into the warning, the second ends the input. */
@@ -403,6 +419,230 @@ class MessageManagerOwnerTest {
             Thread.sleep(1)
         }
         assertEquals("1/5 MESSAGE 1", shown())
+        assertEquals(1, pushes)
+    }
+
+    // ---- the push (contract 3.1): when the manager asks for one, and that it takes nothing
+
+    @Test
+    fun `every command that changes what the chooser shows asks for exactly one push`() {
+        val expected = listOf(
+            "!choose" to "1/5 MESSAGE 1",
+            "!next" to "2/5 MESSAGE 2",
+            "!last" to "5/5 MESSAGE 5",
+            "!prev" to "4/5 MESSAGE 4",
+            "!first" to "1/5 MESSAGE 1",
+            "!s message 3" to "3/5 MESSAGE 3",
+            "!delete" to "3/4 MESSAGE 4",
+            "HELLO" to "1/5 HELLO",
+            "!endchoose" to null,
+        )
+        for ((i, step) in expected.withIndex()) {
+            phone(step.first)
+            ownerRuns()
+            assertEquals(i + 1, pushes, "after ${step.first}")
+            assertEquals(step.second, manager.chooserShown()?.let { "${it.flashy} ${it.str}" }, "after ${step.first}")
+        }
+    }
+
+    @Test
+    fun `a command that changes nothing on the sign asks for no push, and nothing is asked for outside chooser mode`() {
+        phone("!next")
+        phone("!delete")
+        phone("FRESH")
+        phone("!endchoose") // was not choosing
+        ownerRuns()
+        assertEquals(0, pushes)
+
+        phone("!choose")
+        ownerRuns()
+        assertEquals(1, pushes)
+        phone("!choose") // already choosing
+        phone("!first") // already at the first
+        phone("!prev")
+        phone("!pause")
+        phone("!unpause")
+        phone("!micOn")
+        phone("!B 3")
+        phone("!\uD83C\uDD70\n\uD83D\uDC7E") // an ad command
+        ownerRuns()
+        fromServer { manager.togglePersistentThinkingMessage(true) }
+        fromServer { manager.togglePersistentThinkingMessage(false) }
+        fromServer { manager.processNowPlayingTrack(BeatLinkTrack(id = 7, title = "Title", artist = "Artist")) }
+        fromServer { manager.storedMessages() }
+        assertEquals(1, pushes)
+    }
+
+    @Test
+    fun `several commands the owner runs in one turn are one change each, the link makes one push of them`() {
+        phone("!choose")
+        phone("!next")
+        phone("!next")
+        ownerRuns()
+        assertEquals(3, pushes) // each asks; SignLink keeps one flag for all of them
+    }
+
+    @Test
+    fun `a change from the server's threads asks for a push too, a new message and a reply that lengthens the list`() {
+        phone("!choose")
+        ownerRuns()
+        fromServer { manager.processNewUserMessage("FRESH") }
+        assertEquals(2, pushes)
+        assertEquals("1/6 FRESH", manager.chooserShown()?.let { "${it.flashy} ${it.str}" })
+        fromServer { manager.onNewPostedGPTReply(PostedGptAnswer(answer = "an answer", inReplyTo = "MESSAGE 2")) }
+        assertEquals(3, pushes)
+        assertEquals("1/7", manager.chooserShown()?.flashy)
+        // a reply that was refused changed nothing
+        fromServer { manager.onNewPostedGPTReply(PostedGptAnswer(answer = " ", inReplyTo = "MESSAGE 2")) }
+        assertEquals(3, pushes)
+    }
+
+    @Test
+    fun `a message typed at the sign in chooser mode asks for a push when Enter stores it, not while it is typed`() {
+        phone("!choose")
+        ownerRuns()
+        "hello".forEach(KeyboardManager::processNewKeyboardKey)
+        ownerRuns()
+        assertEquals(1, pushes)
+        typingStarted(6_000)
+        KeyboardManager.submitKeyboardInput()
+        ownerRuns()
+        assertEquals(2, pushes)
+        assertEquals("1/6 hello", manager.chooserShown()?.let { "${it.flashy} ${it.str}" })
+    }
+
+    @Test
+    fun `what a push sends takes nothing, a one-time command queued before leaving goes to the first real request`() {
+        // the gate's case: !micOff, then !endchoose, on a sign that is not listening for the push
+        phone("!choose")
+        phone("!micOff")
+        ownerRuns()
+        val queued = repo.oneTimeMessages.toList()
+        assertSame(Message.UtilityMessage.DisableMic, queued.single())
+
+        repeat(20) { assertEquals("1/5", manager.chooserShown()?.flashy) } // any number of pushes in chooser mode
+        phone("!endchoose")
+        ownerRuns()
+        repeat(20) { assertNull(manager.chooserShown()) } // and of the push on leaving: no frame at all
+
+        assertEquals(queued, repo.oneTimeMessages.toList())
+        assertEquals(5, repo.marqueeMessages.size)
+        assertEquals(emptyList(), unsaved)
+        // the sign asks: now, and only now, it is taken
+        assertSame(Message.UtilityMessage.DisableMic, manager.getNextMessage())
+        assertEquals("MESSAGE 1", manager.getNextMessage().str)
+    }
+
+    @Test
+    fun `outside chooser mode what a push would send is nothing, whatever is stored or queued`() {
+        assertNull(manager.chooserShown())
+        repo.marqueeMessages.clear()
+        assertNull(manager.chooserShown())
+        phone("!choose")
+        ownerRuns()
+        assertEquals("1/0 <empty>", manager.chooserShown()?.let { "${it.flashy} ${it.str}" })
+    }
+
+    // ---- the push switch command
+
+    @Test
+    fun `the attn command hands its word on, in any case, and is not taken for the ad period command`() {
+        phone("!attn zeros")
+        phone("!attn")
+        phone("!attn  off ")
+        phone("!ATTN Auto")
+        phone("!attn 5")
+        ownerRuns()
+        assertEquals(listOf("zeros", "", "off", "auto", "5"), attnWords)
+        assertEquals(0, repo.oneTimeMessages.size) // an ad period command would have announced itself
+        assertEquals(emptyList(), unsaved) // and saved the period
+        assertEquals(0, pushes)
+    }
+
+    @Test
+    fun `the attn command changes nothing until the owner runs it`() {
+        phone("!attn zeros")
+        assertEquals(emptyList(), attnWords)
+        ownerRuns()
+        assertEquals(listOf("zeros"), attnWords)
+    }
+
+    // ---- the whole push: the real manager, the real frame maker and the real link, on a fake line
+
+    @Test
+    fun `from the phone's command to the line, a step in the chooser is zeros and its frame, leaving is zeros alone, and nothing is taken`() {
+        var now = 0L
+        val written = mutableListOf<ByteArray>()
+        val arrivals = ArrayDeque<Byte>()
+        val wire = object : SignWire {
+            override fun read(buffer: ByteArray, length: Int): Int {
+                var n = 0
+                while (n < length && arrivals.isNotEmpty()) buffer[n++] = arrivals.removeFirst()
+                return n
+            }
+
+            override fun write(buffer: ByteArray, length: Int): Int = length.also { written += buffer.copyOf(length) }
+            override fun sendBreak(millis: Int) = error("the break is not the attention")
+            override fun close() {}
+        }
+        // wired as MainViewModel and EnergySignUartManager wire them
+        val current = mutableListOf<String>()
+        lateinit var link: SignLink
+        val responder = SignResponder(
+            nextMessage = { manager.getNextMessage() },
+            write = { frame, reply -> link.send(frame, reply) },
+            unsent = { manager.returnUnsent(it) },
+        )
+        val push = ChooserPush(shown = { manager.chooserShown() }, sent = { current += it.str })
+        link = SignLink(
+            wire = wire, baud = 14400, name = "UART",
+            events = { owner.drain(onError = { throw it }) },
+            answer = { buffer, count -> responder.onRequest(buffer, count)?.let { current += it.str } },
+            chooserFrame = push::frame,
+            pushed = push::written,
+            attention = { Attention.AUTO },
+            timing = UartTimingLog(isEnabled = { false }, emit = {}),
+            nanoTime = { now },
+            sleepNanos = { now += it },
+        )
+        manager.onChooserChanged = link::requestPush
+        try {
+            phone("!choose")
+            phone("!next")
+            link.step()
+            // one push for both commands: the run of zeros, then the frame of the newest state
+            assertEquals(2, written.size)
+            assertEquals(72, written[0].size)
+            assertTrue(written[0].all { it == 0.toByte() })
+            val frame = JsonParser.parseString(String(written[1])).asJsonObject
+            assertEquals("H", frame["type"].asString)
+            assertEquals("MESSAGE 2", frame["str"].asString)
+            assertEquals("2/5", frame["flashy"].asString)
+            // the very bytes a request would have got, and nothing behind the closing brace
+            assertEquals(SignResponder.GSON.toJson(manager.chooserShown()), String(written[1]))
+            assertEquals('}'.code.toByte(), written[1].last())
+            assertEquals(listOf("MESSAGE 2"), current) // the screen and Bluetooth have the pushed text
+
+            written.clear()
+            phone("!micOff")
+            phone("!endchoose")
+            repeat(300) { link.step() } // more than the distance two pushes keep
+            assertEquals(1, written.size)
+            assertEquals(72, written[0].size)
+            assertTrue(written[0].all { it == 0.toByte() })
+            assertSame(Message.UtilityMessage.DisableMic, repo.oneTimeMessages.single()) // not taken by the push
+            assertEquals(listOf("MESSAGE 2"), current)
+
+            // the sign found nothing behind the attention and asks: that request takes the command
+            written.clear()
+            arrivals += '~'.code.toByte()
+            link.step()
+            assertEquals(SignResponder.GSON.toJson(Message.UtilityMessage.DisableMic), String(written.single()))
+            assertTrue(repo.oneTimeMessages.isEmpty())
+            assertEquals(2, current.size)
+        } finally {
+            manager.onChooserChanged = countPushes
+        }
     }
 
     // ---- ads: the command, the restart, the period (PR 5)

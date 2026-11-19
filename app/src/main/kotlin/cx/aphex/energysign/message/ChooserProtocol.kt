@@ -113,6 +113,34 @@ object ChooserProtocol {
 }
 
 /**
+ * The frame of a push (contract VERSION 3.1), and what is told when it has been written.
+ *
+ * A push sends the chooser message unasked. [shown] is all it can reach, and by its type that is
+ * the chooser message or nothing: a push cannot take a message from a queue or move an index.
+ * [sent] hears of the message once its frame is on the wire in full ([written]), as it would
+ * hear of a reply: the screen and the Bluetooth read characteristics show what the sign has.
+ * A push that failed tells nothing. Link thread only.
+ */
+class ChooserPush(
+    private val shown: () -> Message.Chooser?,
+    private val sent: (message: Message.Chooser) -> Unit,
+) {
+    private var framed: Message.Chooser? = null
+
+    /** The chooser message as it is now, as JSON; null outside chooser mode (the push is then the attention alone). */
+    fun frame(): String? {
+        framed = shown()
+        return framed?.let(SignResponder.GSON::toJson)
+    }
+
+    /** The frame that [frame] last gave has been written in full. */
+    fun written() {
+        framed?.let(sent)
+        framed = null
+    }
+}
+
+/**
  * Answers the sign's requests. Keeps no state: every reply is made from what [nextMessage]
  * returns at that moment, never from what was written before.
  *
@@ -129,7 +157,8 @@ object ChooserProtocol {
  * in the list.
  *
  * Called on the sign link thread, one call at a time, and only for a request the sign really
- * made: [nextMessage] takes the message it returns.
+ * made: [nextMessage] takes the message it returns. A push (contract VERSION 3.1) does not come
+ * through here: it sends the chooser message alone ([ChooserPush]), which takes nothing.
  */
 class SignResponder(
     private val nextMessage: () -> Message,
