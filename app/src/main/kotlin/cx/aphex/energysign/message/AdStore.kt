@@ -3,6 +3,7 @@ package cx.aphex.energysign.message
 import cx.aphex.energysign.SaveSteps
 import cx.aphex.energysign.replaceContent
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.charset.CharacterCodingException
@@ -19,8 +20,8 @@ class AdStore(
     private val dir: File,
     /** Reports period read failures and saves whose directory could not be forced to storage. */
     private val warn: (String) -> Unit = {},
-    /** The steps of a save that touch storage: the app's real ones, unless a test stands in one. */
-    private val steps: SaveSteps = SaveSteps(),
+    /** How the file beside the one to replace is opened (a test opens one that fails). The other steps of a save are always the app's real ones. */
+    private val open: (File) -> FileOutputStream = ::FileOutputStream,
 ) {
 
     /** What [loadAds] found. */
@@ -72,7 +73,7 @@ class AdStore(
     }
 
     private fun File.replaceWith(text: String) =
-        replaceContent(steps, warn) { it.write(text.toByteArray()) }
+        replaceContent(SaveSteps(open = open), warn) { it.write(text.toByteArray()) }
 
     /**
      * The text of this file, which must be UTF-8 through and through. (readText would put a

@@ -1,6 +1,7 @@
 package cx.aphex.energysign.message
 
 import android.content.ContextWrapper
+import cx.aphex.energysign.R
 import cx.aphex.energysign.ScreenLogger
 import cx.aphex.energysign.SignStartup
 import cx.aphex.energysign.ai.AIReplySource
@@ -20,7 +21,7 @@ class MessageStartupTest {
 
     @TestFactory
     fun `the link can read saved text after optional message setup fails`() =
-        listOf("default ads", "AI reply warm-up").flatMap { stage ->
+        listOf("track heading", "default ads", "AI reply warm-up").flatMap { stage ->
             listOf(IllegalStateException(), LinkageError()).map { failure ->
                 dynamicTest("$stage throws ${failure.javaClass.simpleName}") {
                     val context = object : ContextWrapper(null) {
@@ -28,7 +29,8 @@ class MessageStartupTest {
                         // AGP removes final from Android methods in its JVM test jar.
                         @Suppress("OVERRIDING_FINAL_MEMBER")
                         override fun getColor(id: Int): Int {
-                            if (stage == "default ads") throw failure
+                            if (stage == "default ads" && id == R.color.icon_defaultblue) throw failure
+                            if (stage == "track heading" && id == R.color.twitch) throw failure
                             return 0
                         }
                     }
