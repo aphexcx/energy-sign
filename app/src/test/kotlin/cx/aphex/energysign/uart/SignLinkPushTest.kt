@@ -853,6 +853,46 @@ class SignLinkPushTest {
     }
 
     @Test
+    fun `a request behind a pushed frame that is found too late to answer is not thrown away with what it says, the frame is pushed again`() {
+        // the sign could not read the pushed frame and asks; the link's pause runs over, and by its limit of
+        // 50 ms (the polling firmware's) the request is old. A sign that listens for pushes waits a second there
+        command(0, "B")
+        runUntil(180)
+        assertEquals(listOf("B"), told) // done: the frame left the line at 72
+        sleepOverrunNs = 80 * ms
+        runUntil(200)
+        arrives(now / ms - 70, "~") // behind the frame, not into it
+        runUntil(1_500)
+        assertTrue(line.any { it.contains("Read an old request") }, line.toString())
+        assertEquals(0, answers)
+        // the zeros are padding in front of the answer it waits for, and the pushed frame is that answer
+        assertEquals(listOf("tx[00x72]@0", "tx[H:B]@70", "tx[00x72]@322", "tx[H:B]@392"), wire())
+    }
+
+    @Test
+    fun `an old request from a sign that is not in its chooser display brings no push, it has given the answer up`() {
+        signShowsAnOrdinaryMessage()
+        sleepOverrunNs = 1_000 * ms
+        runUntil(100)
+        arrives(now / ms - 950, "~")
+        runUntil(now / ms + 600)
+        assertTrue(line.any { it.contains("Read an old request") }, line.toString())
+        assertEquals(listOf("tx[M1]@0"), wire())
+    }
+
+    @Test
+    fun `an old poll brings no push, a sign that polls asks again by itself`() {
+        command(0, "B")
+        runUntil(180)
+        sleepOverrunNs = 80 * ms
+        runUntil(200)
+        arrives(now / ms - 70, "?")
+        runUntil(1_500)
+        assertTrue(line.any { it.contains("Read an old request") }, line.toString())
+        assertEquals(listOf("tx[00x72]@0", "tx[H:B]@70"), wire())
+    }
+
+    @Test
     fun `a poll that comes behind a pushed frame is answered and opens nothing again`() {
         command(0, "B")
         arrives(90, "?") // the frame had left at 72
@@ -1186,8 +1226,10 @@ class SignLinkPushTest {
         runUntil(now / ms + 20)
         arrives(now / ms - 70, "~")
         runUntil(now / ms + 10)
-        assertEquals(before, txs.size)
-        assertTrue(line.last().contains("Read an old request"), line.last())
+        assertTrue(line.any { it.contains("Read an old request") }, line.toString())
+        // no answer was written (the push that follows is another test's)
+        assertEquals(2, answers)
+        assertTrue(txs[before].zeros, wire().toString())
     }
 
     // ================= a push that did not go out is not done

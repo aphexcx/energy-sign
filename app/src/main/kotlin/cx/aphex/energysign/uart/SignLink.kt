@@ -268,6 +268,9 @@ class LineClock(private val baud: Int, startNs: Long) {
  *
  *  SETS (the sign is behind):
  *  - [requestPush] / [want]: what the chooser shows has changed, while pushes are on.
+ *  - [readRequest]: a request in the chooser display that was found too late to answer (old by
+ *    the 50 ms a polling sign listens), while pushes are on. A sign that listens for pushes
+ *    waits a second there: it asked for the selection and has not got it.
  *  - [readRequest], rule 3: the sign sent something into a pushed frame that had been called
  *    done. It may not have the frame; it is owed again, and not before the sign has had the
  *    quiet it wants behind an answer it could not read ([Behind.TORN_FRAME]).
@@ -297,6 +300,8 @@ class LineClock(private val baud: Int, startNs: Long) {
  *  - a pushed frame that was DONE, and then something the sign sent into it: pending again,
  *    pushed again 1010 ms behind it. (A poll is the exception: only the polling firmware
  *    polls; it does not listen for pushes, and its next poll is answered.)
+ *  - a request in the chooser display read away as old (not a poll): pending, whatever was
+ *    called done before; the push that follows is the answer the sign still waits for.
  *  - the attention alone (leaving chooser mode): pending. It carries nothing and proves
  *    nothing. It is not raised a second time for the same change ([aloneGivenFor]: runs of
  *    zeros without end at a sign that may be showing a text); the sign's next request is
@@ -585,6 +590,11 @@ class SignLink(
             // The link was kept from the wire for longer than the sign waits for this answer
             timing.dropped(readNs, buffer, count)
             log("Read an old request from $name (up to $waitedMs ms ago): not answered")
+            // SETS: old by the limit of the chooser display, which is the polling firmware's. A
+            // sign that listens for pushes waits a second there: it asked for the selection and
+            // has not got it, and a push is still its answer (the zeros are padding in front).
+            // (Not for a poll, as above. Outside its chooser display the sign has given up.)
+            if (chooserDisplay && last != POLL) want()
             return true
         }
         // Not after stop: a message taken now would be written to a port that is closing
