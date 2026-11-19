@@ -66,6 +66,59 @@ class LineClockTest {
         assertEquals(270 * ms + air(72), clock.freeAtNs)
     }
 
+    // ---- when a push may start: the line free, and the sign over what was last on it
+
+    @Test
+    fun `with nothing held a push may start when the line is free`() {
+        assertEquals(5 * ms, clock.pushAtNs)
+        clock.wrote(returnedNs = 100 * ms, count = 72)
+        assertEquals(clock.freeAtNs, clock.pushAtNs)
+    }
+
+    @Test
+    fun `behind an attention a push waits 250 ms, behind a torn frame 1010, counted from when the bytes have left`() {
+        clock.wrote(returnedNs = 100 * ms, count = 72) // gone at 150
+        clock.hold(Behind.ATTENTION)
+        assertEquals(100 * ms + air(72) + 250 * ms, clock.pushAtNs)
+        assertEquals(100 * ms + air(72), clock.freeAtNs) // the line itself is free as before
+
+        val torn = LineClock(baud = 14400, startNs = 0)
+        torn.wrote(returnedNs = 100 * ms, count = 1)
+        torn.hold(Behind.TORN_FRAME)
+        assertEquals(100 * ms + air(1) + 1_010 * ms, torn.pushAtNs)
+        assertEquals(250, Behind.ATTENTION.holdMs)
+        assertEquals(1_010, Behind.TORN_FRAME.holdMs)
+    }
+
+    @Test
+    fun `a longer hold that stands is not cut short by a shorter one, and a hold is not cut short by a free line`() {
+        clock.wrote(returnedNs = 100 * ms, count = 1)
+        clock.hold(Behind.TORN_FRAME)
+        val until = clock.pushAtNs
+        clock.hold(Behind.ATTENTION)
+        assertEquals(until, clock.pushAtNs)
+        clock.holdFrom(nowNs = 200 * ms, millis = 100)
+        assertEquals(until, clock.pushAtNs)
+        // and a later, longer one moves it
+        clock.wrote(returnedNs = 900 * ms, count = 72)
+        clock.hold(Behind.ATTENTION)
+        assertEquals(900 * ms + air(72) + 250 * ms, clock.pushAtNs)
+    }
+
+    @Test
+    fun `what is written while a hold stands does not start a push before the line is free of it`() {
+        clock.holdFrom(nowNs = 100 * ms, millis = 100) // until 200
+        clock.wrote(returnedNs = 190 * ms, count = 72) // a reply, on the line until 240
+        assertEquals(190 * ms + air(72), clock.pushAtNs)
+    }
+
+    @Test
+    fun `with nothing on the line a push waits from now`() {
+        clock.holdFrom(nowNs = 300 * ms, millis = 100)
+        assertEquals(400 * ms, clock.pushAtNs)
+        assertEquals(5 * ms, clock.freeAtNs)
+    }
+
     @Test
     fun `the clock that wraps around is still a clock`() {
         // System.nanoTime may be negative and may pass zero: only differences count

@@ -19,6 +19,11 @@ import java.io.File
  *
  * The file is read once, where this is built. [set] and [inForce] are called on the sign link
  * thread; the file is written through [saveLater], not by the caller.
+ *
+ * A word that was set is remembered for the PROCESS, as long as the saver that writes it lives,
+ * and a switch that is built later in the same process has it: the app can build its UART
+ * manager a second time (the activity is opened again) while the save of the last command is
+ * still waiting, and what the file holds then is the word before.
  */
 class AttentionSwitch(
     private val file: File,
@@ -28,8 +33,10 @@ class AttentionSwitch(
     private val saveLater: (write: () -> Unit) -> Unit,
     private val log: (line: String) -> Unit,
 ) {
+    private val key: String = file.absolutePath
+
     @Volatile
-    private var saved: Attention = readSaved()
+    private var saved: Attention = setInThisProcess[key] ?: readSaved()
 
     /** What the log was last told: the value in force, and whether the property gave it. */
     @Volatile
@@ -63,6 +70,7 @@ class AttentionSwitch(
             return false
         }
         saved = value
+        setInThisProcess[key] = value
         logged = null // a change is always said, also when the property keeps another value in force
         inForce()
         val notSaved = "Pushes to the sign: '${word(value)}' could not be saved, it holds until the app restarts"
@@ -98,6 +106,12 @@ class AttentionSwitch(
 
     companion object {
         const val FILE_NAME: String = "attention.txt"
+
+        /** The word last set in this process, by the file it is kept in. */
+        private val setInThisProcess = java.util.concurrent.ConcurrentHashMap<String, Attention>()
+
+        /** What the end of the process does to that memory. For tests of a restart. */
+        fun forgetThisProcess() = setInThisProcess.clear()
         private const val MAX_FILE_BYTES: Long = 64
     }
 }

@@ -429,7 +429,7 @@ class SignLinkPushTest {
         stuckUntilNs = 150 * ms
         runUntil(200)
         assertEquals(emptyList(), told)
-        assertTrue(warnings().single().contains("the frame was not taken in full"), warnings().toString())
+        assertTrue(warnings().single().contains("the frame was not taken in one piece (2 of 9 bytes)"), warnings().toString())
         runUntil(2_000)
         assertEquals(listOf("BCDEFGH"), told)
     }
@@ -562,6 +562,46 @@ class SignLinkPushTest {
         assertEquals("{c", txs[0].text)
         val zeros = txs.first { it.zeros }
         assertTrue(zeros.atNs - txs[0].goneAtNs >= 1_010 * ms, "zeros ${(zeros.atNs - txs[0].goneAtNs) / ms} ms behind the torn report")
+    }
+
+    @Test
+    fun `a reply whose second piece is taken late is still a reply that was sent, but a push is held back behind it`() {
+        // an answer is judged as on master (it went out, its message is not handed back); only the push is careful
+        chooser = null
+        ordinary.addFirst("N".repeat(100))
+        takesPerWrite = 40
+        // 40 bytes at 0 (gone at 28); the next 40 are offered at 2 and handed over at 88: the line stood still
+        // for 60 ms, the sign may have given up. The last 20 follow at 90 and are written all the same.
+        stallAtWrite[2] = 86 * ms
+        arrives(0, "~")
+        command(120, "B")
+        runUntil(2_500)
+        assertEquals(listOf("N".repeat(100)), taken) // sent, as before this change
+        assertEquals(listOf(40, 40, 20), txs.take(3).map { it.bytes.size })
+        assertTrue(txs[1].leavesFromNs - txs[0].goneAtNs >= 50 * ms)
+        val zeros = txs.first { it.zeros }
+        assertTrue(zeros.atNs - txs[2].goneAtNs >= 1_010 * ms, "zeros ${(zeros.atNs - txs[2].goneAtNs) / ms} ms behind the reply that may be torn")
+    }
+
+    @Test
+    fun `a pushed frame of which nothing was taken leaves the attention alone on the line, the next try is 250 ms behind it`() {
+        command(0, "BCDEFGH")
+        takesBeforeStuck = 72 // the zeros, and then nothing
+        stuckUntilNs = 125 * ms
+        runUntil(2_000)
+        // the guard was over at 70; nothing of the frame is out, so the sign is not waiting for the rest of one
+        assertEquals(listOf("tx[00x72]@0", "tx[00x72]@320", "tx[H:BCDEFGH]@390"), wire())
+    }
+
+    @Test
+    fun `a pushed frame whose pieces come with a pause shorter than the sign's patience is whole`() {
+        command(0, "BCDEFGH")
+        takesBeforeStuck = 72 + 2 // the zeros and two bytes of the frame at 70; the rest 26 ms later
+        stuckUntilNs = 95 * ms
+        runUntil(500)
+        assertEquals(listOf("tx[00x72]@0", "tx[H:]@70", "tx[BCDEFGH]@96"), wire())
+        assertEquals(listOf("BCDEFGH"), told)
+        assertEquals(emptyList(), warnings())
     }
 
     @Test
@@ -922,13 +962,13 @@ class SignLinkPushTest {
     }
 
     @Test
-    fun `a frame the transmitter takes only the start of is a failed push, tried again in full after the sign's quiet`() {
+    fun `a frame the transmitter takes only the start of is a failed push, tried again in full when the sign has got over the torn one`() {
         command(0, "BCDEFGH")
         takesBeforeStuck = 72 + 2
         stuckUntilNs = 150 * ms
         runUntil(2_000)
-        // 70: two bytes, gone at 71; the line stands still for 50 ms and the rest is given up; again 250 ms behind the two
-        assertEquals(listOf("tx[00x72]@0", "tx[H:]@70", "tx[00x72]@321", "tx[H:BCDEFGH]@391"), wire())
+        // 70: two bytes, gone at 71; the line stands still for 50 ms and the rest is given up; again 1010 ms behind the two
+        assertEquals(listOf("tx[00x72]@0", "tx[H:]@70", "tx[00x72]@1081", "tx[H:BCDEFGH]@1151"), wire())
         assertEquals(1, timingLines.count { it.startsWith("push ") })
     }
 
@@ -951,8 +991,8 @@ class SignLinkPushTest {
         command(0, "B")
         failWrites = 1 // the zeros go out; the write of the frame throws
         runUntil(2_000)
-        // it may have handed the frame over before it threw: the next try keeps its distance from where that would end
-        assertEquals(listOf("tx[00x72]@0", "tx[00x72]@322", "tx[H:B]@392"), wire())
+        // it may have handed a part of the frame over before it threw: the next try waits until the sign has got over that
+        assertEquals(listOf("tx[00x72]@0", "tx[00x72]@1082", "tx[H:B]@1152"), wire())
         assertTrue(warnings().first().contains("write failed"), warnings().toString())
         assertEquals(listOf("B"), told)
     }

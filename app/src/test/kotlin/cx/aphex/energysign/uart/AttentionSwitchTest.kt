@@ -21,8 +21,14 @@ class AttentionSwitchTest {
 
     private fun file() = File(dir, AttentionSwitch.FILE_NAME)
 
-    /** The app starting: the file is read once. */
-    private fun started(file: File = file()) = AttentionSwitch(
+    /** The app starting, in a new process: the file is read once. */
+    private fun started(file: File = file()): AttentionSwitch {
+        AttentionSwitch.forgetThisProcess()
+        return builtAgain(file)
+    }
+
+    /** A switch built in the process that is running: the activity was opened again, with a second UART manager. */
+    private fun builtAgain(file: File = file()) = AttentionSwitch(
         file = file,
         property = { property() },
         saveLater = {
@@ -205,6 +211,30 @@ class AttentionSwitchTest {
         assertEquals(Attention.ZEROS, switch.inForce())
         assertEquals("Pushes to the sign: zeros", log[1])
         assertTrue(log.last().contains("'zeros' could not be saved"), log.last())
+    }
+
+    @Test
+    fun `a switch built again in the same process, while the save of the last command still waits, has the word that was set`() {
+        // the gate's case: '!attn off', and before the saver has written it the activity is opened again
+        val first = started()
+        first.set("zeros")
+        saverRuns()
+        first.set("off")
+        assertEquals("zeros", file().readText().trim()) // the save of "off" is still waiting
+        val second = builtAgain()
+        assertEquals(Attention.OFF, second.inForce())
+        saverRuns()
+        assertEquals(Attention.OFF, second.inForce())
+        assertEquals(Attention.OFF, started().inForce())
+    }
+
+    @Test
+    fun `what one process set is not another file's word, and is gone with the process if it was never saved`() {
+        started().set("zeros") // never saved: the saver did not run
+        val other = File(dir, "other.txt")
+        assertEquals(Attention.OFF, builtAgain(other).inForce())
+        assertEquals(Attention.ZEROS, builtAgain().inForce())
+        assertEquals(Attention.OFF, started().inForce()) // the process ended: the file never had it
     }
 
     @Test
