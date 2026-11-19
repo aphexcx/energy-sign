@@ -201,7 +201,7 @@ interface AIReplySource {
     /**
      * Starts the warm-up when there is one, and returns at once. True: [onDone] will be called
      * once, on some other thread, and nothing may be asked before that. False: there is no
-     * warm-up and [onDone] is never called.
+     * warm-up and [onDone] is never called. Implementations never throw and return false if warm-up cannot start.
      */
     fun warmUp(onDone: () -> Unit): Boolean
 

@@ -11,47 +11,41 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.os.ParcelUuid
 import cx.aphex.energysign.MainViewModel
+import cx.aphex.energysign.OptionalStart
+import cx.aphex.energysign.optional
+import cx.aphex.energysign.StartWorker
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
-import io.reactivex.rxjava3.core.Observable
 
-class EnergySignBluetoothManager(
+internal class EnergySignBluetoothManager(
     val context: Context,
-    val viewModel: MainViewModel
+    val viewModel: MainViewModel,
+    private val worker: StartWorker,
+    private val takeWrite: (ByteArray, Boolean) -> Boolean,
 ) {
 
-    val bluetoothManager: BluetoothManager =
-        context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+    private val warn: (String) -> Unit = { logW(it) }
 
-    private val bluetoothAdapter: BluetoothAdapter = bluetoothManager.adapter
+    private fun post(action: () -> Unit) = worker.post(action)
+    private var server: EnergySignBluetoothGattServer? = null
+    private var cancelAdvertising: (() -> Unit)? = null
 
-    //TODO should not pass in viewmodel to gatt server
-    private val energySignBluetoothGattServer: EnergySignBluetoothGattServer =
-        EnergySignBluetoothGattServer(context, bluetoothManager, viewModel)
+    // HOME can start while Android is still bringing Bluetooth up. Install the listeners
+    // first, then look up the service again on each adapter event that needs it.
+    private lateinit var bluetoothManager: BluetoothManager
+    private val bluetoothAdapter: BluetoothAdapter
+        get() = checkNotNull(bluetoothManager.adapter)
 
-    val receivedBytes: Observable<ByteArray> = energySignBluetoothGattServer.receivedBytes
-
-    init {
-        energySignBluetoothGattServer.bluetoothStatusUpdates.subscribe {
-            viewModel.onBtStatusUpdate(it)
+    private fun registerService(added: (Int) -> Unit): Boolean {
+        // A callback belongs to this server alone, even if Android delivers it after close().
+        val attempt = EnergySignBluetoothGattServer(context, bluetoothManager, viewModel, worker, takeWrite) { status ->
+            post { added(status) }
         }
-    }
-
-    /**
-     * Initialize the GATT server instance with the services/characteristics
-     * from the service Profile.
-     */
-    private fun startServer() {
-        energySignBluetoothGattServer.start()
-    }
-
-    /**
-     * Shut down the GATT server.
-     */
-    private fun stopServer() {
-        energySignBluetoothGattServer.stop()
+        server = attempt
+        return attempt.start()
     }
 
     /**
@@ -65,13 +59,11 @@ class EnergySignBluetoothManager(
             when (state) {
                 BluetoothAdapter.STATE_ON -> {
                     logD("bluetoothReceiver: STATE_ON")
-                    startAdvertising()
-                    startServer()
+                    post { publication.radioOn() }
                 }
-                BluetoothAdapter.STATE_OFF -> {
+                BluetoothAdapter.STATE_TURNING_OFF, BluetoothAdapter.STATE_OFF -> {
                     logD("bluetoothReceiver: STATE_OFF")
-                    stopServer()
-                    stopAdvertising()
+                    post { publication.radioOff() }
                 }
             }
         }
@@ -85,170 +77,135 @@ class EnergySignBluetoothManager(
     private val bondStateReceiver = object : BroadcastReceiver() {
 
         override fun onReceive(context: Context, intent: Intent) {
+            post { handlePairing(intent) }
+        }
 
-            val bluetoothDevice: BluetoothDevice =
-                intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE) ?: return
-            val type =
-                intent.getIntExtra(BluetoothDevice.EXTRA_PAIRING_VARIANT, BluetoothDevice.ERROR)
-            // type appears to be 3 which is [PAIRING_VARIANT_CONSENT]
-
-            when (intent.action) {
-                BluetoothDevice.ACTION_PAIRING_REQUEST -> {
-                    logD("Auto-entering pin: $BLE_PIN...")
-                    val pinHasBeenSet = bluetoothDevice.setPin(BLE_PIN.toByteArray())
-//                    abortBroadcast()
-//                    val bondingWillBegin = bluetoothDevice.createBond()
-//                    logD("Starting bond=$bondingWillBegin")
-                    logD("PIN entered result: $pinHasBeenSet")
-                }
-                BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
-                    when (bluetoothDevice.bondState) {
-                        BluetoothDevice.BOND_BONDING -> {
-                            logD("Bonding with remote device ${bluetoothDevice.address}...")
-                        }
-                        BluetoothDevice.BOND_BONDED -> {
-                            logD("BONDED with remote device ${bluetoothDevice.address}!")
-                        }
-                        BluetoothDevice.BOND_NONE -> {
-                            logD("Remote device ${bluetoothDevice.address} is no longer bonded.")
-                        }
+        private fun handlePairing(intent: Intent) {
+            optional("Bluetooth pairing broadcast", warn) {
+                val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
+                    ?: return@optional
+                when (intent.action) {
+                    BluetoothDevice.ACTION_PAIRING_REQUEST -> {
+                        check(device.setPin(BLE_PIN.toByteArray()))
+                        logD("Pairing PIN submitted")
                     }
-                }
-                BluetoothDevice.ACTION_FOUND -> {
-                    // MAC address
-                    logD("Bluetooth device found!")
-                    logD("Device Name: >${bluetoothDevice.name}<")
-                    logD("deviceHardwareAddress >${bluetoothDevice.address}<")
+                    BluetoothDevice.ACTION_BOND_STATE_CHANGED -> server?.bondState(device, device.bondState)
+                    BluetoothDevice.ACTION_FOUND -> logD("Bluetooth device found: ${device.name.orEmpty()}")
                 }
             }
         }
     }
 
-    fun start() {
-        // We can't continue without proper Bluetooth support
-        if (!context.checkBluetoothSupport(bluetoothAdapter)) {
-            logD("No bluetooth support, exiting")
-            throw RuntimeException("No bluetooth support, exiting")
+    private val publication: BluetoothPublication = BluetoothPublication(object : Radio {
+        override fun adapter(): BluetoothAdapter {
+            bluetoothManager = managerForGatt(context)
+            return bluetoothAdapter
+        }
+        override val isOn get() = bluetoothAdapter.isEnabled
+        override fun enable() = bluetoothAdapter.enable()
+        override fun openGatt(added: (Int) -> Unit) = registerService(added)
+        override fun advertise(named: Boolean, result: (Int) -> Unit) = startAdvertising(named, result)
+        override fun close() = stopServices()
+    }, worker, warn, ::showAdvertiseResult)
+
+    private fun receiver(name: String, receiver: BroadcastReceiver, register: () -> Unit) =
+        OptionalStart(name, worker, warn) { attempt ->
+            register()
+            if (!attempt.done()) context.unregisterReceiver(receiver)
         }
 
-        // Register for system Bluetooth events
-        context.registerReceiver(
-            bluetoothReceiver,
-            IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
-        )
+    private val adapterEvents = receiver("Bluetooth adapter receiver", bluetoothReceiver) {
+        check(context.packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE))
+        context.registerReceiver(bluetoothReceiver, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED))
+    }
+    private val pairingEvents = receiver("Bluetooth pairing receiver", bondStateReceiver) {
+        context.registerReceiver(bondStateReceiver, IntentFilter().apply {
+            addAction(BluetoothDevice.ACTION_PAIRING_REQUEST)
+            addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+            addAction(BluetoothDevice.ACTION_FOUND)
+            priority = IntentFilter.SYSTEM_HIGH_PRIORITY
+        })
+    }
 
-        context.registerReceiver(bondStateReceiver,
-            IntentFilter().apply {
-                addAction(BluetoothDevice.ACTION_PAIRING_REQUEST)
-                addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
-                addAction(BluetoothDevice.ACTION_FOUND) //when new devices are discovered
-                priority = IntentFilter.SYSTEM_HIGH_PRIORITY
-            })
+    fun ensure() {
+        adapterEvents.ensure()
+        if (!adapterEvents.up) return
+        pairingEvents.ensure()
+        publication.ensure()
+        server?.retryPeerSetup()
+    }
 
-        if (!bluetoothAdapter.isEnabled) {
-            logD("Bluetooth is currently disabled...enabling")
-            bluetoothAdapter.enable()
+    private fun stopServices() {
+        val cancel = cancelAdvertising
+        cancelAdvertising = null
+        val oldServer = server
+        server = null
+        optional("Bluetooth advertiser cleanup", warn) { cancel?.invoke() }
+        optional("Bluetooth GATT cleanup", warn) { oldServer?.stop() }
+        optional("Bluetooth status display", warn) { viewModel.updateAdvertiseStatus("📴") }
+    }
+
+    private fun showAdvertiseResult(errorCode: Int) {
+        if (errorCode == 0) {
+            logD("Nordic UART advertising started")
+            viewModel.updateAdvertiseStatus("💚${bluetoothAdapter.name}")
         } else {
-            logD("Bluetooth enabled...starting services")
-            startAdvertising()
-            startServer()
-        }
-    }
-
-    fun stop() {
-        val bluetoothAdapter = bluetoothManager.adapter
-        if (bluetoothAdapter.isEnabled) {
-            stopServer()
-            stopAdvertising()
-        }
-
-        context.unregisterReceiver(bluetoothReceiver)
-    }
-
-    /**
-     * Callback to receive information about the advertisement process.
-     */
-    private val advertiseCallback = object : AdvertiseCallback() {
-        override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
-            logD("LE Advertise Started! Name: ${bluetoothManager.adapter.name}")
-            viewModel.updateAdvertiseStatus("💚${bluetoothManager.adapter.name}") // 🏠${bluetoothManager.adapter.address}"
-        }
-
-        override fun onStartFailure(errorCode: Int) {
-            logW("LE Advertise Failed: $errorCode")
             val error = when (errorCode) {
-                ADVERTISE_FAILED_ALREADY_STARTED ->
+                AdvertiseCallback.ADVERTISE_FAILED_ALREADY_STARTED ->
                     "ADVERTISE_FAILED_ALREADY_STARTED\n" +
                             "Failed to start advertising as the advertising is already started."
-                ADVERTISE_FAILED_DATA_TOO_LARGE ->
+                AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE ->
                     "ADVERTISE_FAILED_DATA_TOO_LARGE\n" +
                             "Failed to start advertising as the advertise data to be broadcasted is larger than 31 bytes."
-                ADVERTISE_FAILED_FEATURE_UNSUPPORTED ->
+                AdvertiseCallback.ADVERTISE_FAILED_FEATURE_UNSUPPORTED ->
                     "ADVERTISE_FAILED_FEATURE_UNSUPPORTED\n" +
                             "This feature is not supported on this platform."
-                ADVERTISE_FAILED_TOO_MANY_ADVERTISERS ->
+                AdvertiseCallback.ADVERTISE_FAILED_TOO_MANY_ADVERTISERS ->
                     "ADVERTISE_FAILED_TOO_MANY_ADVERTISERS\n" +
                             "Failed to start advertising because no advertising instance is available."
-                ADVERTISE_FAILED_INTERNAL_ERROR ->
+                AdvertiseCallback.ADVERTISE_FAILED_INTERNAL_ERROR ->
                     "ADVERTISE_FAILED_INTERNAL_ERROR\n" +
                             "Operation failed due to an internal error."
                 else -> "Unknown Advertise Error, error code not part of the AdvertiseCallback enum "
             }
-            logW(error)
             viewModel.updateAdvertiseStatus("💔$error")
         }
     }
 
-    /**
-     * Begin advertising over Bluetooth that this device is connectable
-     * and supports the Current Time Service.
-     */
-    private fun startAdvertising() {
-        bluetoothManager.adapter.name = "G!"
-        bluetoothManager.adapter.bluetoothLeAdvertiser?.let {
-            logD("Bluetooth LE: Start Advertiser")
-            val settings = AdvertiseSettings.Builder()
-                .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
-                .setConnectable(true)
-                .setTimeout(0)
-                .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
-                .build()
+    private fun startAdvertising(includeName: Boolean, result: (Int) -> Unit) {
+        // The requested display name is optional; the UART service is identified by its UUID.
+        if (includeName) optional("Bluetooth advertised name", warn) { check(bluetoothAdapter.setName("G!")) }
+        val advertiser = checkNotNull(bluetoothAdapter.bluetoothLeAdvertiser) { "Bluetooth advertiser unavailable" }
+        val callback = object : AdvertiseCallback() {
+            override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
+                post { result(0) }
+            }
 
-            val data = AdvertiseData.Builder()
-                .setIncludeDeviceName(true)
-                .setIncludeTxPowerLevel(false)
-                .addServiceUuid(ParcelUuid(NordicUartServiceProfile.NORDIC_UART_SERVICE_UUID))
-                .build()
+            override fun onStartFailure(errorCode: Int) {
+                post { result(errorCode) }
+            }
+        }
+        val settings = AdvertiseSettings.Builder()
+            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
+            .setConnectable(true)
+            .setTimeout(0)
+            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
+            .build()
 
-            it.startAdvertising(settings, data, advertiseCallback)
-        } ?: logW("Failed to create advertiser")
+        val data = AdvertiseData.Builder()
+            .setIncludeDeviceName(includeName)
+            .setIncludeTxPowerLevel(false)
+            .addServiceUuid(ParcelUuid(NordicUartServiceProfile.NORDIC_UART_SERVICE_UUID))
+            .build()
+
+        cancelAdvertising = { advertiser.stopAdvertising(callback) }
+        advertiser.startAdvertising(settings, data, callback)
     }
-
-    /**
-     * Stop Bluetooth advertisements.
-     */
-    private fun stopAdvertising() {
-        bluetoothManager.adapter.bluetoothLeAdvertiser?.stopAdvertising(advertiseCallback)
-    }
-
 }
 
-/**
- * Verify the level of Bluetooth support provided by the hardware.
- * @param bluetoothAdapter System [BluetoothAdapter].
- * @return true if Bluetooth is properly supported, false otherwise.
- */
-fun Context.checkBluetoothSupport(bluetoothAdapter: BluetoothAdapter?): Boolean {
-
-    if (bluetoothAdapter == null) {
-        logW("Bluetooth is not supported")
-        return false
-    }
-
-    if (!packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE)) {
-        logW("Bluetooth LE is not supported")
-        return false
-    }
-
-    return true
+// Android caches BluetoothManager (including its initial adapter) per Context. A lookup
+// during boot can return a wrapper with a permanently null adapter in the application cache.
+internal fun managerForGatt(context: Context): BluetoothManager {
+    val fresh = context.createConfigurationContext(Configuration())
+    return checkNotNull(fresh.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)
 }

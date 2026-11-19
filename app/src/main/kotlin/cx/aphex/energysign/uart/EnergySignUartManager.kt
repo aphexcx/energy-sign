@@ -48,6 +48,8 @@ class EnergySignUartManager(private val viewModel: MainViewModel, private val ow
         override fun close() = uartDevice.close()
     }
 
+    internal fun onForeground() = link.prepareAgain()
+
     private val link = SignLink(
         wire = wire,
         baud = UART_BAUD_RATE,

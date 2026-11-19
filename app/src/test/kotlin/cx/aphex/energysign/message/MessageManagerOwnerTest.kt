@@ -2030,40 +2030,142 @@ class MessageManagerOwnerTest {
         )
     }
 
-    // ---- a stop looks for a waiting ad round (the minor of gate r1)
+    // ---- what a track update, a stop or an ad command costs the thread that answers the sign
+    // (the minors of gates r1 and r2, as their class): no walk through the queue or the ad list
+    // that grows with the other, and a number of walks that does not grow with either.
 
-    /** The ad list of [app], handed back to it wrapped so that every walk through it is counted. */
-    private class CountedWalks(private val ads: MutableList<Message>) : MutableList<Message> by ads {
+    /** A list handed back in place of the one it wraps, so that every walk through it and every insert into its middle is counted. */
+    private class Counted(private val list: MutableList<Message>) : MutableList<Message> by list {
         var walks = 0
-        override fun iterator(): MutableIterator<Message> = ads.iterator().also { walks++ }
-        override fun listIterator(): MutableListIterator<Message> = ads.listIterator().also { walks++ }
-        override fun listIterator(index: Int): MutableListIterator<Message> = ads.listIterator(index).also { walks++ }
-        override fun contains(element: Message): Boolean = ads.contains(element).also { walks++ }
-        override fun indexOf(element: Message): Int = ads.indexOf(element).also { walks++ }
-        override fun get(index: Int): Message = ads[index].also { walks++ }
+        var inserts = 0
+        override fun iterator(): MutableIterator<Message> = list.iterator().also { walks++ }
+        override fun listIterator(): MutableListIterator<Message> = list.listIterator().also { walks++ }
+        override fun listIterator(index: Int): MutableListIterator<Message> = list.listIterator(index).also { walks++ }
+        override fun contains(element: Message): Boolean = list.contains(element).also { walks++ }
+        override fun indexOf(element: Message): Int = list.indexOf(element).also { walks++ }
+        override fun get(index: Int): Message = list[index].also { walks++ }
+        override fun add(index: Int, element: Message) = list.add(index, element).also { inserts++ }
+        override fun addAll(index: Int, elements: Collection<Message>): Boolean = list.addAll(index, elements).also { inserts++ }
+        // (to the list itself, as the app's call goes: the walk of this interface's default would go round the queue's own removal)
+        override fun removeIf(filter: java.util.function.Predicate<in Message>): Boolean = list.removeIf(filter).also { walks++ }
     }
 
-    private fun countWalksOfTheAdList(app: App): CountedWalks {
-        val field = MessageManager::class.java.getDeclaredField("advertisements").apply { isAccessible = true }
-        @Suppress("UNCHECKED_CAST")
-        val counted = CountedWalks(field.get(app.manager) as MutableList<Message>)
-        field.set(app.manager, counted)
-        return counted
+    @Suppress("UNCHECKED_CAST")
+    private fun counted(owner: Any, field: String): Counted {
+        val listField = owner.javaClass.getDeclaredField(field).apply { isAccessible = true }
+        return Counted(listField.get(owner) as MutableList<Message>).also { listField.set(owner, it) }
     }
+
+    /** One event at the owner, with what it may cost: walks through the queue, walks through the ad list, inserts into the queue. */
+    private class Cost(
+        val of: String, val queueWalks: Int, val adListWalks: Int, val inserts: Int,
+        /** How many announcements wait afterwards: the event did what it is for, and only that. */
+        val announced: Int,
+        val before: (App, ads: Int) -> Unit = { _, _ -> },
+        val event: (App, ads: Int) -> Unit,
+    )
 
     @Test
-    fun `a stop with a long queue in front of a waiting ad does not walk the ad list once for every queued message`() {
-        val app = appWithCurrentPlaying()
-        app.phone("!$A\n" + (1..30).joinToString("\n") { "${O}AD $it" })
-        ownerRuns() // thirty ads, and their round is waiting
-        repeat(200) { app.repo.pushOneTimeMessage(Message.UtilityMessage.EnableMic) } // 200 messages that are no ads, in front of it
-        assertEquals(230, app.repo.oneTimeMessages.size)
-        val adList = countWalksOfTheAdList(app)
+    fun `a track update, a stop and an ad command walk the queue and the ad list a fixed number of times, whatever their lengths`() {
+        fun adCommand(ads: Int) = "!$A\n" + (1..ads).joinToString("\n") { "${O}AD $it" }
+        val rows = listOf(
+            Cost("the track that is playing, again, its announcement waiting behind the queue", 0, 0, 0, announced = 1,
+                before = { app, _ -> app.post(song) }) { app, _ -> app.post(song.copy(id = 702)) },
+            Cost("the track that is playing, again, announced long ago", 0, 0, 0, announced = 0) { app, _ -> app.post(currentTrack) },
+            // one walk: the piece of the track before is taken out of the queue
+            Cost("another track", 1, 0, 0, announced = 1) { app, _ -> app.post(song) },
+            // the announcement of the track before is taken out and counted out, in the one walk
+            Cost("another track while the announcement of the one before waits", 1, 0, 0, announced = 1,
+                before = { app, _ -> app.post(song) }) { app, _ -> app.post(trackA) },
+            // the piece of the track; is an ad round waiting; (it is:) nothing more
+            Cost("a stop while an ad round waits", 2, 0, 0, announced = 0,
+                before = { app, ads -> app.phone(adCommand(ads)); ownerRuns() }) { app, _ -> app.post(stopOfTheTrack) },
+            // the piece of the track; is an ad round waiting; is an icon waiting; then the round is made (one walk of the ads) and put in at once
+            Cost("a stop that asks for an ad round", 3, 1, 1, announced = 0) { app, _ -> app.post(stopOfTheTrack) },
+            // is an icon waiting; the ads are copied for the save and the round is made; the round is put in at once
+            Cost("an ad command", 1, 2, 1, announced = 0) { app, ads -> app.phone(adCommand(ads)); ownerRuns() },
+            // nothing is put in, so whoever is reading the queue (the one walk) reads on
+            Cost("an ad round of nothing, put in while the queue is being read", 1, 0, 1, announced = 0) { app, _ ->
+                val reading = app.repo.oneTimeMessages.iterator()
+                app.repo.pushOneTimeMessages()
+                reading.next()
+            },
+        )
+        val wrong = mutableListOf<String>()
+        for (row in rows) for ((queued, ads) in listOf(10 to 3, 200 to 30)) {
+            val app = appWithCurrentPlaying()
+            app.phone(adCommand(ads))
+            ownerRuns()
+            signReadsTheQueue(app)
+            row.before(app, ads)
+            repeat(queued) { app.repo.pushOneTimeMessage(Message.UtilityMessage.EnableMic) } // in front of whatever waits
+            val queue = counted(app.repo, "oneTimeMessages")
+            val adList = counted(app.manager, "advertisements")
 
-        app.post(stopOfTheTrack)
+            val failed = runCatching { row.event(app, ads) }.exceptionOrNull()
+            if (failed != null) wrong += "${row.of}, $queued queued and $ads ads: $failed"
 
-        assertEquals(230, app.repo.oneTimeMessages.size, "an ad round is waiting: the stop asks for no second one")
-        assertTrue(adList.walks <= 1, "the ad list was walked ${adList.walks} times for a queue of 230")
+            val cost = listOf(queue.walks, adList.walks, queue.inserts, announcements(app))
+            if (cost != listOf(row.queueWalks, row.adListWalks, row.inserts, row.announced)) {
+                wrong += "${row.of}, $queued queued and $ads ads: queue walks, ad list walks, inserts, announcements waiting = $cost"
+            }
+        }
+
+        assertEquals(emptyList(), wrong)
+    }
+
+    // ---- a second failure does not take the place of the first (the minor of gate r2, as its class)
+
+    @Test
+    fun `when what is done after a failure fails too, the caller gets the first failure with the second attached`() {
+        val rows: List<Pair<String, (first: RuntimeException, second: RuntimeException) -> Throwable?>> = listOf(
+            "the responder: the write throws, and handing the message back throws" to { first, second ->
+                val responder = SignResponder(
+                    nextMessage = { Message.Marquee.User("HELLO") },
+                    write = { _, _ -> throw first },
+                    unsent = { throw second },
+                )
+                runCatching { responder.onRequest(byteArrayOf('~'.code.toByte()), 1) }.exceptionOrNull()
+            },
+            "the manager: a reply cannot be saved, and ending the thinking notice after it throws" to { first, second ->
+                var saveFails = false
+                var clockFails = false
+                val lists = MessageRepository(saver = Executor {
+                    if (saveFails) {
+                        clockFails = true
+                        throw first
+                    }
+                })
+                val home = newFilesDir()
+                val submitted = KeyboardManager.onSubmitted
+                val manager = MessageManager(
+                    object : ContextWrapper(null) {
+                        override fun getFilesDir(): File = home
+                    },
+                    lists, owner, nowMs = { if (clockFails) throw second else 0L },
+                )
+                KeyboardManager.onSubmitted = submitted
+                val replies = org.koin.core.context.GlobalContext.get().get<AIReplySource>() as FakeReplies
+                val askedBefore = replies.asked.size
+                lists.marqueeMessages.add(Message.Marquee.AIQuery("A QUESTION"))
+                manager.getNextMessage() // the query is shown, and asked
+                check(replies.asked.size == askedBefore + 1) { "the query was not asked" }
+                saveFails = true
+                replies.asked.last().answer(cx.aphex.energysign.ai.AIReplyResult.Reply("AN ANSWER"))
+                var thrown: Throwable? = null
+                while (owner.drain(onError = { thrown = it }) > 0) Unit
+                thrown
+            },
+        )
+        val wrong = rows.mapNotNull { (where, failing) ->
+            val first = IllegalStateException("the first")
+            val second = IllegalArgumentException("the second")
+            val thrown = failing(first, second)
+            if (thrown === first && thrown.suppressed.toList() == listOf<Throwable>(second)) null
+            else "$where: the caller got $thrown, with ${thrown?.suppressed?.toList()} attached"
+        }
+
+        assertEquals(emptyList(), wrong)
     }
 
     @Test

@@ -39,25 +39,50 @@ class MessageRepository(
         var lastNumber = 0L
             private set
         fun frontIsNewerThan(number: Long) = (entries.firstOrNull()?.number ?: 0L) > number
+
+        /** How many of the entries are the announcement of a track: kept at every change, so asking walks nothing. */
+        var announcements = 0
+            private set
+        private fun counts(message: Message) = if (message === Message.FlashingAnnouncement.NowPlayingAnnouncement) 1 else 0
         override val size get() = entries.size
         override fun get(index: Int) = entries[index].message
         override fun add(index: Int, element: Message) {
             entries.add(index, Entry(element, ++lastNumber))
+            announcements += counts(element)
             modCount++
         }
-        override fun set(index: Int, element: Message) = entries.set(index, Entry(element, ++lastNumber)).message
+        /** All of [elements] with ONE move of the entries behind them, however many they are. */
+        override fun addAll(index: Int, elements: Collection<Message>): Boolean {
+            var counted = 0 // in the one pass that makes the entries: [elements] is walked once
+            // (nothing to put in changes nothing: whoever is reading the queue reads on)
+            if (!entries.addAll(index, elements.map { counted += counts(it); Entry(it, ++lastNumber) })) return false
+            announcements += counted
+            modCount++
+            return true
+        }
+        override fun set(index: Int, element: Message) =
+            entries.set(index, Entry(element, ++lastNumber)).message.also { announcements += counts(element) - counts(it) }
         override fun removeAt(index: Int): Message {
             val removed = entries.removeAt(index)
+            announcements -= counts(removed.message)
             modCount++
             return removed.message
         }
         override fun removeIf(filter: Predicate<in Message>): Boolean {
-            val removed = entries.removeIf { filter.test(it.message) }
-            if (removed) modCount++
+            // The announcements that go are counted while each entry is tested, once: no second
+            // walk over what stays. (Nothing is taken out before every entry has been tested, so
+            // a test that throws leaves the entries and the count as they were.)
+            var gone = 0
+            val removed = entries.removeIf { entry -> filter.test(entry.message).also { if (it) gone += counts(entry.message) } }
+            if (removed) {
+                announcements -= gone
+                modCount++
+            }
             return removed
         }
         override fun clear() {
             entries.clear()
+            announcements = 0
             modCount++
         }
     }
@@ -69,8 +94,12 @@ class MessageRepository(
     internal fun lastOneTimeNumber() = queue.lastNumber
     internal fun hasNewerOneTimeAtFront(number: Long) = queue.frontIsNewerThan(number)
 
+    /** Owner only. Whether the announcement of a track is waiting in the queue; nothing is walked for the answer. */
+    internal fun announcementWaiting(): Boolean = queue.announcements > 0
+
+    /** [messages], in their order, to the front of the queue ([pushOneTimeMessage]), in one insert. */
     fun pushOneTimeMessages(vararg messages: Message) {
-        messages.reversed().forEach { pushOneTimeMessage(it) }
+        oneTimeMessages.addAll(waitingOfOnePiece(), messages.asList())
     }
 
     /** To the front of the queue; behind what is being shown in one piece ([pushInOnePiece]). */

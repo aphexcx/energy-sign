@@ -50,7 +50,8 @@ class MessageManager(
      * the track's id: two ids with one line are one track to the sign.
      *
      * A line counts as played when it is in here, or when its announcement is waiting in the
-     * queue. For the second nothing is kept: the queue itself is asked ([takeInTrack]). So an
+     * queue. For the second nothing is kept here: the queue itself is asked ([takeInTrack]), and it
+     * counts its announcements as they come and go, whoever takes them out. So an
      * announcement that leaves the queue unshown (a key press empties it, or whatever else does
      * tomorrow) leaves no mark behind, and nobody who takes things out of the queue has to know
      * of this. ONE place puts a line in here: [announcementHandedOver], where the sign takes it.
@@ -780,6 +781,13 @@ class MessageManager(
     /** The same, for a caller that says "done" to someone: returns when the owner has carried it out. Not from the main thread. */
     fun processNewBytesAndWait(value: ByteArray): Unit = changeAndWait(bytesChange(value))
 
+    /**
+     * The same, for a caller that has to say which of three things happened (the adb hook): the
+     * owner carried it out, the owner threw on it, or the owner never took it up and it was
+     * withdrawn. See OwnerQueue.askFor. Not from the main thread.
+     */
+    fun processNewBytesAndTell(value: ByteArray): OwnerQueue.Asked<Unit> = owner.askFor(change = bytesChange(value))
+
     /** What [value] asks for, as a change for the owner. What can be done here, on the caller's thread, is done here. */
     private fun bytesChange(value: ByteArray): () -> Unit {
         val cmd = String(value)
@@ -911,7 +919,7 @@ class MessageManager(
                 playedLines.add(line)
             }
 
-            queue.any { it === NowPlayingAnnouncement } -> Unit
+            msgRepo.announcementWaiting() -> Unit
 
             else -> {
                 // (what there is to say about the line is said for a track that is shown, once)
@@ -1009,9 +1017,11 @@ class MessageManager(
                 AIQueryDesk.Outcome.NotOurs ->
                     logW("An AI result came for a call that is not out; it is ignored.")
             }
-        } finally {
-            endThinkingUnlessWanted()
+        } catch (e: Throwable) {
+            // (not a `finally`: what ending the notice may throw must not take this failure's place)
+            throw e.keptThrough { endThinkingUnlessWanted() }
         }
+        endThinkingUnlessWanted()
     }
 
     /** A query becomes a plain message in the same slot, including for a pending write retry. */

@@ -2,13 +2,14 @@ package cx.aphex.energysign
 
 import android.app.Application
 import android.os.Looper
+import cx.aphex.energysign.beatlinkdata.BeatLinkListener
 import androidx.lifecycle.AndroidViewModel
-import cx.aphex.energysign.beatlinkdata.DnsSdAnnouncer
+import cx.aphex.energysign.bluetooth.takeWrite
 import cx.aphex.energysign.bluetooth.BluetoothStatusUpdate
 import cx.aphex.energysign.bluetooth.EnergySignBluetoothManager
-import cx.aphex.energysign.bluetooth.deliverEachWrite
 import cx.aphex.energysign.ext.NonNullMutableLiveData
 import cx.aphex.energysign.ext.logE
+import cx.aphex.energysign.ext.logW
 import cx.aphex.energysign.message.ChooserProtocol
 import cx.aphex.energysign.message.Message
 import cx.aphex.energysign.message.MessageManager
@@ -32,7 +33,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
 
     private val owner: OwnerQueue by inject()
     private val messageManager: MessageManager by inject()
-    private val energySignBluetoothManager: EnergySignBluetoothManager
+    private val warn: (String) -> Unit = { logW(it) }
+    private val worker: SignWorker by lazy { SignWorker(warn).also { it.tick(::ensureServices) } }
+    private val bluetooth by lazy {
+        EnergySignBluetoothManager(application.applicationContext, this, worker, messageManager::takeWrite)
+    }
+    private val beatLink by lazy { BeatLinkListener(application.applicationContext, worker) }
     private val energySignUartManager: EnergySignUartManager = EnergySignUartManager(this, owner)
 
     /** The answer to a REQUEST of the sign, and the only way to MessageManager.getNextMessage. */
@@ -44,34 +50,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
             logE("Not sent: a message of $bytes bytes is more than the sign can take (${ChooserProtocol.MAX_FRAME_BYTES}): ${message.str.take(40)}...")
         },
     )
-    private val dnsSdAnnouncer: DnsSdAnnouncer
 
     init {
-//        currentBytes.value = messageManager.getNextMessage().bytes
-
-        // First, before anything can deliver a command: MessageManager is built by its first
-        // use, and that must be here on the main thread (it observes LiveData). Commands that
-        // arrive before the link thread runs wait in the owner's queue.
         owner.neverWaitsOn(Looper.getMainLooper().thread)
         checkNotNull(messageManager)
-
-        energySignBluetoothManager = EnergySignBluetoothManager(application.applicationContext, this)
-        energySignBluetoothManager.start()
-
-        energySignBluetoothManager.receivedBytes.deliverEachWrite(messageManager::processNewBytes)
-
-        dnsSdAnnouncer = DnsSdAnnouncer(application.applicationContext)
-        dnsSdAnnouncer.start()
-
-        // From here on the sign link thread owns the message state and asks it for messages.
         energySignUartManager.start()
+    }
+
+    internal fun onActivityStart() {
+        optional("Optional service worker", warn) { worker.post(::ensureServices) }
+    }
+
+    private fun ensureServices() {
+        optional("Bluetooth startup", warn) { bluetooth.ensure() }
+        optional("BeatLink startup", warn) { beatLink.ensureListening() }
+        energySignUartManager.onForeground()
     }
 
     override fun onCleared() {
         super.onCleared()
-        // Who brings changes stops first, then who carries them out
-        energySignBluetoothManager.stop()
-
         energySignUartManager.stop()
     }
 
