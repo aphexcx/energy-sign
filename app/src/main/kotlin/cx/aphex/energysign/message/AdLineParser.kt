@@ -61,7 +61,8 @@ object AdLineParser {
 
     /**
      * The ads in [adString]. [warn] gets one line for every ad whose text had to be cut
-     * ([AdSizeLimit]).
+     * ([AdSizeLimit]) and for every chonky or one-by-one line that was left out because it had
+     * no text ([AdRules.textAd]).
      */
     fun parse(adString: String, palette: AdPalette, warn: (String) -> Unit = {}): List<Message> =
         adString.lines().mapNotNull { line ->

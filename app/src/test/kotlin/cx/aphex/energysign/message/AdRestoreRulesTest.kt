@@ -265,6 +265,23 @@ class AdRestoreRulesTest {
         assertTrue(notes[0].startsWith("ad 1: ") && notes[1].startsWith("ad 2: ") && notes[2].startsWith("ad 3: "), notes.toString())
     }
 
+    // ---- the line of the track that is playing
+
+    @Test
+    fun `the line of a track is artist and title, or the one of the two there is, or none`() {
+        fun line(artist: String?, title: String?) = AdRules.nowPlaying(artist, title) {}?.str
+
+        assertEquals("DJ - Song", line("DJ", "Song"))
+        assertEquals("Song", line(null, "Song"))
+        assertEquals("Song", line("", "Song"))
+        assertEquals("Song", line("  ", "Song"))
+        assertEquals("DJ", line("DJ", null))
+        assertEquals("DJ", line("DJ", "\u4e2d\u6587"), "a title with nothing the sign can show")
+        assertEquals(null, line(null, null))
+        assertEquals(null, line("", ""))
+        assertEquals(null, line("\u4e2d", "\u0007"))
+    }
+
     // ---- strict JSON, and all of it
 
     @Test
