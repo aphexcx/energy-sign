@@ -36,9 +36,9 @@ class MessageSerializationTest {
 
     @Test
     fun testMarqueeGPTQuerySerialization() {
-        val message = Message.Marquee.GPTQuery("Test GPT Query")
+        val message = Message.Marquee.AIQuery("Test AI Query")
         val jsonString = json.encodeToString(message)
-        val deserializedMessage = json.decodeFromString<Message.Marquee.GPTQuery>(jsonString)
+        val deserializedMessage = json.decodeFromString<Message.Marquee.AIQuery>(jsonString)
         assertEquals(message, deserializedMessage)
     }
 
@@ -52,9 +52,9 @@ class MessageSerializationTest {
 
     @Test
     fun testMarqueeGPTReplySerialization() {
-        val message = Message.Marquee.GPTReply("GPT Reply")
+        val message = Message.Marquee.AIReply("AI Reply")
         val jsonString = json.encodeToString(message)
-        val deserializedMessage = json.decodeFromString<Message.Marquee.GPTReply>(jsonString)
+        val deserializedMessage = json.decodeFromString<Message.Marquee.AIReply>(jsonString)
         assertEquals(message, deserializedMessage)
     }
 
@@ -92,9 +92,9 @@ class MessageSerializationTest {
 
     @Test
     fun testGPTThinkingSerialization() {
-        val message = Message.ColorMessage.GPTThinking("...", 0x0000FF)
+        val message = Message.ColorMessage.AIThinking("...", 0x0000FF)
         val jsonString = json.encodeToString(message)
-        val deserializedMessage = json.decodeFromString<Message.ColorMessage.GPTThinking>(jsonString)
+        val deserializedMessage = json.decodeFromString<Message.ColorMessage.AIThinking>(jsonString)
         assertEquals(message, deserializedMessage)
     }
 

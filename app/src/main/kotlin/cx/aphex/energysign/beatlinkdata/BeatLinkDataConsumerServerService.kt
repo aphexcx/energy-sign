@@ -6,7 +6,7 @@ import android.os.Binder
 import android.os.IBinder
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
-import cx.aphex.energysign.gpt.PostedGptAnswer
+import cx.aphex.energysign.ai.PostedAIAnswer
 import cx.aphex.energysign.message.MessageManager
 import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.gson.gson
@@ -100,9 +100,9 @@ class BeatLinkDataConsumerServerService : Service(), KoinComponent {
 //                    call.respond(mapOf("success" to true))
 //                }
                 post("/newGPTReply") { // formerly /newSheepThought
-                    val answer: PostedGptAnswer = call.receive()
-                    logW("Received new POSTed GPT Reply: ${answer}")
-                    call.answer { messageManager.onNewPostedGPTReply(answer) }
+                    val answer: PostedAIAnswer = call.receive()
+                    logW("Received new POSTed AI Reply: ${answer}")
+                    call.answer { messageManager.onNewPostedAIReply(answer) }
                 }
                 currentTrack(messageManager)
             }
