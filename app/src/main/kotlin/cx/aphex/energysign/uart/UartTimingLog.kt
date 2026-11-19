@@ -21,15 +21,24 @@ package cx.aphex.energysign.uart
  *         request bytes in one rx with T - E of a few ms mean the platform delivered them
  *         together: it held the first one back, and nothing in the app can fetch it sooner.
  *         (chunks and first_us are kept for the tool that reads this log; a request is one read.)
- *     tx t_us=T n=W/L kind=report|message call_us=C rx_us=R
+ *     tx t_us=T n=W/L kind=report|message|attention call_us=C rx_us=R
  *         One frame handed to the transmitter. T: the last write() returned. C: the first was
  *         called. W of L bytes were taken; W below L is a failed write. report is a chooser poll
- *         report, message a full message. R: the t_us of the latest rx line, so T - R is
- *         request-to-reply inside the app.
+ *         report, message a full message (a reply or a pushed frame), attention the run of 0x00
+ *         bytes that gets the sign's attention for a push. R: the t_us of the latest rx line,
+ *         so for a reply T - R is request-to-reply inside the app.
  *     drop t_us=T n=N bytes=[...]
  *         Bytes read away unanswered: they do not end in a request byte (the name of a parse
- *         error the firmware prints before it stops listening), or the request is old (the
- *         link was kept from the wire for longer than the sign listens).
+ *         error the firmware prints before it stops listening), or the sign sent them while a
+ *         push was on the line (into the attention or the frame; it asks again), or the request
+ *         is old (the link was kept from the wire for longer than the sign listens).
+ *     push t_us=T call_us=C break_us=B guard_us=G wanted_us=W n=N
+ *         One push of the chooser (contract VERSION 3.1). W: the push began. C: the attention
+ *         was asked for (the write of the zeros, whose tx line comes before this one, or
+ *         sendBreak). B: that call returned. G: the guard after the attention was over. T: the
+ *         frame was handed over (its tx line comes just before this one). N: the bytes of the
+ *         frame, 0 for attention alone (leaving chooser mode). A push that failed has no line;
+ *         it is tried again.
  *     main t_us=T posted_us=P lag_us=L
  *         How late the main thread ran something posted to it when an rx was seen: what a
  *         request handled on the main thread, as before this link, would have waited.
@@ -39,7 +48,7 @@ package cx.aphex.energysign.uart
  *         the loop overran what it asked for, and the CPU time the link thread used. A large G
  *         with a large S: the thread was not woken in time (something else had the processor).
  *         With a large M instead: a read was slow (the peripheral service). With neither: the
- *         time went into a reply.
+ *         time went into a reply or a push.
  *
  * Called from the link thread, except [mainLag] (main thread); [emit] must be thread-safe.
  */
@@ -95,7 +104,7 @@ class UartTimingLog(
         )
     }
 
-    /** A frame was handed to the transmitter: [wrote] of [of] bytes. [kind]: report or message. */
+    /** A frame was handed to the transmitter: [wrote] of [of] bytes. [kind]: report, message or attention. */
     fun tx(callNs: Long, returnNs: Long, wrote: Int, of: Int, kind: String) {
         if (!enabled(returnNs)) return
         emit("tx t_us=${returnNs / 1000} n=$wrote/$of kind=$kind call_us=${callNs / 1000} rx_us=${lastRxNs / 1000}")
@@ -105,6 +114,19 @@ class UartTimingLog(
     fun dropped(atNs: Long, buffer: ByteArray, count: Int) {
         if (!enabled(atNs)) return
         emit("drop t_us=${atNs / 1000} n=$count bytes=[${printable(buffer, count)}]")
+    }
+
+    /**
+     * A push finished: it began at [wantedNs], asked for the attention at [callNs], that call
+     * returned at [raisedNs], the guard was over at [guardEndNs], and its frame of [frameBytes]
+     * bytes was handed over by [doneNs].
+     */
+    fun push(wantedNs: Long, callNs: Long, raisedNs: Long, guardEndNs: Long, doneNs: Long, frameBytes: Int) {
+        if (!enabled(doneNs)) return
+        emit(
+            "push t_us=${doneNs / 1000} call_us=${callNs / 1000} break_us=${raisedNs / 1000} " +
+                    "guard_us=${guardEndNs / 1000} wanted_us=${wantedNs / 1000} n=$frameBytes"
+        )
     }
 
     /** A pause of the loop that asked for [askedNs] took [tookNs]. */

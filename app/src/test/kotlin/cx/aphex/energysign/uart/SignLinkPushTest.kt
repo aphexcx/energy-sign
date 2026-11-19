@@ -279,7 +279,7 @@ class SignLinkPushTest {
         // 72 zeros are on the line from 100 to 150; the frame comes 20 ms after the last of them
         assertEquals(listOf("tx[00x72]@100", "tx[H:B]@170"), wire())
         assertEquals(72, txs[0].bytes.size)
-        assertEquals(SignLink.ATTN_BREAK_MS.toLong(), (txs[0].goneAtNs - txs[0].leavesFromNs) / ms)
+        assertEquals(SignLink.ATTN_BREAK_MS.toLong(), (txs[0].goneAtNs - txs[0].leavesFromNs + ms / 2) / ms)
         assertTrue(txs[1].atNs - txs[0].goneAtNs >= SignLink.ATTN_GUARD_MS * ms)
     }
 
@@ -734,9 +734,14 @@ class SignLinkPushTest {
         takesPerWrite = 64 // a transmitter with a buffer of 64 bytes
         command(0, "B")
         runUntil(500)
-        assertEquals(listOf("tx[00x64]@0", "tx[00x8]@2", "tx[H:B]@70"), wire())
+        assertEquals(listOf("tx[00x64]@0", "tx[00x8]@2"), wire().take(2))
         assertEquals(emptyList(), warnings())
-        assertTrue(txs[2].atNs - txs[1].goneAtNs >= SignLink.ATTN_GUARD_MS * ms)
+        // the second piece went out behind the first with no gap: one run of 50 ms on the line
+        assertEquals(txs[0].goneAtNs, txs[1].leavesFromNs)
+        assertEquals("H:B", txs[2].text)
+        assertEquals(3, txs.size)
+        val behind = txs[2].atNs - txs[1].goneAtNs
+        assertTrue(behind >= SignLink.ATTN_GUARD_MS * ms && behind < (SignLink.ATTN_GUARD_MS + 1) * ms, "the frame ${behind / 1000} us behind the zeros")
     }
 
     @Test
