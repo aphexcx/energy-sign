@@ -63,6 +63,16 @@ class MessageManager(
     //How often to advertise, e.g. every 5 user messages
     private var advertiseEvery: Int = 8
 
+    /**
+     * The two lines an ad round shows before the line of the track that is playing. The same two
+     * objects in every ad round, so that they can be found in the queue again when the track
+     * changes (by what they ARE, not by what they say: an ad of the owner's may say the same).
+     */
+    private val trackHeading: List<Message> = listOf(
+        Message.ColorMessage.OneByOneMessage("CURRENT", context.getColor(R.color.twitch)),
+        Message.ColorMessage.OneByOneMessage("TRACK:", context.getColor(R.color.twitch)),
+    )
+
     private val DEFAULT_ADS = listOf(
         Message.ColorMessage.IconInvaders.Enemy1(context.getColor(R.color.icon_defaultblue)),
         Message.ColorMessage.IconInvaders.Enemy2(context.getColor(R.color.icon_defaultblue))
@@ -238,16 +248,7 @@ class MessageManager(
 
     // TODO deal with new usermessages coming in during advertisements
     private fun pushAdvertisements() {
-        val nowPlayingMsgs: List<Message> = nowPlayingTrack?.let {
-            listOf<Message>(
-                Message.ColorMessage.OneByOneMessage(
-                    "CURRENT",
-                    context.getColor(R.color.twitch)
-                ),
-                Message.ColorMessage.OneByOneMessage("TRACK:", context.getColor(R.color.twitch)),
-                it
-            )
-        } ?: emptyList()
+        val nowPlayingMsgs: List<Message> = nowPlayingTrack?.let { trackHeading + it } ?: emptyList()
 
         // Hack to avoid advertising back to back with another advertisement.
         if (!msgRepo.oneTimeMessages.any { it is Message.ColorMessage.IconInvaders }) {
@@ -761,7 +762,13 @@ class MessageManager(
         return TrackUpdate(turn.number, track, line, notes)
     }
 
-    /** Owner only. */
+    /**
+     * Owner only. THE RULE: what is playing is decided by the update that was accepted last,
+     * alone: a track never played, a track played before, the track that is playing already, or
+     * a stop, and in whatever order the updates get here (one that a later one has overtaken
+     * is left out). Whether a track is ANNOUNCED is a second question ([playedTracks]) and never
+     * changes the first.
+     */
     private fun takeInTrack(update: TrackUpdate) {
         if (update.number < newestTrackUpdate) {
             // A newer update is in already: this one was overtaken while its line was made.
@@ -771,26 +778,36 @@ class MessageManager(
         newestTrackUpdate = update.number
         val track = update.track
         val line = update.line
-        if (line == null) {
-            nowPlayingTrack = null
-            pushAdvertisements()
-        } else {
-            if (track !in playedTracks) {
-                // (what there is to say about the line is said for a track that is shown, once)
-                update.notes.forEach { logW(it) }
-                nowPlayingTrack = line
-                msgRepo.oneTimeMessages.removeIf { it is NowPlayingAnnouncement || it is Message.NowPlayingTrackMessage }
 
-                msgRepo.enqueueOneTimeMessage(NowPlayingAnnouncement)
-                msgRepo.enqueueOneTimeMessage(line)
-                msgRepo.enqueueOneTimeMessage(Message.Starfield())
-
-
-                while (playedTracks.size > MAX_PLAYED_TRACKS_MEMORY) {
-                    playedTracks.remove(playedTracks.first())
-                }
-                playedTracks.add(track)
+        // 1. What is playing. When that changes, nothing of the track before stays in the
+        //    queue: not its announcement, not its line in an ad round that is still waiting.
+        val changed = line != nowPlayingTrack
+        nowPlayingTrack = line
+        if (changed) {
+            msgRepo.oneTimeMessages.removeIf { queued ->
+                queued is NowPlayingAnnouncement || queued is Message.NowPlayingTrackMessage || trackHeading.any { it === queued }
             }
+        }
+
+        if (line == null) {
+            pushAdvertisements()
+            return
+        }
+
+        // 2. Whether it is announced: only a track that was not played lately.
+        if (track !in playedTracks) {
+            // (what there is to say about the line is said for a track that is shown, once)
+            update.notes.forEach { logW(it) }
+
+            msgRepo.enqueueOneTimeMessage(NowPlayingAnnouncement)
+            msgRepo.enqueueOneTimeMessage(line)
+            msgRepo.enqueueOneTimeMessage(Message.Starfield())
+
+
+            while (playedTracks.size > MAX_PLAYED_TRACKS_MEMORY) {
+                playedTracks.remove(playedTracks.first())
+            }
+            playedTracks.add(track)
         }
     }
 

@@ -865,10 +865,8 @@ class MessageManagerOwnerTest {
 
     @Test
     fun `a track update that a newer one overtook is left out, a stop is not undone by the track before it`() {
-        val app = App(newFilesDir())
-        app.phone("!$A\n\uD83D\uDEE4\n${O}AD")
-        ownerRuns()
-        app.repo.oneTimeMessages.clear()
+        // ("Current" is playing at the start: a stop that was not taken in would leave it showing)
+        val app = appWithCurrentPlaying()
 
         // The long track comes in first and takes its turn; before it is taken in, the stop
         // comes in, takes the next turn, and is at the owner first.
@@ -893,13 +891,18 @@ class MessageManagerOwnerTest {
         val second = app.manager.acceptTrackUpdate()
         assertEquals(before + 2, app.manager.trackTurnsTaken)
 
-        app.post(BeatLinkTrack(id = 11, title = "One", artist = "DJ"), first)
-        app.post(BeatLinkTrack(id = 12, title = "Two", artist = "DJ"), second)
+        fun queuedLines() = app.repo.oneTimeMessages.filterIsInstance<Message.NowPlayingTrackMessage>().map { it.str }
 
+        app.post(BeatLinkTrack(id = 11, title = "One", artist = "DJ"), first)
+        // the first is taken in, although a second turn has been given out already
+        assertEquals(listOf("DJ - One"), queuedLines())
+
+        app.post(BeatLinkTrack(id = 12, title = "Two", artist = "DJ"), second)
         // the newer track took the place of the older one in the queue
-        assertEquals(listOf("DJ - Two"), app.repo.oneTimeMessages.filterIsInstance<Message.NowPlayingTrackMessage>().map { it.str })
+        assertEquals(listOf("DJ - Two"), queuedLines())
+
         app.post(BeatLinkTrack(id = 13, title = "Three", artist = "DJ"))
-        assertEquals(listOf("DJ - Three"), app.repo.oneTimeMessages.filterIsInstance<Message.NowPlayingTrackMessage>().map { it.str })
+        assertEquals(listOf("DJ - Three"), queuedLines())
     }
 
     @Test
@@ -919,14 +922,15 @@ class MessageManagerOwnerTest {
         val app = App(newFilesDir())
         val long = BeatLinkTrack(id = 21, title = "Q".repeat(750), artist = "DJ")
 
-        val cuts = logged("DJ - QQQQ") {
-            app.post(long)
-            app.post(long) // the same track again: it is not shown again
-        }
+        val afterTheFirst = logged("DJ - QQQQ") { app.post(long) }
+        assertEquals(1, afterTheFirst.size, afterTheFirst.toString())
+        assertTrue("Ad cut from" in afterTheFirst.single())
+        assertEquals(1, app.repo.oneTimeMessages.count { it is Message.NowPlayingTrackMessage }, "the first post is announced")
 
-        assertEquals(1, cuts.size, cuts.toString())
-        assertTrue("Ad cut from" in cuts.single())
-        assertEquals(1, app.repo.oneTimeMessages.count { it is Message.NowPlayingTrackMessage })
+        val afterTheSecond = logged("DJ - QQQQ") { app.post(long) } // the same track again: it is not shown again
+
+        assertEquals(emptyList(), afterTheSecond)
+        assertEquals(1, app.repo.oneTimeMessages.count { it is Message.NowPlayingTrackMessage }, "and its announcement is still the one queued")
     }
 
     @Test
@@ -941,6 +945,219 @@ class MessageManagerOwnerTest {
         }
 
         assertEquals(emptyList(), cuts)
+    }
+
+    // ---- WHAT IS PLAYING: THE TABLE.
+    // The rule: what is playing is decided by the update that was ACCEPTED last, alone, whatever
+    // it is and in whatever order the updates reach the owner. Announcing is a second question.
+
+    private enum class Kind(val short: String) {
+        NEW("a new track"), PLAYED_BEFORE("a track played before"), SAME_AGAIN("the track that is playing"), STOP("a stop")
+    }
+
+    private val oldTrack = BeatLinkTrack(id = 100, title = "Old", artist = "DJ")
+    private val currentTrack = BeatLinkTrack(id = 101, title = "Current", artist = "DJ")
+    private val trackAds = "!$A\n🛤\n${O}AD"
+
+    /** The update of [kind] that is the [position]th of a sequence (two new tracks of one sequence are two tracks). */
+    private fun updateOf(kind: Kind, position: Int): BeatLinkTrack = when (kind) {
+        Kind.NEW -> BeatLinkTrack(id = 200 + position, title = "New $position", artist = "DJ")
+        Kind.PLAYED_BEFORE -> oldTrack
+        Kind.SAME_AGAIN -> currentTrack
+        Kind.STOP -> stopOfTheTrack
+    }
+
+    private fun lineOf(track: BeatLinkTrack): String? = if (track.isEmpty) null else "${track.artist} - ${track.title}"
+
+    /** The start of every cell: "Old" was played, then "Current", which is playing; both were shown; nothing is queued. The ad list is the place of the track and one ad. */
+    private fun appWithCurrentPlaying(): App {
+        val app = App(newFilesDir())
+        app.phone(trackAds)
+        ownerRuns()
+        app.post(oldTrack)
+        app.post(currentTrack)
+        app.repo.oneTimeMessages.clear()
+        return app
+    }
+
+    /**
+     * What is wrong with what the sign will be shown, when [playing] should be playing (null:
+     * nothing) and that track should be announced or not ([announced]). Empty when all is right.
+     * Looks at the queue, then at the next ad round.
+     */
+    private fun wrongOnTheSign(app: App, playing: String?, announced: Boolean): List<String> {
+        val wrong = mutableListOf<String>()
+        val queue = app.repo.oneTimeMessages.toList()
+        val lines = queue.filterIsInstance<Message.NowPlayingTrackMessage>().map { it.str }
+        if (lines.any { it != playing }) wrong += "queued: the line of another track $lines"
+        val announcements = queue.indices.filter { queue[it] === Message.FlashingAnnouncement.NowPlayingAnnouncement }
+        if (announcements.size != (if (announced) 1 else 0)) wrong += "queued: ${announcements.size} announcement(s)"
+        announcements.forEach { i ->
+            if ((queue.getOrNull(i + 1) as? Message.NowPlayingTrackMessage)?.str != playing) wrong += "queued: an announcement without the line of what is playing"
+        }
+        queue.forEachIndexed { i, message ->
+            if (message.str == "TRACK:" && (queue.getOrNull(i + 1) as? Message.NowPlayingTrackMessage)?.str != playing) {
+                wrong += "queued: the heading of an ad round's track without the line of what is playing"
+            }
+        }
+        app.repo.oneTimeMessages.clear()
+        app.phone(trackAds)
+        ownerRuns()
+        val adRound = app.repo.oneTimeMessages.map { it.str }
+        val right = if (playing == null) listOf("AD") else listOf("CURRENT", "TRACK:", playing, "AD")
+        if (adRound != right) wrong += "the next ad round shows $adRound"
+        return wrong
+    }
+
+    private fun <T> permutations(items: List<T>): List<List<T>> =
+        if (items.size <= 1) listOf(items) else items.flatMap { first -> permutations(items - first).map { listOf(first) + it } }
+
+    /**
+     * Every one of [sequences] (the updates in the order they are ACCEPTED) with every order in
+     * which its updates can reach the owner. Returns the cells that are wrong, as lines.
+     */
+    private fun wrongCells(sequences: List<List<Kind>>): List<String> {
+        val wrong = mutableListOf<String>()
+        for (sequence in sequences) {
+            for (arrival in permutations(sequence.indices.toList())) {
+                val app = appWithCurrentPlaying()
+                val updates = sequence.mapIndexed { i, kind -> updateOf(kind, i + 1) }
+                val turns = sequence.map { app.manager.acceptTrackUpdate() }
+                arrival.forEach { i -> app.post(updates[i], turns[i]) }
+                // the last ACCEPTED decides, and it is announced when it is a track never played before
+                val problems = wrongOnTheSign(app, playing = lineOf(updates.last()), announced = sequence.last() == Kind.NEW)
+                if (problems.isNotEmpty()) {
+                    wrong += "accepted: " + sequence.joinToString(", then ") { it.short } +
+                            " | reaching the owner in the order " + arrival.map { it + 1 } + " | " + problems.joinToString("; ")
+                }
+            }
+        }
+        return wrong
+    }
+
+    private fun sequencesOf(length: Int): List<List<Kind>> =
+        if (length == 0) listOf(emptyList()) else sequencesOf(length - 1).flatMap { head -> Kind.values().map { head + it } }
+
+    @Test
+    fun `the start of the table is as the table says`() {
+        val app = appWithCurrentPlaying()
+
+        assertEquals(emptyList(), wrongOnTheSign(app, playing = "DJ - Current", announced = false))
+    }
+
+    @Test
+    fun `every single update decides what is playing`() {
+        assertEquals(emptyList(), wrongCells(sequencesOf(1)), "wrong cells")
+    }
+
+    @Test
+    fun `every pair of updates in both orders of arrival, the one accepted last decides what is playing`() {
+        val wrong = wrongCells(sequencesOf(2))
+
+        assertEquals(emptyList(), wrong, "${wrong.size} wrong cells of 32")
+    }
+
+    @Test
+    fun `every three updates in all six orders of arrival, starting with a new track or a track played before`() {
+        val wrong = wrongCells(sequencesOf(3).filter { it.first() == Kind.NEW || it.first() == Kind.PLAYED_BEFORE })
+
+        assertEquals(emptyList(), wrong, "${wrong.size} wrong cells of 192")
+    }
+
+    @Test
+    fun `every three updates in all six orders of arrival, starting with the track that is playing or a stop`() {
+        val wrong = wrongCells(sequencesOf(3).filter { it.first() == Kind.SAME_AGAIN || it.first() == Kind.STOP })
+
+        assertEquals(emptyList(), wrong, "${wrong.size} wrong cells of 192")
+    }
+
+    @Test
+    fun `A, then B, then a stop and a repeat of A, the repeat reaching the owner first or last, A is what plays`() {
+        // the sequence the gate found: the stop was accepted third, the repeat of A fourth
+        for (repeatFirst in listOf(true, false)) {
+            val app = appWithCurrentPlaying() // A is "Old", B is "Current"
+            val turnOfTheStop = app.manager.acceptTrackUpdate()
+            val turnOfTheRepeat = app.manager.acceptTrackUpdate()
+            if (repeatFirst) {
+                app.post(oldTrack, turnOfTheRepeat)
+                app.post(stopOfTheTrack, turnOfTheStop)
+            } else {
+                app.post(stopOfTheTrack, turnOfTheStop)
+                app.post(oldTrack, turnOfTheRepeat)
+            }
+
+            assertEquals(emptyList(), wrongOnTheSign(app, playing = "DJ - Old", announced = false), "the repeat first: $repeatFirst")
+        }
+    }
+
+    @Test
+    fun `A, then B, then a repeat of A and a stop, the stop was accepted last, nothing plays`() {
+        for (stopFirst in listOf(true, false)) {
+            val app = appWithCurrentPlaying()
+            val turnOfTheRepeat = app.manager.acceptTrackUpdate()
+            val turnOfTheStop = app.manager.acceptTrackUpdate()
+            if (stopFirst) {
+                app.post(stopOfTheTrack, turnOfTheStop)
+                app.post(oldTrack, turnOfTheRepeat)
+            } else {
+                app.post(oldTrack, turnOfTheRepeat)
+                app.post(stopOfTheTrack, turnOfTheStop)
+            }
+
+            assertEquals(emptyList(), wrongOnTheSign(app, playing = null, announced = false), "the stop first: $stopFirst")
+        }
+    }
+
+    @Test
+    fun `a new track posted twice is announced once, and the announcement is not lost to the second post`() {
+        for (secondFirst in listOf(false, true)) {
+            val app = appWithCurrentPlaying()
+            val fresh = updateOf(Kind.NEW, 1)
+            val first = app.manager.acceptTrackUpdate()
+            val second = app.manager.acceptTrackUpdate()
+            if (secondFirst) {
+                app.post(fresh, second)
+                app.post(fresh, first)
+            } else {
+                app.post(fresh, first)
+                assertEquals(1, app.repo.oneTimeMessages.count { it === Message.FlashingAnnouncement.NowPlayingAnnouncement }, "after the first post")
+                app.post(fresh, second)
+            }
+
+            assertEquals(emptyList(), wrongOnTheSign(app, playing = "DJ - New 1", announced = true), "the second first: $secondFirst")
+        }
+    }
+
+    @Test
+    fun `a stop takes the announcement and the ad round's line of the stopped track out of the queue`() {
+        val app = appWithCurrentPlaying()
+        app.post(updateOf(Kind.NEW, 1))             // announced: NOW PLAYING, its line, stars
+        app.phone(trackAds)                          // and an ad round with its line is queued
+        ownerRuns()
+        assertEquals(2, app.repo.oneTimeMessages.count { it is Message.NowPlayingTrackMessage }, "before the stop: the line is queued twice")
+
+        app.post(stopOfTheTrack)
+
+        assertEquals(emptyList(), wrongOnTheSign(app, playing = null, announced = false))
+    }
+
+    @Test
+    fun `an ad that says CURRENT or TRACK itself is an ad, a change of track does not take it out`() {
+        val app = App(newFilesDir())
+        app.phone("!$A\n${O}CURRENT\n${O}TRACK:\n🛤")
+        ownerRuns()
+        app.post(currentTrack)
+        app.repo.oneTimeMessages.clear()
+        app.phone("!$A\n${O}CURRENT\n${O}TRACK:\n🛤")
+        ownerRuns()
+        assertEquals(listOf("CURRENT", "TRACK:", "CURRENT", "TRACK:", "DJ - Current"), app.repo.oneTimeMessages.map { it.str })
+
+        app.post(stopOfTheTrack)
+
+        // the owner's two ads stay (once from the queued round; the stop's own round is not pushed twice... see below)
+        assertTrue(app.repo.oneTimeMessages.map { it.str }.containsAll(listOf("CURRENT", "TRACK:")))
+        assertTrue(app.repo.oneTimeMessages.none { it is Message.NowPlayingTrackMessage })
+        assertEquals(0, app.repo.oneTimeMessages.size % 2, "only whole pairs of the owner's two ads: ${app.repo.oneTimeMessages.map { it.str }}")
     }
 
     @Test
@@ -1012,10 +1229,8 @@ class MessageManagerOwnerTest {
 
     @Test
     fun `of two posts to currentTrack that overlap, the one that was accepted later wins, a stop is not undone by the track before it`() {
-        val app = App(newFilesDir())
-        app.phone("!$A\n🛤\n${O}AD")
-        ownerRuns()
-        app.repo.oneTimeMessages.clear()
+        // ("Current" is playing at the start: a stop that was not taken in would leave it showing)
+        val app = appWithCurrentPlaying()
         val server = io.ktor.server.engine.embeddedServer(io.ktor.server.netty.Netty, port = 0) {
             install(io.ktor.server.plugins.contentnegotiation.ContentNegotiation) { gson {} }
             routing { currentTrack(app.manager) }
@@ -1026,11 +1241,12 @@ class MessageManagerOwnerTest {
             val stopJson = """{"id":0,"title":"","artist":"","isEmpty":true}"""
 
             // The track's post is accepted: its headers are there, the route has it. Its body is still on the way.
+            val turnsBefore = app.manager.trackTurnsTaken
             val track = Post(port)
             track.headers(trackJson.toByteArray().size)
             // (the route gives the update its place in the order when it accepts the request; this waits for that)
             val deadline = System.currentTimeMillis() + 2_000
-            while (app.manager.trackTurnsTaken < 1 && System.currentTimeMillis() < deadline) Thread.sleep(5)
+            while (app.manager.trackTurnsTaken < turnsBefore + 1 && System.currentTimeMillis() < deadline) Thread.sleep(5)
 
             // Now the stop comes, whole, and is answered.
             val stop = Post(port)
@@ -1061,11 +1277,13 @@ class MessageManagerOwnerTest {
         app.repo.oneTimeMessages.clear()
 
         app.post(BeatLinkTrack(id = 8, title = "Song", artist = "DJ"))
-        app.repo.oneTimeMessages.clear()
+        // the track is in: it is announced
+        assertEquals(listOf("NOW${Message.VT}PLAYING", "DJ - Song", ""), app.repo.oneTimeMessages.map { it.str })
+
         app.post(stopOfTheTrack)
 
-        // the ad round an empty track asks for has no track in it any more
-        assertEquals(listOf("AD"), app.repo.oneTimeMessages.map { it.str })
+        // the announcement is gone with the track (its stars stay), and the ad round a stop asks for has no track in it
+        assertEquals(listOf("AD", ""), app.repo.oneTimeMessages.map { it.str })
     }
 
     /** One request of the sign, answered by the real responder: the text that goes out on the wire. */
