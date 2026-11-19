@@ -75,12 +75,14 @@ class EnergySignUartManager(private val viewModel: MainViewModel, private val ow
             } catch (e: Exception) {
                 logW("Sign link: could not set the thread priority to $nice: $e")
             }
+            // ScreenLogger's date formatter is thread-local. Its first use belongs here,
+            // before getNextMessage logs the first selection inside the reply deadline.
+            logD("Uart device $UART_DEVICE_NAME: sign link thread started (nice $nice)")
             link.run()
         }, LINK_THREAD_NAME).apply {
             isDaemon = true
             start()
         }
-        logD("Uart device $UART_DEVICE_NAME: sign link thread started (nice $nice)")
     }
 
     /** Stops the link thread. It closes the port itself, when it is out of whatever it was doing. */
