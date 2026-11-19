@@ -23,6 +23,7 @@ class BluetoothRecoveryTest {
     private var published = false
     private var uartStarts = 0
     private var enableRequests = 0
+    private var serviceStarts = 0
     private var gattFailure: Throwable? = null
 
     private val session = BluetoothSession(
@@ -32,6 +33,7 @@ class BluetoothRecoveryTest {
         enabled = { false },
         enable = { enableRequests++; false },
         openServices = {
+            serviceStarts++
             published = true
             gattFailure?.let { throw it }
         },
@@ -68,10 +70,13 @@ class BluetoothRecoveryTest {
         gattFailure = null
         session.adapterOn()
         assertTrue(published)
+        session.adapterOn()
+        assertEquals(2, serviceStarts, "a duplicate STATE_ON must not expose a second server")
         assertEquals(BluetoothGatt.GATT_SUCCESS, gatt.uartWriteStatus("!next".toByteArray()))
         assertEquals(listOf("!next"), received)
         assertEquals(1, enableRequests)
         session.stop()
+        session.adapterOn()
         assertFalse(registered)
         assertFalse(published)
     }

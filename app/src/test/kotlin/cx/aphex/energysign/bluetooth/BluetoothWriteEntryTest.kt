@@ -133,6 +133,13 @@ class BluetoothWriteEntryTest {
     private fun stored(): List<String> = repo.marqueeMessages.map { it.str }
 
     @Test
+    fun `a requested success acknowledges a command the owner has already executed`() {
+        // BeforeEach drained the queue on this thread, so the owner can answer immediately.
+        assertEquals(BluetoothGatt.GATT_SUCCESS, server.uartWriteStatus("!delete".toByteArray()))
+        assertEquals(listOf("MESSAGE 2", "MESSAGE 3", "MESSAGE 4", "MESSAGE 5"), stored())
+    }
+
+    @Test
     fun `a requested acknowledgement is refused if the owner never takes the command`() {
         val before = stored()
         val result = FutureTask { server.uartWriteStatus("!delete".toByteArray(), responseNeeded = true) }
