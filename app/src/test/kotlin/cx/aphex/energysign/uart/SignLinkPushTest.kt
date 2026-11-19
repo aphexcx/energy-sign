@@ -84,6 +84,9 @@ class SignLinkPushTest {
     private val stallAtWrite = mutableMapOf<Int, Long>()
     private var writeCalls = 0
 
+    /** What happens elsewhere in the app while the write call with this number is under way (another thread's doing). */
+    private val duringWrite = mutableMapOf<Int, () -> Unit>()
+
     private val wire = object : SignWire {
         override fun read(buffer: ByteArray, length: Int): Int {
             reads++
@@ -111,6 +114,7 @@ class SignLinkPushTest {
             now += stallNs
             stallNs = 0
             now += stallAtWrite.remove(++writeCalls) ?: 0L
+            duringWrite.remove(writeCalls)?.invoke()
             if (now >= stuckUntilNs) takesBeforeStuck = Int.MAX_VALUE
             val take = minOf(length, takesPerWrite, takesBeforeStuck)
             if (take == 0) return 0
@@ -659,6 +663,212 @@ class SignLinkPushTest {
         // and the next try waits until the sign has got over the torn frame
         val again = txs.drop(3).first { it.zeros }
         assertTrue(again.atNs - txs[2].goneAtNs >= 1_010 * ms, "again ${(again.atNs - txs[2].goneAtNs) / ms} ms behind the torn frame")
+    }
+
+    // ================= when a change is done (gate round 2): only a frame the sign has, whole and in time, ends it
+
+    @Test
+    fun `the gate's case, a reply whose last bytes are taken after the sign has timed out does not settle the change, the push still goes out`() {
+        // "!next" and "~" together: the answer is the new selection, 58 bytes, and the transmitter takes 40 at a time.
+        // 40 at 0 (gone at 28); the last 18 are offered at 2 and handed over at 88: the line stood still for 60 ms.
+        val next = "Y".repeat(56)
+        takesPerWrite = 40
+        stallAtWrite[2] = 86 * ms
+        command(0, next)
+        arrives(0, "~")
+        runUntil(3_000)
+        assertEquals(listOf(40, 18), txs.take(2).map { it.bytes.size })
+        assertTrue(txs[1].leavesFromNs - txs[0].goneAtNs >= 50 * ms)
+        // the sign may have given the answer up and still show the old selection: the change is not done
+        val zeros = txs.firstOrNull { it.zeros }
+        assertTrue(zeros != null, "no push followed the reply that may be torn: ${wire()}")
+        assertTrue(zeros!!.atNs - txs[1].goneAtNs >= 1_010 * ms, "zeros ${(zeros.atNs - txs[1].goneAtNs) / ms} ms behind the reply")
+        assertEquals("H:$next", txs.last().text)
+        assertEquals(listOf(next), told)
+    }
+
+    @Test
+    fun `a message whose last piece was taken late is still a message that was sent, but leaving is not settled by it`() {
+        // the MESSAGE is judged as on master (sent, not handed back); the pending change is not: the attention follows
+        ordinary.addFirst("N".repeat(100))
+        takesPerWrite = 40
+        stallAtWrite[2] = 86 * ms
+        command(0, null)
+        arrives(0, "~")
+        runUntil(2_500)
+        assertEquals(listOf("N".repeat(100)), taken)
+        assertEquals(listOf(40, 40, 20), txs.take(3).map { it.bytes.size })
+        val zeros = txs.drop(3)
+        assertEquals(1, zeros.size, wire().toString())
+        assertTrue(zeros[0].zeros)
+        assertTrue(zeros[0].atNs - txs[2].goneAtNs >= 1_010 * ms, "zeros ${(zeros[0].atNs - txs[2].goneAtNs) / ms} ms behind the message")
+    }
+
+    @Test
+    fun `a reply whose first byte is handed over after the sign has stopped listening does not settle the change either`() {
+        // called at 0, in time; the thread is taken off inside the call and the line sees the first byte at 60:
+        // in its chooser display the sign listened 60 ms, and the link's own limit for the first byte is 50
+        stallNs = 60 * ms
+        command(0, "B")
+        arrives(0, "~")
+        runUntil(2_000)
+        // the reply went out and counts as sent; the change is pushed when the line is free
+        assertEquals(listOf("tx[H:B]@60", "tx[00x72]@62", "tx[H:B]@132"), wire())
+        assertEquals(listOf("B"), told)
+    }
+
+    @Test
+    fun `a change asked for from another thread while a reply is being written is not settled by that reply`() {
+        // the reply was made before the change: whole and in time, it still carries the selection of before
+        arrives(0, "~")
+        duringWrite[1] = { link.requestPush() }
+        runUntil(1_000)
+        assertEquals(listOf("tx[H:A]@0", "tx[00x72]@2", "tx[H:A]@72"), wire())
+    }
+
+    @Test
+    fun `a change asked for from another thread while a pushed frame is being written is the next push`() {
+        command(0, "B")
+        duringWrite[2] = { link.requestPush() } // write 1 is the zeros, write 2 the frame
+        runUntil(1_000)
+        assertEquals(listOf("tx[00x72]@0", "tx[H:B]@70", "tx[00x72]@322", "tx[H:B]@392"), wire())
+    }
+
+    @Test
+    fun `the gate's case, a pushed frame whose first byte would leave after the sign has stopped listening for it is not written, and the push comes again`() {
+        // the sleep of the guard ends at 170 instead of 70; the sign listens 150 ms for the first byte and asks 10 ms later
+        sleepOverrunNs = 100 * ms
+        command(0, "B")
+        arrives(160, "~")
+        runUntil(300)
+        // a frame begun now could run into the sign's request: nothing is written, nothing is told, the change stays
+        assertEquals(listOf("tx[00x72]@0"), wire())
+        assertEquals(emptyList(), told)
+        assertEquals(0, timingLines.count { it.startsWith("push ") })
+        assertTrue(warnings().single().contains("the frame was not begun within 120 ms of the attention"), warnings().toString())
+        // the link was not at the wire from before the attention until 170: the request is void (rule 3)
+        assertEquals(1, drops().size)
+        runUntil(1_000)
+        // the sign waits a second for its answer; the push that comes again, 250 ms behind the guard, is that answer
+        assertEquals(listOf("tx[00x72]@0", "tx[00x72]@320", "tx[H:B]@390"), wire())
+        assertEquals(listOf("B"), told)
+    }
+
+    @Test
+    fun `a pushed frame begun in time is the push, though the guard's sleep ran over`() {
+        sleepOverrunNs = 45 * ms // the first byte leaves at 115, inside the 120
+        command(0, "B")
+        runUntil(1_000)
+        assertEquals(listOf("tx[00x72]@0", "tx[H:B]@115"), wire())
+        assertEquals(listOf("B"), told)
+        assertEquals(emptyList(), warnings())
+    }
+
+    @Test
+    fun `a pushed frame whose first byte is handed over too late, inside a write that was called in time, goes out to its end but is not the push`() {
+        // write 1 is the zeros. Write 2, the frame, is called at 70 and the line sees it at 130
+        stallAtWrite[2] = 60 * ms
+        command(0, "B")
+        runUntil(600)
+        assertEquals(listOf("tx[00x72]@0", "tx[H:B]@130"), wire())
+        assertEquals(emptyList(), told)
+        assertEquals(0, timingLines.count { it.startsWith("push ") })
+        assertTrue(warnings().single().contains("the frame was not begun within 120 ms of the attention (3 of 3 bytes"), warnings().toString())
+        runUntil(2_000)
+        // the sign may have asked into it and be busy with what it got of it: again when it has got over that
+        assertEquals(listOf("tx[00x72]@0", "tx[H:B]@130", "tx[00x72]@1142", "tx[H:B]@1212"), wire())
+        assertEquals(listOf("B"), told)
+    }
+
+    @Test
+    fun `what the sign sent into a pushed frame is read away, and the frame is pushed again, the sign may not have it`() {
+        signShowsAnOrdinaryMessage()
+        val long = "L".repeat(70) // a frame of 72 bytes: on the line from 170 to 220
+        command(100, long)
+        arrives(190, "~") // the sign was sending while the frame came in
+        runUntil(230)
+        assertEquals(1, drops().size)
+        assertEquals(0, answers - 1)
+        runUntil(1_500)
+        // once more, 250 ms behind the frame; nothing crossed that one, and it is the last
+        assertEquals(listOf("tx[M1]@0", "tx[00x72]@100", "tx[H:$long]@170", "tx[00x72]@470", "tx[H:$long]@540"), wire())
+        assertEquals(listOf(long, long), told)
+    }
+
+    @Test
+    fun `what the sign sent into a pushed frame that failed anyway changes nothing, the push comes again once`() {
+        command(0, "BCDEFGH")
+        takesBeforeStuck = 72 + 2
+        stuckUntilNs = 150 * ms
+        arrives(71, "~")
+        runUntil(2_000)
+        assertEquals(listOf("tx[00x72]@0", "tx[H:]@70", "tx[00x72]@1081", "tx[H:BCDEFGH]@1151"), wire())
+    }
+
+    @Test
+    fun `what the sign sent into the attention alone brings no second attention`() {
+        command(0, null)
+        arrives(20, "~")
+        runUntil(1_500)
+        assertEquals(listOf("tx[00x72]@0"), wire())
+        assertEquals(1, drops().size)
+        assertEquals(emptyList(), taken)
+    }
+
+    @Test
+    fun `the attention alone proves nothing and is given once, with no new change the loop goes back to its long pause`() {
+        command(0, null)
+        runUntil(5_000)
+        assertEquals(listOf("tx[00x72]@0"), wire())
+        assertEquals(SignLink.IDLE_PAUSE_MS * ms, sleeps.last())
+        // and a new change is a new push
+        command(5_000, "B")
+        runUntil(5_500)
+        assertEquals(listOf("tx[00x72]@0", "tx[00x72]@5000", "tx[H:B]@5070"), wire())
+    }
+
+    @Test
+    fun `a change made while pushes are off is not pushed when they are switched on in the same turn`() {
+        // the gate's case: "!choose" and then "!attn auto", both run by one turn of the link
+        mode = Attention.OFF
+        command(0, "B")
+        posted.getOrPut(0) { mutableListOf() } += { mode = Attention.AUTO }
+        runUntil(1_000)
+        assertEquals(emptyList(), wire())
+        assertEquals(0, framesMade)
+    }
+
+    @Test
+    fun `switched on and then changed in the same turn, the change is pushed`() {
+        mode = Attention.OFF
+        posted.getOrPut(0) { mutableListOf() } += { mode = Attention.AUTO }
+        command(0, "B")
+        runUntil(1_000)
+        assertEquals(listOf("tx[00x72]@0", "tx[H:B]@70"), wire())
+    }
+
+    @Test
+    fun `a change made while pushes are on and switched off in the same turn is not pushed, and not when they are on again`() {
+        command(0, "B")
+        posted.getOrPut(0) { mutableListOf() } += { mode = Attention.OFF }
+        posted.getOrPut(100 * ms) { mutableListOf() } += { mode = Attention.AUTO }
+        runUntil(1_000)
+        assertEquals(emptyList(), wire())
+        assertEquals(0, framesMade)
+    }
+
+    @Test
+    fun `zero runs that keep failing are said once as a write and once as a push, not at every try, and again after five seconds`() {
+        // the gate's case: each failed run says "write" and then "push", and the two kept undoing each other's limit
+        failZeroWrites = Int.MAX_VALUE
+        command(0, "B")
+        runUntil(2_000)
+        assertEquals(emptyList(), wire())
+        assertEquals(1, warnings().count { it.contains("write failed on UART") }, warnings().toString())
+        assertEquals(1, warnings().count { it.contains("push failed on UART") }, warnings().toString())
+        assertEquals(2, warnings().size)
+        runUntil(5_400)
+        assertEquals(4, warnings().size, warnings().toString())
     }
 
     // ================= a push takes nothing
