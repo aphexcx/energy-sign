@@ -852,7 +852,7 @@ class MessageManagerOwnerTest {
     // ---- the whole push: the real manager, the real frame maker and the real link, on a fake line
 
     @Test
-    fun `from the phone's command to the line, a step in the chooser is zeros and its frame, leaving is zeros alone, and nothing is taken`() {
+    fun `from the phone's command to the line, entering is pushed once and published by the sign's own request, a step is zeros and its frame and is published, leaving is zeros alone, and nothing is taken`() {
         var now = 0L
         val written = mutableListOf<ByteArray>()
         val arrivals = ArrayDeque<Byte>()
@@ -903,7 +903,27 @@ class MessageManagerOwnerTest {
             // the very bytes a request would have got, and nothing behind the closing brace
             assertEquals(SignResponder.GSON.toJson(manager.chooserShown()), String(written[1]))
             assertEquals('}'.code.toByte(), written[1].last())
-            assertEquals(listOf("MESSAGE 2"), current) // the screen and Bluetooth have the pushed text
+            // ENTERING is never taken from a push: the sign listens for one only in its chooser display, and it
+            // was not there. The screen and Bluetooth are told nothing yet
+            assertEquals(emptyList(), current)
+
+            // the sign asks at the end of what it was showing: that answer is the selection, and it is published
+            written.clear()
+            repeat(300) { link.step() }
+            assertEquals(emptyList(), written.map { it.size }) // once: nothing more unasked
+            arrivals += '~'.code.toByte()
+            link.step()
+            assertEquals(SignResponder.GSON.toJson(manager.chooserShown()), String(written.single()))
+            assertEquals(listOf("MESSAGE 2"), current)
+
+            // a step in the chooser, to a sign that is in its chooser display: pushed, and the pushed text is the current text
+            written.clear()
+            phone("!next")
+            repeat(300) { link.step() }
+            assertEquals(2, written.size)
+            assertTrue(written[0].all { it == 0.toByte() })
+            assertEquals("MESSAGE 3", JsonParser.parseString(String(written[1])).asJsonObject["str"].asString)
+            assertEquals(listOf("MESSAGE 2", "MESSAGE 3"), current)
 
             written.clear()
             phone("!micOff")
@@ -913,7 +933,7 @@ class MessageManagerOwnerTest {
             assertEquals(72, written[0].size)
             assertTrue(written[0].all { it == 0.toByte() })
             assertSame(Message.UtilityMessage.DisableMic, repo.oneTimeMessages.single()) // not taken by the push
-            assertEquals(listOf("MESSAGE 2"), current)
+            assertEquals(listOf("MESSAGE 2", "MESSAGE 3"), current)
 
             // the sign found nothing behind the attention and asks: that request takes the command
             written.clear()
@@ -921,7 +941,7 @@ class MessageManagerOwnerTest {
             link.step()
             assertEquals(SignResponder.GSON.toJson(Message.UtilityMessage.DisableMic), String(written.single()))
             assertTrue(repo.oneTimeMessages.isEmpty())
-            assertEquals(2, current.size)
+            assertEquals(3, current.size)
         } finally {
             manager.onChooserChanged = countPushes
         }
