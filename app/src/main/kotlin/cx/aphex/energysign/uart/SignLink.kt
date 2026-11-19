@@ -62,8 +62,8 @@ class SignLink(
     private val baud: Int,
     /** The name of the port, for the log. */
     private val name: String,
-    /** Runs the changes to the message state that are waiting. Called at the start of every turn. */
-    private val events: () -> Unit,
+    /** Runs pending message changes, checking for a stop between them. */
+    private val events: (stopped: () -> Boolean) -> Unit,
     /** Answers one request, the first [count] bytes of [buffer], by calling [send] once. The buffer is reused. */
     private val answer: (buffer: ByteArray, count: Int) -> Unit,
     private val timing: UartTimingLog,
@@ -77,6 +77,7 @@ class SignLink(
 ) : Runnable {
     @Volatile
     private var stopped = false
+    private val stopRequested = { stopped }
 
     @Volatile
     private var thread: Thread? = null
@@ -122,7 +123,7 @@ class SignLink(
             // Pay the cold JSON cost before taking a request. Keep the previous read time:
             // a request buffered during preparation may already be too old to answer.
             try {
-                if (!stopped) prepareAnswers { stopped }
+                if (!stopped) prepareAnswers(stopRequested)
             } catch (e: Exception) {
                 // An adapter can still be built on demand. Keep the port serving requests.
                 complain("preparing answers", e)
@@ -144,7 +145,8 @@ class SignLink(
     fun step() {
         var doing = "a change"
         try {
-            events()
+            events(stopRequested)
+            if (stopped) return
             doing = "read"
             val busy = readRequest()
             readFailures = 0
@@ -156,7 +158,7 @@ class SignLink(
             // A read that failed is tried again at once, inside the time the sign listens; the
             // long pause is for a port that keeps failing
             val again = doing == "read" && ++readFailures <= QUICK_READ_RETRIES
-            sleepNanos((if (again) ACTIVE_PAUSE_MS else ERROR_PAUSE_MS) * NS_PER_MS)
+            if (!stopped) sleepNanos((if (again) ACTIVE_PAUSE_MS else ERROR_PAUSE_MS) * NS_PER_MS)
         }
     }
 

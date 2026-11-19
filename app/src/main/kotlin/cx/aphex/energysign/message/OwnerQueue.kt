@@ -78,12 +78,12 @@ class OwnerQueue {
 
     /**
      * Runs what has been posted, in order, at most [max] events so that the owner gets back to
-     * the wire. An event that throws is reported and does not stop the others. Owner only.
+     * the wire. On shutdown, finish the current event and leave the rest in order. Owner only.
      */
-    fun drain(max: Int = MAX_PER_DRAIN, onError: (Throwable) -> Unit = {}): Int {
+    fun drain(max: Int = MAX_PER_DRAIN, stopped: () -> Boolean = { false }, onError: (Throwable) -> Unit = {}): Int {
         ownerThread = Thread.currentThread()
         var ran = 0
-        while (ran < max) {
+        while (ran < max && !stopped()) {
             val event = events.poll() ?: break
             ran++
             try {

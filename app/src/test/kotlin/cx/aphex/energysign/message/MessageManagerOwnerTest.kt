@@ -485,7 +485,7 @@ class MessageManagerOwnerTest {
             unsent = manager::returnUnsent,
         )
         link = SignLink(
-            wire = wire, baud = 14400, name = "test", events = ::ownerRuns,
+            wire = wire, baud = 14400, name = "test", events = { ownerRuns() },
             prepareAnswers = {
                 SignResponder.warmUp()
                 preparedOn = Thread.currentThread()
