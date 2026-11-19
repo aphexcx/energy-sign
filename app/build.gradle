@@ -195,9 +195,10 @@ dependencies {
     // Kotlin Test
     testImplementation 'org.jetbrains.kotlin:kotlin-test:2.1.20'
 
-    // Mockito
-    testImplementation 'org.mockito:mockito-core:3.12.4'
-    testImplementation 'org.mockito:mockito-inline:3.12.4'
+    // Mockito 5 mocks final classes itself (no mockito-inline artifact) and reads the class files of Java 17 and 21
+    testImplementation 'org.mockito:mockito-core:5.24.0'
+    // The tests build Android objects without their constructors; Mockito 5 has Objenesis at run time only
+    testImplementation 'org.objenesis:objenesis:3.3'
 
     // A local stand-in for the Messages API: the SDK client is tested over real HTTP, never against the live service.
     testImplementation 'com.squareup.okhttp3:mockwebserver:4.12.0'
