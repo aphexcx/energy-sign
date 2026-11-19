@@ -79,9 +79,7 @@ class AttentionSwitch(
     private fun readSaved(): Attention {
         try {
             if (!file.exists()) return Attention.OFF
-            // The file holds one word: a longer one is not this app's, and is not read
-            val word = if (file.length() <= MAX_FILE_BYTES) Attention.parse(file.readText()) else null
-            if (word != null) return word
+            Attention.parse(file.readText())?.let { return it }
             log("Pushes to the sign: ${file.name} does not hold one of off, auto, break, zeros; off")
         } catch (e: Exception) {
             log("Pushes to the sign: ${file.name} could not be read ($e); off")
@@ -93,6 +91,5 @@ class AttentionSwitch(
 
     companion object {
         const val FILE_NAME: String = "attention.txt"
-        private const val MAX_FILE_BYTES: Long = 64
     }
 }

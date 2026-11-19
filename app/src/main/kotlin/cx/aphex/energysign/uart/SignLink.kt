@@ -474,12 +474,11 @@ class SignLink(
         if (!raised) return pushFailed(lineWasNs)
         val raisedNs = nanoTime()
         clock.quiet(ATTN_GUARD_MS)
-        voidBeforeNs = clock.freeAtNs
         sleepUntil(clock.freeAtNs)
         if (stopped) return true
         val guardEndNs = nanoTime()
         val whole = frame == null || writeAll(frame, "message", null) == frame.size
-        // Rule 3 lasts until the frame has left the line
+        // Rule 3 lasts until the frame has left the line; with no frame, until the guard is over
         voidBeforeNs = clock.freeAtNs
         if (!whole) {
             complain("push", "the frame was not taken in full")

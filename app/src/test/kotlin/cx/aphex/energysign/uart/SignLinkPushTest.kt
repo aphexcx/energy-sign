@@ -889,6 +889,36 @@ class SignLinkPushTest {
     }
 
     @Test
+    fun `the switch is looked at for every push, off, on and off again`() {
+        mode = Attention.OFF
+        command(0, "B")
+        runUntil(500)
+        assertEquals(emptyList(), wire())
+        mode = Attention.AUTO
+        command(500, "C")
+        runUntil(1_000)
+        assertEquals(listOf("tx[00x72]@500", "tx[H:C]@570"), wire())
+        mode = Attention.OFF
+        command(1_000, "D")
+        runUntil(1_500)
+        assertEquals(listOf("tx[00x72]@500", "tx[H:C]@570"), wire())
+        mode = Attention.BREAK
+        command(1_500, "E")
+        runUntil(2_000)
+        assertEquals(listOf("tx[00x72]@500", "tx[H:C]@570", "low@1500", "tx[H:E]@1570"), wire())
+    }
+
+    @Test
+    fun `while a push waits its turn the wire is read at the short pause, a request is seen within it`() {
+        mode = Attention.BREAK
+        failBreaks = 1 // the push failed at 0 and waits to be tried again; the sign has not been heard from
+        command(0, "B")
+        arrives(65, "~")
+        runUntil(200)
+        assertEquals(listOf("tx[H:B]@66"), wire())
+    }
+
+    @Test
     fun `with pushes off the loop is the loop of contract 2 point 1, a change costs no extra turn and nothing is written unasked`() {
         mode = Attention.OFF
         runUntil(1_000)

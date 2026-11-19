@@ -163,7 +163,7 @@ class AttentionSwitchTest {
         assertEquals(Attention.OFF, started().inForce())
         assertTrue(log.first().contains("attention.txt does not hold one of off, auto, break, zeros"), log.toString())
 
-        file().writeText("zeros" + " ".repeat(10_000) + "\nmore") // a file that has grown is not read to its end
+        file().writeText("zeros\nauto\n") // two words are not one
         assertEquals(Attention.OFF, started().inForce())
 
         file().writeText("zeros\n")
