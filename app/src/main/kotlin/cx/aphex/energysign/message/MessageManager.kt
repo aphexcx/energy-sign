@@ -28,7 +28,8 @@ import java.util.concurrent.atomic.AtomicLong
 class MessageManager(
     private val context: Context,
     val msgRepo: MessageRepository,
-    private val owner: OwnerQueue,
+    /** The owner of the message state. Not kept: every way to it from here is [toOwner]. */
+    owner: OwnerQueue,
     /**
      * A clock that only counts, in milliseconds: for how long the sign has said "thinking", and
      * for the pauses and the hourly budget of the queries. The app gives the one that also counts
@@ -144,17 +145,18 @@ class MessageManager(
     @Volatile
     var onAttentionCommand: (word: String) -> Unit = {}
 
-    private val chooserWatch = ChooserChangeWatch(view = { chooserShown() }) { onChooserChanged() }
+    /** The only door to the owner: whatever goes through it runs under the chooser watch (see WatchedOwner). */
+    private val toOwner = WatchedOwner(owner, ChooserChangeWatch(view = { chooserShown() }) { onChooserChanged() })
 
     /** Hands [change], which may alter the messages, the index or the mode, to the owner; it runs under the chooser watch. */
-    private fun change(change: () -> Unit) = owner.post { chooserWatch.watch(change) }
+    private fun change(change: () -> Unit) = toOwner.post(change)
 
     /**
      * The same, for a caller that tells someone what happened (the HTTP server): waits until the
      * owner has made the change and returns its result or throws its error. Not from the main
      * thread (see OwnerQueue.ask).
      */
-    private fun <T> changeAndWait(change: () -> T): T = owner.ask { chooserWatch.watch(change) }
+    private fun <T> changeAndWait(change: () -> T): T = toOwner.ask(change)
 
     /**
      * When a query is asked and for how long the sign says "thinking" for it (see AIQueryDesk for
@@ -198,7 +200,7 @@ class MessageManager(
      */
     private fun stillListed(query: Message.Marquee.AIQuery): Boolean =
         try {
-            owner.ask { msgRepo.marqueeMessages.any { it === query } }
+            toOwner.ask { msgRepo.marqueeMessages.any { it === query } }
         } catch (e: Exception) {
             false
         }
@@ -252,8 +254,9 @@ class MessageManager(
         // On the owner thread, in the same step that took the text and ended the input
         keyboardManager.onSubmitted = { msg ->
             logD("Processing new submitted keyboard message: $msg")
-            // (the key was posted by KeyboardManager itself, not through change())
-            chooserWatch.watch { addNewUserMessage(msg, isQuery = true) }
+            // (the key was posted by KeyboardManager itself, not through change(): this is the
+            // owner asking itself, answered at once, and under the chooser watch like every change)
+            toOwner.ask { addNewUserMessage(msg, isQuery = true) }
         }
 
     }
@@ -342,7 +345,7 @@ class MessageManager(
         changeAndWait { addNewUserMessage(str, isQuery) }
 
     /** The stored messages as the owner has them now, newest first. Returns a copy. */
-    fun storedMessages(): List<Message.Marquee> = owner.ask { msgRepo.marqueeMessages.toList() }
+    fun storedMessages(): List<Message.Marquee> = toOwner.ask { msgRepo.marqueeMessages.toList() }
 
     private fun addNewUserMessage(str: String, isQuery: Boolean) {
         // The new message is what the sign shows next, and in chooser mode the one that is
@@ -915,7 +918,7 @@ class MessageManager(
      * withdrawn. See OwnerQueue.askFor. Not from the main thread.
      */
     fun processNewBytesAndTell(value: ByteArray, arrivedAt: Long = nowMs()): OwnerQueue.Asked<Unit> =
-        owner.askFor(change = bytesChange(value, arrivedAt))
+        toOwner.askFor(bytesChange(value, arrivedAt))
 
     /** What [value] asks for, as a change for the owner. What can be done here, on the caller's thread, is done here. */
     private fun bytesChange(value: ByteArray, arrivedAt: Long): () -> Unit {
