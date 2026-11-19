@@ -103,9 +103,10 @@ enum class Behind(val holdMs: Int) {
  *    threw: the same. The sign gives a frame that came unasked 100 ms a byte and then wants
  *    110 ms of quiet; but when a request of the sign crossed the push, the frame is its answer
  *    and it waits a second. 1010 ms likewise.
- *  - A pushed frame that was begun too late after its attention and written to its end: the
- *    sign may have asked into it and have only what came behind its own request, and then it
- *    wants the line quiet for a second and ten ms. 1010 ms likewise.
+ *  - A pushed frame that was begun too late after its attention and written to its end, or a
+ *    whole one that the sign sent something into: the sign may have asked into it and have
+ *    only what came behind its own request, and then it wants the line quiet for a second
+ *    and ten ms. 1010 ms likewise.
  *  - A pushed frame whole, the attention alone, or an attention whose frame was not begun (not
  *    taken, or too late to begin): the sign reads the frame, or listens 150 ms and asks 10 ms
  *    later; it needs 110 ms of quiet to get over a frame it could not read. 250 ms behind it
@@ -229,7 +230,7 @@ class LineClock(private val baud: Int, startNs: Long) {
  *     into the attention, into the guard, or while the frame was leaving. Reading a request
  *     away ends no pending change, ever. It can only open one again: when the push it came
  *     into had been called done, that frame is owed once more (the sign does not hear while
- *     it sends, and a sign that did not see the attention asks because bytes went by).
+ *     it sends; the link cannot tell a request the frame answered from one that damaged it).
  *  4. A push that failed (the attention or the frame was not taken in full, or the frame was
  *     not begun in time) leaves the change pending and is tried again. Rule 3 holds for
  *     whatever it did put on the line, or may have (a break call that threw): a request sent
@@ -268,7 +269,8 @@ class LineClock(private val baud: Int, startNs: Long) {
  *  SETS (the sign is behind):
  *  - [requestPush] / [want]: what the chooser shows has changed, while pushes are on.
  *  - [readRequest], rule 3: the sign sent something into a pushed frame that had been called
- *    done. It may not have the frame; it is owed again.
+ *    done. It may not have the frame; it is owed again, and not before the sign has had the
+ *    quiet it wants behind an answer it could not read ([Behind.TORN_FRAME]).
  *  ENDS IT, DONE: [frameWritten], and nothing else. It is called behind every write of a frame
  *    and ends the changes that were recorded before the frame was made, when the frame is the
  *    selection (a chooser message or, on leaving, the message that takes the sign out of its
@@ -292,7 +294,9 @@ class LineClock(private val baud: Int, startNs: Long) {
  *  - a pushed frame torn, or with a piece that may have come late: pending, tried again.
  *  - a pushed frame too late to begin (not written), or begun too late (written): pending,
  *    tried again; the app is not told.
- *  - a pushed frame that was DONE, and then something the sign sent into it: pending again.
+ *  - a pushed frame that was DONE, and then something the sign sent into it: pending again,
+ *    pushed again 1010 ms behind it. (A poll is the exception: only the polling firmware
+ *    polls; it does not listen for pushes, and its next poll is answered.)
  *  - the attention alone (leaving chooser mode): pending. It carries nothing and proves
  *    nothing. It is not raised a second time for the same change ([aloneGivenFor]: runs of
  *    zeros without end at a sign that may be showing a text); the sign's next request is
@@ -354,7 +358,7 @@ class SignLink(
     /** The changes up to this count are in the answer that is being made: counted before it is made. */
     private var answerCarries = 0L
 
-    /** The void time (rule 3) is that of a pushed frame that was called done; assigned by every push that gets that far. */
+    /** The void time (rule 3) is that of a pushed frame that was called done. */
     private var pushedFrameInVoid = false
 
     @Volatile
@@ -550,14 +554,17 @@ class SignLink(
             return false
         }
         lastHeardNs = readNs
-        if (pushedFrameInVoid && cameAfterNs - voidBeforeNs < 0) {
-            // SETS: the sign was sending while a pushed frame that was called done was on the
-            // line, or just before or behind it. It may not have that frame (it does not hear
-            // while it sends; or it did not see the attention and asks because bytes went by):
-            // the frame is owed again.
-            wanted.incrementAndGet()
-        }
         val last = buffer[count - 1]
+        if (pushedFrameInVoid && cameAfterNs - voidBeforeNs < 0 && last != POLL) {
+            // SETS: the sign was sending while a pushed frame that was called done was on the
+            // line, or just before it. It may not have that frame (it does not hear while it
+            // sends): the frame is owed again. And if the frame was a damaged answer to this
+            // request, the sign wants the line quiet for its second: not before that.
+            // (Not for a poll: only the polling firmware polls. It does not listen for pushes
+            // at all, and its next poll, within a quarter of a second, is answered.)
+            wanted.incrementAndGet()
+            clock.hold(Behind.TORN_FRAME)
+        }
         if (last != POLL && last != NEXT) {
             timing.dropped(readNs, buffer, count)
             log("Read $count bytes from $name that are not a request: [${String(buffer, 0, count)}]")
@@ -765,8 +772,10 @@ class SignLink(
         if (stopped) return
         val callNs = nanoTime()
         val raised = raiseAttention(mode)
-        // Rule 3, and rule 4 for an attention that was cut short: what the sign sends into it is void
+        // Rule 3, and rule 4 for an attention that was cut short: what the sign sends into it is void.
+        // It is the void of THIS push from here on, and this push has no frame that was called done
         voidBeforeNs = clock.freeAtNs
+        pushedFrameInVoid = false
         if (!raised) return pushFailed(if (clock.freeAtNs != lineWasNs) Behind.ATTENTION else null)
         val raisedNs = nanoTime()
         clock.quiet(ATTN_GUARD_MS)

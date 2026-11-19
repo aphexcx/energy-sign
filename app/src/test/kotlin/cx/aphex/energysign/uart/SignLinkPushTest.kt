@@ -793,10 +793,43 @@ class SignLinkPushTest {
         runUntil(230)
         assertEquals(1, drops().size)
         assertEquals(0, answers - 1)
-        runUntil(1_500)
-        // once more, 250 ms behind the frame; nothing crossed that one, and it is the last
-        assertEquals(listOf("tx[M1]@0", "tx[00x72]@100", "tx[H:$long]@170", "tx[00x72]@470", "tx[H:$long]@540"), wire())
+        runUntil(2_500)
+        // once more. The frame may be a damaged answer to that request, and then the sign wants the line quiet
+        // for a second and ten ms: not before that. Nothing crossed the second one, and it is the last
+        assertEquals(listOf("tx[M1]@0", "tx[00x72]@100", "tx[H:$long]@170", "tx[00x72]@1230", "tx[H:$long]@1300"), wire())
         assertEquals(listOf(long, long), told)
+    }
+
+    @Test
+    fun `a poll sent into a pushed frame brings no second push, a sign that polls does not listen for pushes and asks again by itself`() {
+        command(0, "B")
+        arrives(71, "?")
+        arrives(271, "?") // its next poll, and that one is answered
+        runUntil(3_000)
+        assertEquals(listOf("tx[00x72]@0", "tx[H:B]@70", "tx[{c:B}]@272"), wire())
+        assertEquals(1, drops().size)
+    }
+
+    @Test
+    fun `what the sign sent into an attention that failed, after a push that was done, holds the next try back no longer than an attention does`() {
+        signShowsAnOrdinaryMessage()
+        command(100, "B")
+        runUntil(390)
+        assertEquals(listOf("B"), told) // done: on the line from 170 to 172
+        posted.getOrPut(499 * ms) { mutableListOf() } += {
+            takesBeforeStuck = 30 // 21 ms of LOW get out, from 500 to 521
+            stuckUntilNs = 600 * ms
+        }
+        command(500, "C")
+        arrives(510, "~") // into the half run of zeros: void, and no frame was pushed there
+        runUntil(2_000)
+        assertEquals(1, drops().size)
+        val half = txs.single { it.zeros && it.bytes.size == 30 }
+        val again = txs.last { it.zeros }
+        assertEquals(72, again.bytes.size)
+        val behind = (again.atNs - half.goneAtNs) / ms
+        assertTrue(behind in SignLink.PUSH_SPACING_MS until SignLink.PUSH_SPACING_MS + 3, "again $behind ms behind the half")
+        assertEquals(listOf("B", "C"), told)
     }
 
     @Test
