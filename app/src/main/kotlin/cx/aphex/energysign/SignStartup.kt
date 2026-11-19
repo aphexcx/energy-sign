@@ -7,8 +7,8 @@ internal class SignStartup(private val warn: (String) -> Unit) {
         launchWarmUp: (Runnable) -> Unit,
         warmUp: () -> Unit,
         createBluetooth: () -> B,
-        startBluetooth: (B) -> Unit,
         subscribeToWrites: (B) -> Unit,
+        startBluetooth: (B) -> Unit,
         startDnsSd: () -> Unit,
         startLink: () -> Unit,
     ): B? {
@@ -17,9 +17,9 @@ internal class SignStartup(private val warn: (String) -> Unit) {
             launchWarmUp(Runnable { optional("JSON warm-up", warmUp) })
         }
         val bluetooth = optional("Bluetooth construction", createBluetooth)?.takeIf { manager ->
-            optional("Bluetooth start") { startBluetooth(manager) } != null
+            optional("Bluetooth write subscription") { subscribeToWrites(manager) } != null &&
+                optional("Bluetooth start") { startBluetooth(manager) } != null
         }
-        if (bluetooth != null) optional("Bluetooth write subscription") { subscribeToWrites(bluetooth) }
         optional("DNS-SD startup", startDnsSd)
         startLink()
         return bluetooth

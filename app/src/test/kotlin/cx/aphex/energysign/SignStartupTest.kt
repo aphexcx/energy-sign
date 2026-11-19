@@ -10,8 +10,8 @@ import kotlin.test.assertSame
 
 class SignStartupTest {
     private val order = listOf(
-        "messages", "JSON warm-up thread", "Bluetooth construction", "Bluetooth start",
-        "Bluetooth writes", "DNS-SD construction", "DNS-SD start", "UART",
+        "messages", "JSON warm-up thread", "Bluetooth construction", "Bluetooth writes",
+        "Bluetooth start", "DNS-SD construction", "DNS-SD start", "UART",
     )
 
     private class Run(val failAt: String? = null, val failure: Throwable = IllegalStateException()) {
@@ -58,7 +58,7 @@ class SignStartupTest {
                     if (step == "JSON warm-up") run.background.run()
                     val skipped = when (step) {
                         "Bluetooth construction" -> listOf("Bluetooth start", "Bluetooth writes")
-                        "Bluetooth start" -> listOf("Bluetooth writes")
+                        "Bluetooth writes" -> listOf("Bluetooth start")
                         "DNS-SD construction" -> listOf("DNS-SD start")
                         else -> emptyList()
                     }

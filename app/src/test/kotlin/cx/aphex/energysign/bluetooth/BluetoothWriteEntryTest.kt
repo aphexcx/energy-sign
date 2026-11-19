@@ -1,5 +1,6 @@
 package cx.aphex.energysign.bluetooth
 
+import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothManager
 import android.content.Context
@@ -31,6 +32,8 @@ import java.nio.file.Files
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executor
+import java.util.concurrent.FutureTask
+import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -93,7 +96,7 @@ class BluetoothWriteEntryTest {
         )
         // The call MainViewModel makes. That line itself is run by no test: the view model
         // cannot be built on the JVM.
-        server.receivedBytes.deliverEachWrite(manager::processNewBytes)
+        server.writes.deliverEachWrite(manager)
     }
 
     @AfterAll
@@ -119,7 +122,7 @@ class BluetoothWriteEntryTest {
 
     /** A write to the UART characteristic, as the Bluetooth stack delivers it. */
     private fun phoneWrites(command: String) {
-        server.onCharacteristicWriteRequest(null, 1, uartTx, false, true, 0, command.toByteArray(Charsets.UTF_8))
+        server.onCharacteristicWriteRequest(null, 1, uartTx, false, false, 0, command.toByteArray(Charsets.UTF_8))
     }
 
     /** The owner thread's turn. */
@@ -128,6 +131,16 @@ class BluetoothWriteEntryTest {
     }
 
     private fun stored(): List<String> = repo.marqueeMessages.map { it.str }
+
+    @Test
+    fun `a requested acknowledgement is refused if the owner never takes the command`() {
+        val before = stored()
+        val result = FutureTask { server.uartWriteStatus("!delete".toByteArray(), responseNeeded = true) }
+        Thread(result).start()
+        assertEquals(BluetoothGatt.GATT_FAILURE, result.get(10, TimeUnit.SECONDS))
+        ownerRuns()
+        assertEquals(before, stored())
+    }
 
     @Test
     fun `a write to the characteristic reaches the app`() {
@@ -181,7 +194,7 @@ class BluetoothWriteEntryTest {
         ownerRuns()
 
         assertEquals(emptyList(), unhandled.toList(), "nothing may reach the thread's handler of uncaught exceptions")
-        assertTrue(server.receivedBytes.hasObservers(), "the app must still be listening for writes")
+        assertTrue(server.writes.hasObservers(), "the app must still be listening for writes")
         assertEquals(emptyList(), failedChanges.toList(), "the command never reached the owner")
 
         phoneWrites("!next")

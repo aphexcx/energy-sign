@@ -16,7 +16,8 @@ import cx.aphex.energysign.MainViewModel
 import cx.aphex.energysign.SignStartup
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
-import io.reactivex.rxjava3.core.Observable
+import cx.aphex.energysign.message.MessageManager
+import io.reactivex.rxjava3.disposables.Disposable
 
 class EnergySignBluetoothManager(
     val context: Context,
@@ -36,7 +37,11 @@ class EnergySignBluetoothManager(
     private val energySignBluetoothGattServer: EnergySignBluetoothGattServer =
         EnergySignBluetoothGattServer(context, bluetoothManager, viewModel)
 
-    val receivedBytes: Observable<ByteArray> = energySignBluetoothGattServer.receivedBytes
+    private var writeSubscription: Disposable? = null
+
+    fun subscribeToWrites(manager: MessageManager) {
+        writeSubscription = energySignBluetoothGattServer.writes.deliverEachWrite(manager)
+    }
 
     init {
         energySignBluetoothGattServer.bluetoothStatusUpdates.subscribe {
@@ -147,9 +152,24 @@ class EnergySignBluetoothManager(
         closeServices = ::stopServices,
     )
 
-    fun start() = session.start()
+    fun start() {
+        try {
+            session.start()
+        } catch (failure: Throwable) {
+            detachWrites()
+            throw failure
+        }
+    }
 
-    fun stop() = session.stop()
+    fun stop() {
+        detachWrites()
+        session.stop()
+    }
+
+    private fun detachWrites() {
+        writeSubscription?.dispose()
+        writeSubscription = null
+    }
 
     private fun stopServices() {
         startup.optional("Bluetooth GATT cleanup", ::stopServer)

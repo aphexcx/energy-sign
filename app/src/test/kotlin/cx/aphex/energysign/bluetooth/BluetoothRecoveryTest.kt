@@ -38,8 +38,11 @@ class BluetoothRecoveryTest {
         closeServices = { published = false },
     )
 
+    private fun listen(consume: (ByteArray) -> Unit) =
+        gatt.writes.deliverEachWrite(post = consume, confirm = consume)
+
     private fun start(subscribe: () -> Unit = {
-        gatt.receivedBytes.deliverEachWrite { received.add(String(it)) }
+        listen { received.add(String(it)) }
     }) {
         startup.start(
             prepareMessages = {}, launchWarmUp = {}, warmUp = {},
@@ -89,8 +92,17 @@ class BluetoothRecoveryTest {
     }
 
     @Test
+    fun `an unsupported fragment is refused before it can run as a complete command`() {
+        listen { received.add(String(it)) }
+        val command = "!delete".toByteArray()
+        assertEquals(BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED, gatt.uartWriteStatus(command, preparedWrite = true))
+        assertEquals(BluetoothGatt.GATT_INVALID_OFFSET, gatt.uartWriteStatus(command, offset = 1))
+        assertTrue(received.isEmpty())
+    }
+
+    @Test
     fun `failure to hand a write to the consumer is reported and the next write still arrives`() {
-        val listener = gatt.receivedBytes.deliverEachWrite {
+        val listener = listen {
             if (it[0] == 0.toByte()) throw IllegalStateException()
             received.add(String(it))
         }

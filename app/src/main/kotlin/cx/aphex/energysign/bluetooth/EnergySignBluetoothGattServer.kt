@@ -20,8 +20,9 @@ class EnergySignBluetoothGattServer(
     val viewModel: MainViewModel
 ) : BluetoothGattServerCallback() {
 
+    @Volatile
     private var gattServer: BluetoothGattServer? = null
-    val receivedBytes: PublishRelay<ByteArray> = PublishRelay.create()
+    internal val writes: PublishRelay<GattWrite> = PublishRelay.create()
 
     val bluetoothStatusUpdates: PublishRelay<BluetoothStatusUpdate> = PublishRelay.create()
 
@@ -126,45 +127,28 @@ class EnergySignBluetoothGattServer(
         offset: Int,
         value: ByteArray
     ) {
-        when (characteristic.uuid) {
-//                CHARACTERISTIC_INTERACTOR_UUID -> {
-//                    logD("Write Interactor String! Value: [${String(value!!)}]")
-//                    processNewReceivedString(value)
-//                    bluetoothGattServer?.sendResponse(device,
-//                            requestId,
-//                            BluetoothGatt.GATT_SUCCESS,
-//                            0,
-//                            currentString)
-//                }
-            NordicUartServiceProfile.NORDIC_UART_TX_UUID -> {
-                logD("Uart TX characteristic write: [${String(value)}]")
-                val status = uartWriteStatus(value)
-                gattServer?.sendResponse(
-                    device,
-                    requestId,
-                    status,
-                    0,
-                    "Uart Write response".toByteArray()
-                )
-            }
-            else -> {
-                // Invalid characteristic
-                logW("Invalid Characteristic Write: " + characteristic.uuid)
-                gattServer?.sendResponse(
-                    device,
-                    requestId,
-                    BluetoothGatt.GATT_FAILURE,
-                    0,
-                    null
-                )
-            }
+        val server = gattServer
+        val status = if (characteristic.uuid == NordicUartServiceProfile.NORDIC_UART_TX_UUID) {
+            logD("Uart TX characteristic write: [${String(value)}]")
+            uartWriteStatus(value, preparedWrite, offset, responseNeeded)
+        } else {
+            logW("Invalid Characteristic Write: " + characteristic.uuid)
+            BluetoothGatt.GATT_FAILURE
         }
-
+        if (responseNeeded) {
+            val reply = if (status == BluetoothGatt.GATT_SUCCESS) "Uart Write response".toByteArray() else null
+            server?.sendResponse(device, requestId, status, 0, reply)
+        }
     }
 
-    internal fun uartWriteStatus(value: ByteArray): Int {
-        receivedBytes.accept(value)
-        return BluetoothGatt.GATT_SUCCESS
+    internal fun uartWriteStatus(
+        value: ByteArray, preparedWrite: Boolean = false, offset: Int = 0, responseNeeded: Boolean = true,
+    ): Int {
+        if (preparedWrite) return BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED
+        if (offset != 0) return BluetoothGatt.GATT_INVALID_OFFSET
+        val write = GattWrite(value, responseNeeded)
+        writes.accept(write)
+        return if (write.delivered) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE
     }
 
     override fun onCharacteristicReadRequest(
