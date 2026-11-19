@@ -70,10 +70,10 @@ class MessageManager(
      * objects in every ad round, so that they can be found in the queue again when the track
      * changes (by what they ARE, not by what they say: an ad of the owner's may say the same).
      */
-    private val trackHeading: List<Message> = listOf(
-        Message.ColorMessage.OneByOneMessage("CURRENT", context.getColor(R.color.twitch)),
-        Message.ColorMessage.OneByOneMessage("TRACK:", context.getColor(R.color.twitch)),
-    )
+    private val trackHeading: List<Message> = startup.optional("Track heading") {
+        val color = context.getColor(R.color.twitch)
+        listOf(Message.ColorMessage.OneByOneMessage("CURRENT", color), Message.ColorMessage.OneByOneMessage("TRACK:", color))
+    }.orEmpty()
 
     private val defaultAds = startup.optional("Default ads") {
         val blue = context.getColor(R.color.icon_defaultblue)

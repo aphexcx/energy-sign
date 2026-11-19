@@ -33,10 +33,12 @@ class EnergySignBluetoothManager(
     private var server: EnergySignBluetoothGattServer? = null
     private var cancelAdvertising: (() -> Unit)? = null
 
-    val bluetoothManager: BluetoothManager =
-        context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-
-    private val bluetoothAdapter: BluetoothAdapter = bluetoothManager.adapter
+    // HOME can start while Android is still bringing Bluetooth up. Install the listeners
+    // first, then look up the service again on each adapter event that needs it.
+    private val bluetoothManager: BluetoothManager
+        get() = checkNotNull(context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)
+    private val bluetoothAdapter: BluetoothAdapter
+        get() = checkNotNull(bluetoothManager.adapter)
 
     private var writeSubscription: Disposable? = null
 
@@ -66,7 +68,7 @@ class EnergySignBluetoothManager(
                     logD("bluetoothReceiver: STATE_ON")
                     session.adapterOn()
                 }
-                BluetoothAdapter.STATE_OFF -> {
+                BluetoothAdapter.STATE_TURNING_OFF, BluetoothAdapter.STATE_OFF -> {
                     logD("bluetoothReceiver: STATE_OFF")
                     session.adapterOff()
                 }
@@ -124,7 +126,7 @@ class EnergySignBluetoothManager(
     private val session: BluetoothSession = BluetoothSession(
         startup = startup,
         register = {
-            if (!context.checkBluetoothSupport(bluetoothAdapter)) {
+            if (!context.packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE)) {
                 throw UnsupportedOperationException("Bluetooth LE unavailable")
             }
             receivers.register(bluetoothReceiver, bondStateReceiver)
@@ -223,11 +225,3 @@ class EnergySignBluetoothManager(
         advertiser.startAdvertising(settings, data, callback)
     }
 }
-
-/**
- * Verify the level of Bluetooth support provided by the hardware.
- * @param bluetoothAdapter System [BluetoothAdapter].
- * @return true if Bluetooth is properly supported, false otherwise.
- */
-fun Context.checkBluetoothSupport(bluetoothAdapter: BluetoothAdapter?): Boolean =
-    bluetoothAdapter != null && packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE)
