@@ -60,7 +60,12 @@ android {
     testOptions {
         unitTests.all {
             useJUnitPlatform()
+            // a test that hangs fails, it does not hold the build
+            systemProperty 'junit.jupiter.execution.timeout.default', '60 s'
         }
+        // android.util.Log and friends return 0/null in JVM tests instead of throwing
+        // (MessageManagerOwnerTest runs the real MessageManager, which logs)
+        unitTests.returnDefaultValues = true
     }
 }
 

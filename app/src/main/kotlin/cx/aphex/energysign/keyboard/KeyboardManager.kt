@@ -3,20 +3,25 @@ package cx.aphex.energysign.keyboard
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.message.Message
 import cx.aphex.energysign.message.MessageRepository
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.launch
+import cx.aphex.energysign.message.OwnerQueue
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 
+/*
+ * THREADS. The input belongs to the thread that owns the message state (see OwnerQueue). Keys
+ * arrive on the main thread: each key function posts its change to the owner and returns. The
+ * owner alone reads the echo (handleKeyboardInput, from MessageManager.getNextMessage).
+ */
 object KeyboardManager : KoinComponent {
     private val msgRepo: MessageRepository by inject()
+    private val owner: OwnerQueue by inject()
 
-    private val _newSubmittedKeyboardMessage = MutableSharedFlow<String>()
-    val newSubmittedKeyboardMessage: SharedFlow<String> = _newSubmittedKeyboardMessage.asSharedFlow()
+    /**
+     * Gets the text of a message that was submitted with Enter. Called on the owner thread, in
+     * the same step that took the text and ended the input, so nothing can clear it in between.
+     */
+    @Volatile
+    var onSubmitted: (String) -> Unit = {}
 
 
     private var keyboardInputStartedAtMs: Long = 0
@@ -28,16 +33,11 @@ object KeyboardManager : KoinComponent {
 
     private var keyboardStringBuilder: StringBuilder = StringBuilder()
 
-    suspend fun notifyNewKeyboardString(input: String) {
-        isMessageSubmitted = true
-        _newSubmittedKeyboardMessage.emit(input)
-    }
-
-    fun processNewKeyboardKey(key: Char) {
+    fun processNewKeyboardKey(key: Char): Unit = owner.post {
         //TODO key.toInt() needed here?
         if (key.code == 0) {
             logD("Invalid key!")
-            return
+            return@post
         }
         isInKeyboardInputMode = true
         isMessageSubmitted = false
@@ -49,7 +49,7 @@ object KeyboardManager : KoinComponent {
         keyboardStringBuilder.append(key)
     }
 
-    fun submitKeyboardInput() {
+    fun submitKeyboardInput(): Unit = owner.post {
         val totalKeyboardInputTimeElapsed = System.currentTimeMillis() - keyboardInputStartedAtMs
 //        if (keyboardStringBuilder.length < 4) {
 //            // LONGER!\
@@ -63,11 +63,10 @@ object KeyboardManager : KoinComponent {
             endKeyboardInput()
         } else {
             if (totalKeyboardInputTimeElapsed > MINIMUM_INPUT_ENTRY_PERIOD) {
-                CoroutineScope(Dispatchers.Main).launch {
-                    val newSubmission = keyboardStringBuilder.toString()
-                    notifyNewKeyboardString(newSubmission)
-                    endKeyboardInput()
-                }
+                val newSubmission = keyboardStringBuilder.toString()
+                isMessageSubmitted = true
+                endKeyboardInput()
+                onSubmitted(newSubmission)
             }
         }
     }
@@ -78,7 +77,7 @@ object KeyboardManager : KoinComponent {
         isInKeyboardInputMode = false
     }
 
-    fun deleteKey() {
+    fun deleteKey(): Unit = owner.post {
         if (keyboardStringBuilder.isNotEmpty()) {
             lastKeyboardInputReceivedAtMs = System.currentTimeMillis()
             keyboardStringBuilder.deleteCharAt(keyboardStringBuilder.lastIndex)
@@ -86,7 +85,7 @@ object KeyboardManager : KoinComponent {
     }
 
 
-    fun escapeKey() {
+    fun escapeKey(): Unit = owner.post {
         //TODO fix bug -- pressing esc key causes type flashy error to be displayed
 
         // If not blank and esc key was pressed:
@@ -102,6 +101,7 @@ object KeyboardManager : KoinComponent {
         }
     }
 
+    /** The echo of what is being typed, null when nothing is. Owner thread only. */
     fun handleKeyboardInput(): Message.KeyboardEcho? {
         if (isInKeyboardInputMode) {
 
