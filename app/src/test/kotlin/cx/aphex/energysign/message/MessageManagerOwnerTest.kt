@@ -404,4 +404,468 @@ class MessageManagerOwnerTest {
         }
         assertEquals("1/5 MESSAGE 1", shown())
     }
+
+    // ---- ads: the command, the restart, the period (PR 5)
+
+    /**
+     * The app as it is after a start on [home], its files directory: a MessageManager of its own, with its own
+     * lists and its own saver (run by hand), on the owner of this test. Building a second one
+     * on the same directory is a restart.
+     */
+    private inner class App(val home: File) {
+        val unsaved = mutableListOf<Runnable>()
+        val repo = MessageRepository(saver = Executor { unsaved += it })
+        val manager: MessageManager
+
+        init {
+            // (a MessageManager takes the keyboard's Enter for itself; the one of this test keeps it)
+            val submitted = KeyboardManager.onSubmitted
+            manager = MessageManager(
+                object : ContextWrapper(null) {
+                    override fun getFilesDir(): File = home
+                },
+                repo,
+                owner,
+            )
+            KeyboardManager.onSubmitted = submitted
+        }
+
+        fun phone(command: String) = manager.processNewBytes(command.toByteArray())
+        fun saverRuns() {
+            while (unsaved.isNotEmpty()) unsaved.removeAt(0).run()
+        }
+
+        val adsFile get() = File(home, "ads.json")
+        val periodFile get() = File(home, "ad-period.txt")
+    }
+
+    private fun newFilesDir(): File = Files.createTempDirectory(dir.toPath(), "ads").toFile()
+
+    private val A = "🅰" // the A button: the ad command
+    private val CL = "🆑" // a chonky ad
+    private val O = "🅾" // a one-by-one ad
+    private val CLOCK = "🕰"
+    private val INVADER = "👾"
+
+    @Test
+    fun `an ad command changes nothing until the owner runs it, then the next requests get the ads`() {
+        val app = App(newFilesDir())
+
+        app.phone("!$A\n${CL}I <3 U\n$O$CLOCK${CLOCK}BYE")
+        assertEquals(0, app.repo.oneTimeMessages.size)
+
+        ownerRuns()
+        val first = app.manager.getNextMessage()
+        val second = app.manager.getNextMessage()
+
+        assertTrue(first is Message.ColorMessage.ChonkySlide)
+        assertEquals("I ${Message.HEART} U", first.str)
+        assertTrue(second is Message.ColorMessage.OneByOneMessage)
+        assertEquals("BYE", second.str)
+        assertEquals(3000, (second as Message.ColorMessage.OneByOneMessage).delayMs.toInt())
+    }
+
+    @Test
+    fun `the owner writes no ad file, the saver does, and the file is whole or not there`() {
+        val app = App(newFilesDir())
+
+        app.phone("!$A\n${CL}HELLO")
+        ownerRuns()
+
+        assertEquals(1, app.unsaved.size)
+        assertTrue(!app.adsFile.exists(), "nothing on disk before the saver runs")
+
+        app.saverRuns()
+
+        assertEquals(listOf("HELLO"), AdCodec.decode(app.adsFile.readText()).map { it.str })
+        assertEquals(listOf("ads.json"), app.home.list()!!.filter { it.startsWith("ads") }, "nothing left beside it")
+    }
+
+    @Test
+    fun `a later change to the ads does not get into an earlier save`() {
+        val app = App(newFilesDir())
+
+        app.phone("!$A\n${CL}FIRST")
+        ownerRuns()
+        app.phone("!$A\n${CL}SECOND")
+        ownerRuns()
+        assertEquals(2, app.unsaved.size)
+
+        app.unsaved.removeAt(0).run()
+        assertEquals(listOf("FIRST"), AdCodec.decode(app.adsFile.readText()).map { it.str })
+        app.saverRuns()
+        assertEquals(listOf("SECOND"), AdCodec.decode(app.adsFile.readText()).map { it.str })
+    }
+
+    @Test
+    fun `the ads that were set are shown again after a restart`() {
+        val filesDir = newFilesDir()
+        App(filesDir).run {
+            phone("!$A\n${CL}HELLO\n$O${CLOCK}WORLD\n$INVADER")
+            ownerRuns()
+            saverRuns()
+        }
+
+        val restarted = App(filesDir)
+
+        // nothing stored and nothing queued: a request gets the ad round
+        val shown = (1..3).map { restarted.manager.getNextMessage() }
+        assertTrue(shown[0] is Message.ColorMessage.ChonkySlide)
+        assertEquals("HELLO", shown[0].str)
+        assertTrue(shown[1] is Message.ColorMessage.OneByOneMessage)
+        assertEquals("WORLD", shown[1].str)
+        assertEquals(2000, (shown[1] as Message.ColorMessage.OneByOneMessage).delayMs.toInt())
+        assertTrue(shown[2] is Message.ColorMessage.IconInvaders.Enemy1)
+        assertEquals(emptyList(), restarted.unsaved, "starting writes nothing")
+    }
+
+    @Test
+    fun `a first start shows the default ads and writes no file`() {
+        val app = App(newFilesDir())
+
+        assertTrue(app.manager.getNextMessage() is Message.ColorMessage.IconInvaders.Enemy1)
+        assertTrue(app.manager.getNextMessage() is Message.ColorMessage.IconInvaders.Enemy2)
+        assertTrue(!app.adsFile.exists())
+        assertEquals(emptyList(), app.unsaved)
+    }
+
+    @Test
+    fun `with no ads and no messages a request is answered with a starfield, before and after a restart`() {
+        val filesDir = newFilesDir()
+        val app = App(filesDir)
+        app.phone("!$A") // the ad list emptied on purpose
+        ownerRuns()
+        app.saverRuns()
+        assertEquals(0, app.repo.marqueeMessages.size)
+
+        repeat(3) { assertTrue(app.manager.getNextMessage() is Message.Starfield) }
+
+        val restarted = App(filesDir)
+        assertEquals("[]", restarted.adsFile.readText())
+        repeat(3) { assertTrue(restarted.manager.getNextMessage() is Message.Starfield, "the defaults do not come back") }
+
+        // and a message that arrives is shown at once: its announcement, then the message, and no starfield before them
+        restarted.manager.processNewUserMessage("HELLO")
+        ownerRuns()
+        val next = (1..3).map { restarted.manager.getNextMessage() }
+        assertSame(Message.CountDownAnnouncement.NewMessageAnnouncement, next[0])
+        assertTrue(next[1] is Message.Marquee.User)
+        assertEquals("HELLO", next[1].str)
+        assertEquals("HELLO", next[2].str, "the one stored message comes round again")
+    }
+
+    @Test
+    fun `an ad list that is only the place of a track, with no track and no messages, gets a starfield too`() {
+        val filesDir = newFilesDir()
+        val app = App(filesDir)
+        app.phone("!$A\n\uD83D\uDEE4")
+        ownerRuns()
+        app.saverRuns()
+        assertEquals("""[{"str":"","type":"T"}]""", app.adsFile.readText())
+
+        // the ad list is not empty, and still there is nothing to show
+        repeat(3) { assertTrue(app.manager.getNextMessage() is Message.Starfield) }
+
+        val restarted = App(filesDir)
+        repeat(3) { assertTrue(restarted.manager.getNextMessage() is Message.Starfield) }
+
+        restarted.manager.processNewUserMessage("HELLO")
+        ownerRuns()
+        assertSame(Message.CountDownAnnouncement.NewMessageAnnouncement, restarted.manager.getNextMessage())
+        assertEquals("HELLO", restarted.manager.getNextMessage().str)
+    }
+
+    @Test
+    fun `an ad file that cannot be read gives the default ads and is left as it is`() {
+        val filesDir = newFilesDir()
+        val broken = "[{\"str\":\"CUT OFF\",\"ty"
+        File(filesDir, "ads.json").writeText(broken)
+
+        val app = App(filesDir)
+
+        assertTrue(app.manager.getNextMessage() is Message.ColorMessage.IconInvaders.Enemy1)
+        assertEquals(broken, app.adsFile.readText())
+        assertEquals(emptyList(), app.unsaved)
+    }
+
+    private fun adEveryFlash(app: App): String? =
+        app.repo.oneTimeMessages.filterIsInstance<Message.FlashingAnnouncement>().singleOrNull()?.str
+
+    @Test
+    fun `the ad period is set by the owner, written by the saver and there again after a restart`() {
+        val filesDir = newFilesDir()
+        val app = App(filesDir)
+
+        app.phone("!A3")
+        assertNull(adEveryFlash(app))
+        ownerRuns()
+
+        assertEquals("AD EVERY=3", adEveryFlash(app))
+        assertTrue(!app.periodFile.exists(), "nothing on disk before the saver runs")
+        app.saverRuns()
+        assertEquals("3", app.periodFile.readText())
+
+        // a restart: a refused period shows the value that stays, which is the restored one
+        val restarted = App(filesDir)
+        restarted.phone("!A0")
+        ownerRuns()
+        assertEquals("AD EVERY=3", adEveryFlash(restarted))
+    }
+
+    @Test
+    fun `a period of zero or less is refused, nothing is saved and the next messages are still served`() {
+        val app = App(newFilesDir())
+        app.repo.marqueeMessages.addAll((1..3).map { Message.Marquee.User("MESSAGE $it") })
+
+        app.phone("!A0")
+        ownerRuns()
+        assertEquals("AD EVERY=8", adEveryFlash(app))
+        app.repo.oneTimeMessages.clear()
+        app.phone("!A-2")
+        ownerRuns()
+        assertEquals("AD EVERY=8", adEveryFlash(app))
+        app.repo.oneTimeMessages.clear()
+
+        assertEquals(emptyList(), app.unsaved)
+        // with a period of 0 the first stored message threw (a division by zero)
+        assertEquals(
+            listOf("MESSAGE 1", "MESSAGE 2", "MESSAGE 3", "MESSAGE 1"),
+            (1..4).map { app.manager.getNextMessage().str }
+        )
+    }
+
+    @Test
+    fun `after a restart on a file of the old app, what goes to the sign is held to the rules of an ad line`() {
+        // As the old app saved them: an ad of 120 apostrophes (720 bytes of text as JSON) and an
+        // ad with 32 clocks, whose 33000 ms had overflowed to -32536.
+        val filesDir = newFilesDir()
+        val legacy = "[{\"dly\":1000,\"str\":\"" + "\\u0027".repeat(120) + "\",\"type\":\"O\",\"b\":3,\"g\":2,\"r\":1}," +
+                "{\"dly\":-32536,\"scroll\":false,\"str\":\"LONG\",\"type\":\"C\",\"b\":3,\"g\":2,\"r\":1}]"
+        File(filesDir, "ads.json").writeText(legacy)
+
+        val restarted = App(filesDir)
+        // nothing stored and nothing queued: the requests get the ad round, twice
+        val sent = (1..4).map { restarted.manager.getNextMessage() }
+
+        sent.forEach { message ->
+            val bytes = SignResponder.GSON.toJson(message).toByteArray().size
+            assertTrue(bytes <= AdSizeLimit.MAX_AD_JSON_BYTES, "$bytes bytes went to the sign")
+        }
+        val apostrophes = sent[0] as Message.ColorMessage.OneByOneMessage
+        assertTrue(apostrophes.str.isNotEmpty() && apostrophes.str.all { it == '\'' })
+        val long = sent[1] as Message.ColorMessage.ChonkySlide
+        assertEquals("LONG", long.str)
+        assertEquals(30_000, long.delayMs.toInt())
+        assertEquals(listOf(apostrophes.str, "LONG"), sent.drop(2).map { it.str }, "the next ad round is the same")
+        // reading changes nothing on disk; the next ad command writes the file anew
+        assertEquals(legacy, restarted.adsFile.readText())
+        assertEquals(emptyList(), restarted.unsaved)
+    }
+
+    @Test
+    fun `an ad without a text never goes to the sign, from a command or from the file`() {
+        // from a command: the second line is a chonky ad with a clock and no text
+        val filesDir = newFilesDir()
+        val app = App(filesDir)
+        app.phone("!$A\n${CL}ONE\n$CL$CLOCK\n${O}TWO")
+        ownerRuns()
+        app.saverRuns()
+
+        assertEquals(listOf("ONE", "TWO", "ONE", "TWO"), (1..4).map { app.manager.getNextMessage().str })
+        assertEquals(listOf("ONE", "TWO"), AdCodec.decode(app.adsFile.readText()).map { it.str })
+
+        // from a file of the old app, which saved the empty ad
+        val oldDir = newFilesDir()
+        File(oldDir, "ads.json").writeText(
+            "[{\"dly\":2000,\"scroll\":false,\"str\":\"\",\"type\":\"C\",\"b\":3,\"g\":2,\"r\":1}," +
+                    "{\"dly\":1000,\"str\":\"TWO\",\"type\":\"O\",\"b\":3,\"g\":2,\"r\":1}]"
+        )
+        val restarted = App(oldDir)
+
+        assertEquals(listOf("TWO", "TWO", "TWO"), (1..3).map { restarted.manager.getNextMessage().str })
+    }
+
+    @Test
+    fun `after a restart the saved period is the one the ads are shown by`() {
+        val filesDir = newFilesDir()
+        App(filesDir).run {
+            phone("!A3")
+            ownerRuns()
+            saverRuns()
+        }
+
+        val restarted = App(filesDir)
+        restarted.repo.marqueeMessages.addAll((1..7).map { Message.Marquee.User("MESSAGE $it") })
+
+        // three stored messages, then the ad round (the two default icons, "1" and "2"), and again
+        assertEquals(
+            listOf(
+                "MESSAGE 1", "MESSAGE 2", "MESSAGE 3", "1", "2",
+                "MESSAGE 4", "MESSAGE 5", "MESSAGE 6", "1", "2",
+                "MESSAGE 7",
+            ),
+            (1..11).map { restarted.manager.getNextMessage().str }
+        )
+    }
+
+    @Test
+    fun `a new period is the one the ads are shown by at once, and a refused one changes nothing`() {
+        val app = App(newFilesDir())
+        app.repo.marqueeMessages.addAll((1..5).map { Message.Marquee.User("MESSAGE $it") })
+        app.phone("!A2")
+        app.phone("!A0")
+        ownerRuns()
+        app.repo.oneTimeMessages.clear() // the two "AD EVERY=2" flashes and their stars
+
+        assertEquals(
+            listOf("MESSAGE 1", "MESSAGE 2", "1", "2", "MESSAGE 3", "MESSAGE 4", "1", "2", "MESSAGE 5"),
+            (1..9).map { app.manager.getNextMessage().str }
+        )
+    }
+
+    @Test
+    fun `the saver keeps only the newest message list, and every ad save and period save beside it`() {
+        // The message list has one place at the saver, where a newer list takes the place of one
+        // that is waiting. Ad saves and period saves do not share that place: each is a job of
+        // its own, in the order it was asked for.
+        val app = App(newFilesDir())
+        app.phone("!$A\n${CL}FIRST")   // an ad save
+        app.phone("ONE")               // a message save
+        app.phone("!A4")               // a period save
+        app.phone("TWO")               // a message save: takes the place of the one waiting
+        app.phone("!$A\n${CL}SECOND")  // an ad save
+        app.phone("!A6")               // a period save
+        app.phone("THREE")             // a message save, again in the one place
+        ownerRuns()
+
+        // ad, the message list (one job for the three saves), period, ad, period
+        assertEquals(5, app.unsaved.size)
+
+        app.unsaved.removeAt(0).run()
+        assertEquals(listOf("FIRST"), AdCodec.decode(app.adsFile.readText()).map { it.str })
+        assertTrue(!app.periodFile.exists())
+
+        app.unsaved.removeAt(0).run()
+        assertEquals(listOf("ONE", "TWO", "THREE"), File(app.home, "signstrings.txt").readLines(), "the newest list, whole")
+        assertEquals(listOf("FIRST"), AdCodec.decode(app.adsFile.readText()).map { it.str }, "a message save writes no ad file")
+
+        app.unsaved.removeAt(0).run()
+        assertEquals("4", app.periodFile.readText())
+
+        app.unsaved.removeAt(0).run()
+        assertEquals(listOf("SECOND"), AdCodec.decode(app.adsFile.readText()).map { it.str })
+        assertEquals("4", app.periodFile.readText())
+
+        app.unsaved.removeAt(0).run()
+        assertEquals("6", app.periodFile.readText())
+        assertEquals(listOf("ONE", "TWO", "THREE"), File(app.home, "signstrings.txt").readLines())
+    }
+
+    @Test
+    fun `the line of a track holds only what the sign can show, in the ad round and in the announcement`() {
+        // a bell in the artist; a NUL and a vertical tab in the title: the tab is a thin space and stays
+        val app = App(newFilesDir())
+        app.manager.processNowPlayingTrack(BeatLinkTrack(id = 2, title = "A\u0000B\u000bC", artist = "D\u0007J"))
+        ownerRuns()
+        app.phone("!$A\n\uD83D\uDEE4")
+        ownerRuns()
+
+        // the ad round (CURRENT, TRACK:, the track), then the announcement (NOW PLAYING, the track, stars)
+        val sent = (1..6).map { com.google.gson.JsonParser.parseString(frameFor(app)).asJsonObject }
+
+        assertEquals(listOf("O", "O", "T", "F", "T", "S"), sent.map { it["type"].asString })
+        assertEquals("DJ - AB\u000bC", sent[2]["str"].asString, "the line in the ad round")
+        assertEquals("DJ - AB\u000bC", sent[4]["str"].asString, "the line of the announcement")
+    }
+
+    @Test
+    fun `the line of a track is made, and cut to fit, by the thread that brings the track, not by the owner`() {
+        // The cut is logged from inside the fitting, so the thread that logs it is the thread that did it.
+        val app = App(newFilesDir())
+        val cutBy = java.util.concurrent.CopyOnWriteArrayList<String>()
+        // (only this test's track, "DJ - BBB...": the log also hands a new listener its last line)
+        val watching = cx.aphex.energysign.ScreenLogger.logLines.subscribe { line ->
+            if ("Ad cut from" in line && "DJ - BBBB" in line) cutBy += Thread.currentThread().name
+        }
+        try {
+            val call = FutureTask(Callable {
+                app.manager.processNowPlayingTrack(BeatLinkTrack(id = 7, title = "B".repeat(750), artist = "DJ"))
+            })
+            Thread(call, "beatlink").start()
+            // the owner (this thread) has not run anything yet, and the line is made already
+            val deadline = System.currentTimeMillis() + 5_000
+            while (cutBy.isEmpty() && System.currentTimeMillis() < deadline) Thread.sleep(1)
+            assertEquals(listOf("beatlink"), cutBy.toList())
+            assertFalse(call.isDone, "the caller still waits for the owner to take the track in")
+            assertEquals(0, app.repo.oneTimeMessages.size)
+
+            while (!call.isDone) {
+                ownerRuns()
+                Thread.sleep(1)
+            }
+            call.get()
+        } finally {
+            watching.dispose()
+        }
+
+        assertEquals(listOf("beatlink"), cutBy.toList(), "the owner made nothing a second time")
+        val track = app.repo.oneTimeMessages.filterIsInstance<Message.NowPlayingTrackMessage>().single()
+        assertEquals(500, SignResponder.GSON.toJson(track).toByteArray(Charsets.UTF_8).size)
+        // and the ad round takes that same message: nothing is fitted again for it
+        app.phone("!$A\n\uD83D\uDEE4")
+        ownerRuns()
+        assertTrue(app.repo.oneTimeMessages.filterIsInstance<Message.NowPlayingTrackMessage>().all { it === track })
+        assertEquals(listOf("beatlink"), cutBy.toList())
+    }
+
+    @Test
+    fun `an empty track from the caller's thread ends the now-playing line`() {
+        val app = App(newFilesDir())
+        app.phone("!$A\n\uD83D\uDEE4\n${O}AD")
+        ownerRuns()
+        app.repo.oneTimeMessages.clear()
+
+        val playing = FutureTask(Callable { app.manager.processNowPlayingTrack(BeatLinkTrack(id = 8, title = "Song", artist = "DJ")) })
+        Thread(playing, "beatlink").start()
+        while (!playing.isDone) { ownerRuns(); Thread.sleep(1) }
+        app.repo.oneTimeMessages.clear()
+        val stopped = FutureTask(Callable { app.manager.processNowPlayingTrack(BeatLinkTrack(id = 0, title = "", artist = "", isEmpty = true)) })
+        Thread(stopped, "beatlink").start()
+        while (!stopped.isDone) { ownerRuns(); Thread.sleep(1) }
+
+        // the ad round an empty track asks for has no track in it any more
+        assertEquals(listOf("AD"), app.repo.oneTimeMessages.map { it.str })
+    }
+
+    /** One request of the sign, answered by the real responder: the text that goes out on the wire. */
+    private fun frameFor(app: App): String {
+        var frame: String? = null
+        SignResponder(nextMessage = { app.manager.getNextMessage() }, write = { reply, _ -> frame = reply; true })
+            .onRequest(byteArrayOf('~'.code.toByte()), 1)
+        return frame!!
+    }
+
+    @Test
+    fun `the now-playing line is held to the limit, in the ad round and when the track is announced`() {
+        // A track with a title of 750 characters, then an ad list that is the place of the track.
+        val app = App(newFilesDir())
+        app.manager.processNowPlayingTrack(BeatLinkTrack(id = 1, title = "A".repeat(750), artist = "DJ"))
+        ownerRuns()
+        app.phone("!$A\n🛤")
+        ownerRuns()
+
+        // the ad round (CURRENT, TRACK:, the track), then the announcement queued before it (NOW PLAYING, the track, stars)
+        val frames = (1..6).map { frameFor(app) }
+        val sent = frames.map { com.google.gson.JsonParser.parseString(it).asJsonObject }
+
+        assertEquals(listOf("O", "O", "T", "F", "T", "S"), sent.map { it["type"].asString })
+        frames.forEachIndexed { i, frame ->
+            val bytes = frame.toByteArray(Charsets.UTF_8).size
+            assertTrue(bytes <= 500, "answer ${i + 1} is $bytes bytes")
+        }
+        listOf(sent[2], sent[4]).forEach { track ->
+            assertTrue(track["str"].asString.startsWith("DJ - AAAA"), "the beginning of the line is kept")
+        }
+        assertEquals(500, frames[2].toByteArray(Charsets.UTF_8).size, "as much of it as fits")
+    }
 }

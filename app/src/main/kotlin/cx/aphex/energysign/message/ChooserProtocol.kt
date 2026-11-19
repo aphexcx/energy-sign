@@ -44,6 +44,9 @@ object ChooserProtocol {
     /** Shown in place of the text when there is no message at the chooser index. */
     const val EMPTY_TEXT: String = "<empty>"
 
+    /** The longest frame the sign can take (its buffer). A longer one is not sent. */
+    const val MAX_FRAME_BYTES: Int = 700
+
     /** Request byte of a chooser poll. Every other byte means "send the next message". */
     const val POLL_REQUEST: Char = '?'
 
@@ -120,6 +123,10 @@ object ChooserProtocol {
  * [write] gets the reply and what it is to the sign (a poll report goes out about five times a
  * second in chooser mode; the caller keeps those out of the log), and says whether all of it
  * went out. A message that did not go out is handed to [unsent]: it was taken for nothing.
+ * A message whose frame is longer than the sign can take is not written at all: the sign gets
+ * nothing for that request and asks again, and gets the message after it. [tooLong] hears of it;
+ * it is not handed back (it would be the next message again, for ever). A stored message stays
+ * in the list.
  *
  * Called on the sign link thread, one call at a time, and only for a request the sign really
  * made: [nextMessage] takes the message it returns.
@@ -128,6 +135,7 @@ class SignResponder(
     private val nextMessage: () -> Message,
     private val write: (frame: String, reply: Reply) -> Boolean,
     private val unsent: (message: Message) -> Unit = {},
+    private val tooLong: (message: Message, bytes: Int) -> Unit = { _, _ -> },
 ) {
     /**
      * Replies to the first [count] bytes of [buffer], one request of the sign. Returns the
@@ -143,7 +151,13 @@ class SignResponder(
         }
 
         // `~`, or a poll outside chooser mode: the next message in full.
-        if (!write(GSON.toJson(message), if (message is Message.Chooser) Reply.CHOOSER else Reply.MESSAGE)) {
+        val frame = GSON.toJson(message)
+        val bytes = frame.toByteArray().size
+        if (bytes > ChooserProtocol.MAX_FRAME_BYTES) {
+            tooLong(message, bytes)
+            return null
+        }
+        if (!write(frame, if (message is Message.Chooser) Reply.CHOOSER else Reply.MESSAGE)) {
             unsent(message)
             return null
         }

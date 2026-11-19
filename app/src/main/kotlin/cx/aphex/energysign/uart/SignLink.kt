@@ -49,9 +49,12 @@ interface SignWire {
  * thread was kept from the wire: a sleep that overran, reads that kept failing). And it knows
  * how long the sign listens: 60 ms in its chooser display, a second otherwise. The sign may be
  * in its chooser display from the moment it is sent a chooser message or a poll report, or
- * sends a `?` itself, until it is sent a message of another kind in full. A request that may
- * have waited longer than [CHOOSER_FRESH_MS] then, or [FRESH_MS] otherwise, is old: it is read
- * away unanswered, nothing is taken, and the sign asks again.
+ * sends a `?` itself, until it is sent a message of another kind in full; and when the link
+ * starts it may be (the app can restart under a sign that stays where it is). A request that
+ * may have waited longer than [CHOOSER_FRESH_MS] then, or [FRESH_MS] otherwise, is old: it is
+ * read away unanswered, nothing is taken, and the sign asks again. The same limit holds for
+ * the answer: its first byte must be with the transmitter before the limit, or the frame is a
+ * failed one.
  */
 class SignLink(
     private val wire: SignWire,
@@ -81,8 +84,11 @@ class SignLink(
     /** A read that began here took everything the sign had sent: what a later read finds came after. */
     private var takenUpToNs = nanoTime()
 
-    /** The sign may be in its chooser display, where it listens 60 ms for an answer. */
-    private var chooserDisplay = false
+    /** The sign may be in its chooser display, where it listens 60 ms for an answer. Until the link knows better, it may. */
+    private var chooserDisplay = true
+
+    /** The first byte of the answer to the request in hand must be with the transmitter by this. */
+    private var answerByNs = takenUpToNs
 
     private var lastHeardNs = takenUpToNs - ACTIVE_WINDOW_MS * NS_PER_MS
     private var lastEmptyReadNs = takenUpToNs
@@ -150,9 +156,6 @@ class SignLink(
      */
     fun send(frame: String, reply: Reply): Boolean {
         val bytes = frame.toByteArray()
-        if (bytes.size > MAX_ARDUINO_JSON_SIZE) {
-            warn("JSON string (${bytes.size}) is probably bigger than the maximum size the arduino will accept ($MAX_ARDUINO_JSON_SIZE)! ")
-        }
         sentFrame = frame
         sentAs = reply
         sentOf = bytes.size
@@ -185,7 +188,9 @@ class SignLink(
         // Only the chooser display sends polls
         if (last == POLL) chooserDisplay = true
         val waitedMs = (readNs - cameAfterNs) / NS_PER_MS
-        if (waitedMs > (if (chooserDisplay) CHOOSER_FRESH_MS else FRESH_MS)) {
+        val freshMs = if (chooserDisplay) CHOOSER_FRESH_MS else FRESH_MS
+        answerByNs = cameAfterNs + freshMs * NS_PER_MS
+        if (waitedMs > freshMs) {
             // The link was kept from the wire for longer than the sign waits for this answer
             timing.dropped(readNs, buffer, count)
             log("Read an old request from $name (up to $waitedMs ms ago): not answered")
@@ -229,26 +234,34 @@ class SignLink(
 
     /**
      * Hands all of [bytes] to the transmitter. A write may take only some (it does not wait), so
-     * the rest is offered again, but only while the frame can still reach the sign in one piece:
-     * the sign gives up 60 ms after a byte. Before every offer the clock is looked at, and once
-     * the line has stood still for [WRITE_PATIENCE_MS] (since the call when nothing was taken
-     * yet, since the last byte taken left the line otherwise) not a byte more is sent.
+     * the rest is offered again, but only while the frame can still reach the sign in one piece
+     * and in time. The clock is looked at before every offer, and not a byte more is sent
+     *  - when the first byte would come after the sign has stopped listening for it ([answerByNs]),
+     *  - when the line has stood still for [WRITE_PATIENCE_MS] (the sign gives up 60 ms after a
+     *    byte): since the call when nothing was taken yet, since the last byte taken left the
+     *    line otherwise, each counted from the START of the offer that took it,
+     *  - when the whole frame has had the time it needs on the line and [WRITE_PATIENCE_MS] more:
+     *    a transmitter that takes a byte now and then must not keep this thread, which serves
+     *    everything, for seconds.
      * Returns how many bytes were taken; fewer than all is a failed frame for the caller to act
      * on. The sign throws the torn start away with its failed read and asks again.
      */
     private fun writeAll(bytes: ByteArray, kind: String): Int {
         val callNs = nanoTime()
-        // When the bytes taken so far have left the line: ten bit times each, from the return of the write
+        val patienceNs = WRITE_PATIENCE_MS * NS_PER_MS
+        val frameByNs = callNs + bytes.size * 10 * NS_PER_S / baud + patienceNs
+        // When the bytes taken so far have left the line: ten bit times each
         var goneAtNs = callNs
         var done = 0
         try {
             while (!stopped) {
-                if (nanoTime() - goneAtNs >= WRITE_PATIENCE_MS * NS_PER_MS) break
+                val offerNs = nanoTime()
+                if (done == 0 && offerNs - answerByNs > 0) break
+                if (offerNs - goneAtNs >= patienceNs || offerNs - frameByNs > 0) break
                 val rest = if (done == 0) bytes else bytes.copyOfRange(done, bytes.size)
                 val took = wire.write(rest, rest.size).coerceIn(0, rest.size)
                 if (took > 0) {
-                    val takenNs = nanoTime()
-                    goneAtNs = (if (takenNs - goneAtNs > 0) takenNs else goneAtNs) + took * 10 * NS_PER_S / baud
+                    goneAtNs = (if (offerNs - goneAtNs > 0) offerNs else goneAtNs) + took * 10 * NS_PER_S / baud
                     done += took
                 }
                 if (done == bytes.size) break
@@ -312,7 +325,6 @@ class SignLink(
 
         const val WARN_EVERY_MS: Int = 5_000
 
-        private const val MAX_ARDUINO_JSON_SIZE: Int = 700
         private val POLL: Byte = ChooserProtocol.POLL_REQUEST.code.toByte()
         private val NEXT: Byte = ChooserProtocol.NEXT_REQUEST.code.toByte()
         private const val NS_PER_MS: Long = 1_000_000L

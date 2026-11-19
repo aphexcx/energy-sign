@@ -1,10 +1,6 @@
 package cx.aphex.energysign.message
 
 import android.content.Context
-import com.google.gson.Gson
-import com.google.gson.GsonBuilder
-import com.google.gson.reflect.TypeToken
-import com.vdurmont.emoji.EmojiParser
 import cx.aphex.energysign.R
 import cx.aphex.energysign.beatlinkdata.BeatLinkTrack
 import cx.aphex.energysign.ext.convertHeartEmojis
@@ -30,14 +26,6 @@ class MessageManager(
     private val owner: OwnerQueue,
 ) :
     KoinComponent {
-    private val gson: Gson = GsonBuilder()
-        .registerTypeAdapter(Message::class.java, Message.MessageSerializer())
-        .registerTypeAdapter(
-            Message.ColorMessage.IconInvaders::class.java,
-            Message.ColorMessage.IconInvaders.IconInvadersSerializer()
-        )
-        .create()
-
     private val advertisements: MutableList<Message> = mutableListOf()
     private val playedTracks: LinkedHashSet<BeatLinkTrack> = linkedSetOf()
     private var nowPlayingTrack: Message.NowPlayingTrackMessage? = null
@@ -76,6 +64,9 @@ class MessageManager(
     /** Read once, here on the main thread: the owner must not ask the context for it at every save. */
     private val filesDir: File = context.filesDir
 
+    /** The ads and the ad period as they were last set, kept across a restart. */
+    private val adStore = AdStore(filesDir, warn = { logW(it) })
+
     /*
      * THREADS. ONE thread owns everything in here, the lists of MessageRepository and the input
      * of KeyboardManager: the sign link thread (see OwnerQueue). It alone calls getNextMessage,
@@ -103,13 +94,10 @@ class MessageManager(
     init {
 
         msgRepo.marqueeMessages.addAll(msgRepo.loadUserMessages(filesDir))
-        val ads: List<Message> = loadAds()
+        adStore.loadPeriod()?.let { advertiseEvery = it }
 
         advertisements.addAll(
-            when { // When I fix ad loading, don't need this when anymore, because loading the default ads from ads.json will work on fresh installs.
-                ads.isEmpty() -> DEFAULT_ADS
-                else -> ads
-            }
+            loadAds()
 //            listOf(
 //                Message.ColorMessage.ChonkySlide("QUARAN", context.getColor(R.color.instagram)),
 //                Message.ColorMessage.ChonkySlide("TRANCE", context.getColor(R.color.instagram)),
@@ -301,6 +289,13 @@ class MessageManager(
             return it
         }
 
+        // Nothing at all to show: no user message and no ad (the ad list was emptied on purpose,
+        // which now stays so across a restart, or it holds only the place of a track and none is
+        // playing). The sign still gets an answer, not an exception.
+        if (msgRepo.marqueeMessages.isEmpty()) {
+            return Message.Starfield()
+        }
+
         // Fallthrough to regular marquee mode; display next user message
         val idx = getIdxAndAdvance()
         val currentMsg: Message.Marquee = msgRepo.marqueeMessages[idx]
@@ -487,7 +482,12 @@ class MessageManager(
 
                     cmd.startsWith("!A", ignoreCase = true) -> {
                         cmd.drop(2).trim().toIntOrNull()?.let { newPeriod ->
-                            advertiseEvery = newPeriod
+                            if (AdStore.isValidPeriod(newPeriod)) {
+                                advertiseEvery = newPeriod
+                                saveAdPeriod()
+                            } else {
+                                logW("Ad period $newPeriod refused: it must be 1 or more. It stays $advertiseEvery.")
+                            }
                             msgRepo.pushOneTimeMessages(
                                 Message.FlashingAnnouncement.CustomFlashyAnnouncement("AD EVERY=$advertiseEvery"),
                                 Message.Starfield()
@@ -519,95 +519,18 @@ class MessageManager(
      * library reads its whole table the first time it is used. Reads no message state.
      */
     private fun parseAds(adString: String): List<Message> {
-        return adString.lines().mapNotNull { line ->
-
-            val delay = (EmojiParser.extractEmojis(line).count { it == "🕰" } + 1) * 1000
-
-            when {
-                line.startsWith("🆑") -> {
-                    val color: Int? = emojiToColor(line)
-                    val str = line //.substring(line.offsetByCodePoints(0, 2))
-                        .toNormalized()
-                    //.trim()
-
-                    Message.ColorMessage.ChonkySlide(
-                        str,
-                        color ?: context.getColor(R.color.chonkyslide_defaultpink),
-                        delay.toShort()
-                    )
-                }
-
-                line.startsWith("🅾") -> { // idk why this is 3, i imagine it should be 1
-                    val color: Int? = emojiToColor(line)
-                    val str = line //.substring(line.offsetByCodePoints(0, 3))
-                        .toNormalized()
-
-                    //.trim()
-
-                    Message.ColorMessage.OneByOneMessage(
-                        str,
-                        color ?: context.getColor(R.color.instagram),
-                        delay.toShort()
-                    )
-
-                }
-
-                line.startsWith("🛤") -> {
-                    Message.NowPlayingTrackMessage("")
-                }
-
-                line.startsWith("👾") -> {
-                    val color: Int =
-                        emojiToColor(line) ?: context.getColor(R.color.icon_defaultblue)
-                    val icon = EmojiParser.extractEmojis(line).last()
-                    when (icon) {
-                        "👾" -> Message.ColorMessage.IconInvaders.Enemy1(color)
-                        "👽" -> Message.ColorMessage.IconInvaders.Enemy2(color)
-                        "💥" -> Message.ColorMessage.IconInvaders.Explosion(color)
-                        "🆎" -> Message.ColorMessage.IconInvaders.ANJUNA(color)
-                        "🐑" -> Message.ColorMessage.IconInvaders.BAAAHS(color)
-                        "🌌" -> Message.ColorMessage.IconInvaders.DREAMSTATE(color)
-                        "🌼" -> Message.ColorMessage.IconInvaders.EDC(color)
-                        else -> Message.ColorMessage.IconInvaders.Enemy1(color)
-                    }
-
-                }
-
-                else -> null
-            }
-        }
-    }
-
-    private fun emojiToColor(line: String): Int? = when {
-        line.contains("💛") -> {
-            context.getColor(R.color.instagram)
-        }
-        // ❤️
-        line.contains("🔴") || line.contains("❤️") -> {
-            context.getColor(R.color.instahandle)
-        }
-
-        line.contains("💙") -> {
-            context.getColor(R.color.twitter)
-        }
-
-        line.contains("🧡") -> {
-            context.getColor(R.color.soundcloud)
-        }
-
-        line.contains("💜") -> {
-            context.getColor(R.color.twitch)
-        }
-
-        line.contains("💚") -> {
-            context.getColor(R.color.green)
-        }
-
-        line.contains("💗") -> {
-            context.getColor(R.color.pink)
-        }
-
-        else -> null
+        val palette = AdPalette(
+            instagram = context.getColor(R.color.instagram),
+            instahandle = context.getColor(R.color.instahandle),
+            twitter = context.getColor(R.color.twitter),
+            soundcloud = context.getColor(R.color.soundcloud),
+            twitch = context.getColor(R.color.twitch),
+            green = context.getColor(R.color.green),
+            pink = context.getColor(R.color.pink),
+            chonkyDefault = context.getColor(R.color.chonkyslide_defaultpink),
+            iconDefault = context.getColor(R.color.icon_defaultblue),
+        )
+        return AdLineParser.parse(adString, palette, warn = { logW(it) })
     }
 
     private fun replaceAdsWith(ads: List<Message>) {
@@ -617,45 +540,59 @@ class MessageManager(
         pushAdvertisements()
     }
 
-    private fun loadAds(): List<Message> {
-        try {
-            with(File(filesDir, ADS_FILE_NAME)) {
-                if (createNewFile()) {
-                    logD("$ADS_FILE_NAME does not exist; created new, with default ad of <Invaders>.")
-                    writeText(gson.toJson(DEFAULT_ADS))
-                    return DEFAULT_ADS
-                }
-//                val typeOfT: Type =
-//                    TypeToken.getParameterized(List::class.java, Message::class.java).type
-//                object : TypeToken<List<Message>>() {}.type
-                val messagesType = object : TypeToken<List<Message>>() {}.type
-                val ads = gson.fromJson<List<Message>>(readText(), messagesType)
-//                val jsonString = json.encodeToString(Message.serializer(), message)
-
-//                val ads = json.decodeFromString(Message.serializer(), readText())
-                return ads
+    /**
+     * The ads as they were last set. Nothing is written here: a file that cannot be read stays
+     * as it is until the next ad command replaces the list.
+     */
+    private fun loadAds(): List<Message> =
+        when (val saved = adStore.loadAds(note = { logW("${AdStore.ADS_FILE_NAME}, $it") })) {
+            is AdStore.SavedAds.Ads -> {
+                logD("Loaded ${saved.ads.size} ads from ${AdStore.ADS_FILE_NAME}.")
+                saved.ads
             }
-        } catch (e: Throwable) {
-            logW("Exception when loading $ADS_FILE_NAME! ${e.message}")
-            return listOf()
-        }
-    }
 
+            AdStore.SavedAds.NoFile -> {
+                logD("${AdStore.ADS_FILE_NAME} does not exist yet; showing the default ad of <Invaders>.")
+                DEFAULT_ADS
+            }
+
+            is AdStore.SavedAds.Unreadable -> {
+                logW(
+                    "Could not load ${AdStore.ADS_FILE_NAME} (${saved.why}); showing the default ads for this run. " +
+                            "The file is left as it is until the next ad command."
+                )
+                DEFAULT_ADS
+            }
+        }
+
+    /**
+     * The owner copies the list: its n references, no more (an ad never changes once it is
+     * made). Turning the ads into text and writing the file (beside it, to storage, renamed
+     * into place) are the saver's work. So the owner's part grows with the number of ads only,
+     * not with their text, it never waits for storage, and a later ad command cannot get into
+     * an earlier save.
+     */
     private fun saveAds() {
         val snapshot = ArrayList(advertisements)
         msgRepo.saveLater {
-        try {
-            val json = gson.toJson(snapshot)
-            with(File(filesDir, ADS_FILE_NAME)) {
-                when (createNewFile()) {
-                    true -> logD("$ADS_FILE_NAME does not exist; created new.")
-                    else -> logD("$ADS_FILE_NAME exists. Writing ads...")
-                }
-                writeText(json)
+            try {
+                adStore.saveAds(snapshot)
+                logD("Wrote ${snapshot.size} ads to ${AdStore.ADS_FILE_NAME}.")
+            } catch (e: Throwable) {
+                logW("Exception when saving ${AdStore.ADS_FILE_NAME}! ${e.message}")
             }
-        } catch (e: Throwable) {
-            logW("Exception when saving $ADS_FILE_NAME! ${e.message}")
         }
+    }
+
+    /** The period is read here, by the owner; the saver writes it. */
+    private fun saveAdPeriod() {
+        val period = advertiseEvery
+        msgRepo.saveLater {
+            try {
+                adStore.savePeriod(period)
+            } catch (e: Throwable) {
+                logW("Exception when saving ${AdStore.PERIOD_FILE_NAME}! ${e.message}")
+            }
         }
     }
 
@@ -683,19 +620,25 @@ class MessageManager(
     }
 
     /** Returns when the owner has taken the track in. */
-    fun processNowPlayingTrack(track: BeatLinkTrack): Unit = changeAndWait {
-        if (track.isEmpty) {
+    fun processNowPlayingTrack(track: BeatLinkTrack) {
+        // Made here, on the caller's thread: fitting a long title to the sign serialises it more
+        // than once, and the owner has the sign to answer. The owner only stores the result.
+        val line = if (track.isEmpty) null else AdRules.nowPlaying(track.artist, track.title, note = { logW(it) })
+        changeAndWait { takeInTrack(track, line) }
+    }
+
+    /** [line] is the track's line for the sign, made by the caller; null for an empty track. Owner only. */
+    private fun takeInTrack(track: BeatLinkTrack, line: Message.NowPlayingTrackMessage?) {
+        if (line == null) {
             nowPlayingTrack = null
             pushAdvertisements()
         } else {
             if (track !in playedTracks) {
-                nowPlayingTrack = Message.NowPlayingTrackMessage(
-                    "${track.artist.toNormalized()} - ${track.title.toNormalized()}"
-                )
+                nowPlayingTrack = line
                 msgRepo.oneTimeMessages.removeIf { it is NowPlayingAnnouncement || it is Message.NowPlayingTrackMessage }
 
                 msgRepo.enqueueOneTimeMessage(NowPlayingAnnouncement)
-                msgRepo.enqueueOneTimeMessage(nowPlayingTrack!!)
+                msgRepo.enqueueOneTimeMessage(line)
                 msgRepo.enqueueOneTimeMessage(Message.Starfield())
 
 
@@ -766,8 +709,6 @@ class MessageManager(
 //    }
 
     companion object {
-        private const val ADS_FILE_NAME = "ads.json"
-
         private const val MAX_PLAYED_TRACKS_MEMORY: Int = 4
 
     }
