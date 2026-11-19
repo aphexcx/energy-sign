@@ -33,16 +33,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
 
     private val owner: OwnerQueue by inject()
     private val messageManager: MessageManager by inject()
-    private val startup = SignStartup { logW(it) }
-    private val bluetooth = BluetoothStartup(startup,
-        create = { EnergySignBluetoothManager(application.applicationContext, this, worker, messageManager::takeWrite) },
-        subscribe = {},
-        startManager = EnergySignBluetoothManager::start,
-        stopManager = {},
-    )
-    private val worker by lazy { SignWorker { logW(it) } }
-    private val beatLink = lazy { BeatLinkListener(application.applicationContext, worker) }
-    private var firstForeground = true
+    private val warn: (String) -> Unit = { logW(it) }
+    private val worker: SignWorker by lazy { SignWorker(warn).also { it.tick(::ensureServices) } }
+    private val bluetooth by lazy {
+        EnergySignBluetoothManager(application.applicationContext, this, worker, messageManager::takeWrite)
+    }
+    private val beatLink by lazy { BeatLinkListener(application.applicationContext, worker) }
     private val energySignUartManager: EnergySignUartManager = EnergySignUartManager(this, owner)
 
     /** The answer to a REQUEST of the sign, and the only way to MessageManager.getNextMessage. */
@@ -56,27 +52,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
     )
 
     init {
-        startup.start(
-            prepareMessages = {
-                // Resolve MessageManager on the main thread, before commands or UART requests arrive.
-                owner.neverWaitsOn(Looper.getMainLooper().thread)
-                checkNotNull(messageManager)
-            },
-            startBluetooth = bluetooth::start,
-            startBeatLink = { worker.post { beatLink.value.ensureListening() } },
-            startLink = energySignUartManager::start,
-        )
+        owner.neverWaitsOn(Looper.getMainLooper().thread)
+        checkNotNull(messageManager)
+        energySignUartManager.start()
     }
 
     internal fun onActivityStart() {
-        if (firstForeground) {
-            firstForeground = false // init already attempted setup for this launch.
-        } else {
-            energySignUartManager.onForeground()
-            startup.optional("BeatLink startup") { worker.post { beatLink.value.ensureListening() } }
-            val manager = bluetooth.manager
-            if (manager == null) bluetooth.start() else startup.optional("Bluetooth foreground") { manager.onForeground() }
-        }
+        optional("Optional service worker", warn) { worker.post(::ensureServices) }
+    }
+
+    private fun ensureServices() {
+        optional("Bluetooth startup", warn) { bluetooth.ensure() }
+        optional("BeatLink startup", warn) { beatLink.ensureListening() }
+        energySignUartManager.onForeground()
     }
 
     override fun onCleared() {

@@ -825,27 +825,31 @@ class SignLinkTest {
         for (failure in listOf(IllegalStateException(), LinkageError())) verifyFailedPreparation(failure)
     }
 
-    @Test
-    fun expiredPreparationRetriesOnTheLinkOnceAndKeepsServingReads() {
-        var passes = 0
-        var turns = 0
-        lateinit var real: SignLink
-        val quiet = QuietWire()
-        real = SignLink(wire = quiet, baud = baud, name = "UART", answer = { _, _ -> },
-            events = {
-                if (++turns == 4) real.stop() else repeat(3) { real.prepareAgain() }
-            },
-            prepareAnswers = { stopped ->
-                if (++passes == 1) {
-                    now += 2_001 * ms
-                    assertTrue(stopped())
-                } else assertFalse(stopped())
-            },
-            timing = UartTimingLog(isEnabled = { false }, emit = {}), nanoTime = { now }, sleepNanos = {},
-        )
-        real.run()
-        assertEquals(2, passes)
-        assertEquals(3, quiet.reads.get())
+    @Test fun incompletePreparationRetriesOnTheLinkAndKeepsServingReads() {
+        for (outcome in listOf("error", "deadline", "complete")) {
+            var passes = 0
+            var turns = 0
+            val owner = Thread.currentThread()
+            val threads = mutableListOf<Thread>()
+            lateinit var real: SignLink
+            val quiet = QuietWire()
+            real = SignLink(wire = quiet, baud = baud, name = "UART", answer = { _, _ -> },
+                events = { if (++turns == 4) real.stop() else repeat(3) { real.prepareAgain() } },
+                prepareAnswers = { stopped ->
+                    threads += Thread.currentThread()
+                    if (++passes == 1 && outcome == "error") throw LinkageError()
+                    if (passes == 1 && outcome == "deadline") {
+                        now += 2_001 * ms
+                        assertTrue(stopped())
+                    }
+                },
+                timing = UartTimingLog(isEnabled = { false }, emit = {}), nanoTime = { now }, sleepNanos = {},
+            )
+            real.run()
+            assertEquals(if (outcome == "complete") 1 else 2, passes, outcome)
+            assertEquals(3, quiet.reads.get(), outcome)
+            assertEquals(setOf(owner), threads.toSet(), outcome)
+        }
     }
 
     private fun verifyFailedPreparation(failure: Throwable) {

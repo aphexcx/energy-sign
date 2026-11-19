@@ -18,7 +18,8 @@ class BluetoothPeerTest {
     private val cccd = mock(BluetoothGattDescriptor::class.java)
     private val worker = TestStartWorker()
     private val shown = mutableListOf<BluetoothStatusUpdate>()
-    private val gatt = EnergySignBluetoothGattServer(context, manager, model, worker, { _, _ -> true })
+    private val registrations = mutableListOf<Int>()
+    private val gatt = EnergySignBluetoothGattServer(context, manager, model, worker, { _, _ -> true }) { registrations += it }
 
     init {
         `when`(manager.openGattServer(context, gatt)).thenReturn(platform)
@@ -39,6 +40,13 @@ class BluetoothPeerTest {
         drain()
         gatt.onDescriptorReadRequest(device, 11, 0, cccd)
         verify(platform).sendResponse(device, 11, BluetoothGatt.GATT_SUCCESS, 0, enable)
+        for ((prepared, offset, status) in listOf(Triple(true, 0, BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED),
+                Triple(false, 1, BluetoothGatt.GATT_INVALID_OFFSET), Triple(false, 0, BluetoothGatt.GATT_FAILURE))) {
+            gatt.onDescriptorWriteRequest(device, status, cccd, prepared, true, offset, byteArrayOf(2, 0))
+            verify(platform).sendResponse(device, status, status, 0, null)
+        }
+        gatt.onDescriptorWriteRequest(device, 99, cccd, false, false, 0, enable)
+        verify(platform, never()).sendResponse(eq(device), eq(99), anyInt(), anyInt(), any())
     }
 
     @Test fun mtuOutcomesReleaseOnlyTheAffectedClientAndForegroundRetries() {
@@ -81,6 +89,18 @@ class BluetoothPeerTest {
             drain()
             verify(client, times(1)).close()
         }
+    }
+
+    @Test fun onlyTheLiveUartServiceCanConfirmRegistration() {
+        val service = mock(BluetoothGattService::class.java)
+        `when`(service.uuid).thenReturn(java.util.UUID.randomUUID())
+        gatt.onServiceAdded(0, service)
+        assertTrue(registrations.isEmpty())
+        `when`(service.uuid).thenReturn(NordicUartServiceProfile.NORDIC_UART_SERVICE_UUID)
+        gatt.onServiceAdded(0, service)
+        gatt.stop()
+        gatt.onServiceAdded(0, service)
+        assertEquals(listOf(0), registrations)
     }
 
     @Test fun onlyRequestedConnectedBondsRetryAfterDeadline() {

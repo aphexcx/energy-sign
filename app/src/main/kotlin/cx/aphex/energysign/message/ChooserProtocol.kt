@@ -209,7 +209,11 @@ class SignResponder(
                 return type.declaredClasses.all(::visit)
             }
             if (visit(Message::class.java) && !stopped()) {
-                GSON.toJson(ChooserProtocol.chooserMessage(emptyList(), 0))
+                try {
+                    GSON.toJson(ChooserProtocol.chooserMessage(emptyList(), 0))
+                } catch (e: RuntimeException) {
+                    if (firstFailure == null) firstFailure = e
+                }
             }
             firstFailure?.let { throw it }
             return prepared

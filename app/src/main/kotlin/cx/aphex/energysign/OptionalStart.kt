@@ -23,7 +23,9 @@ internal class SignWorker(private val warn: (String) -> Unit) : StartWorker {
     }.apply { removeOnCancelPolicy = true }
 
     override fun post(action: () -> Unit) {
-        queue.execute { optional("Optional service callback", warn, action) }
+        optional("Optional service dispatch", warn) {
+            queue.execute { optional("Optional service callback", warn, action) }
+        }
     }
 
     override fun after(ms: Long, action: () -> Unit): () -> Unit {
@@ -32,7 +34,7 @@ internal class SignWorker(private val warn: (String) -> Unit) : StartWorker {
     }
 }
 
-/** Called once on the worker. The sign can stay in HOME for its entire lifetime. */
+/** Enroll once. The sign can stay in HOME for its entire lifetime. */
 internal fun StartWorker.tick(action: () -> Unit) {
     after(60_000) {
         try { action() } finally { tick(action) }

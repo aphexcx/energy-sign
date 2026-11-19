@@ -70,5 +70,10 @@ class OptionalStartTest {
         start.ensure()
         assertTrue(start.up)
         assertNull(optional("construction", warnings) { throw IllegalStateException() })
+        val next = java.util.concurrent.CountDownLatch(1)
+        val real = SignWorker(warnings)
+        real.post { throw LinkageError() }
+        real.post { next.countDown() }
+        assertTrue(next.await(2, java.util.concurrent.TimeUnit.SECONDS))
     }
 }

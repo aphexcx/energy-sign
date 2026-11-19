@@ -122,13 +122,21 @@ class BluetoothPublicationTest {
                 return null
             }
         }
-        val manager = EnergySignBluetoothManager(app, ObjenesisStd().newInstance(MainViewModel::class.java), TestStartWorker()) { _, _ -> true }
+        val worker = TestStartWorker()
+        val manager = EnergySignBluetoothManager(app, ObjenesisStd().newInstance(MainViewModel::class.java), worker) { _, _ -> true }
         manager.ensure()
         assertEquals(1, registered.size)
         manager.ensure()
         manager.ensure()
         assertEquals(2, registered.distinct().size)
         assertEquals(2, registered.size)
+        val phone = mock(android.bluetooth.BluetoothDevice::class.java)
+        val pairing = mock(Intent::class.java)
+        `when`(pairing.action).thenReturn(android.bluetooth.BluetoothDevice.ACTION_PAIRING_REQUEST)
+        `when`(pairing.getParcelableExtra<android.bluetooth.BluetoothDevice>(android.bluetooth.BluetoothDevice.EXTRA_DEVICE)).thenReturn(phone)
+        registered.last().onReceive(app, pairing)
+        worker.drain()
+        verify(phone).setPin(manager.BLE_PIN.toByteArray())
     }
 
     @Test

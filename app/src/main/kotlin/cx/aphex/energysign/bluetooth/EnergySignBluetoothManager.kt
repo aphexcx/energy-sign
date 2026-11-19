@@ -135,8 +135,6 @@ internal class EnergySignBluetoothManager(
         server?.retryPeerSetup()
     }
 
-    fun start() = worker.post(::ensure)
-    fun onForeground() = start()
 
     private fun stopServices() {
         val cancel = cancelAdvertising
