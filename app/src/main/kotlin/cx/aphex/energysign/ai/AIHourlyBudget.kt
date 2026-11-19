@@ -1,7 +1,6 @@
 package cx.aphex.energysign.ai
 
 import okhttp3.Interceptor
-import okhttp3.Request
 import okhttp3.Response
 import okhttp3.internal.http2.ConnectionShutdownException
 import okhttp3.internal.http2.ErrorCode
@@ -9,90 +8,60 @@ import okhttp3.internal.http2.StreamResetException
 import java.io.IOException
 import java.net.ProtocolException
 import java.time.Duration
-import java.util.Collections
-import java.util.IdentityHashMap
-import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * The ONE rolling-hour ceiling on paid HTTP requests leaving the app, shared between
- * [AIQueryDesk] (on the message owner's thread) and the HTTP transport's network interceptor
- * (on the call's I/O thread).
+ * [AIQueryDesk] (owner thread) and [WireBudgetInterceptor] (call I/O thread).
  *
- * Invariant under [lock]: at every moment `now`, after pruning sends at least [HOUR_MS] old,
- * `sentAt.size + activeReservations.size <= callsPerHour`.
+ * Invariant under [lock]: after head-pruning timestamps at least [HOUR_MS] old,
+ * `sentAt.size + reserved <= callsPerHour`. The budget reads its own monotonic [nowMs] clock
+ * under [lock] on every operation; no caller supplies a timestamp.
  *
- * Lifecycle of one call:
- * 1. The desk calls [reserve] when it hands a call over. While the call is prepared (prompt,
- *    client build, owner approval, TCP/TLS), the reservation occupies a slot so the ceiling
- *    holds during preparation.
- * 2. Immediately before HTTP bytes leave on the wire (inside [WireBudgetInterceptor], an OkHttp
- *    network interceptor running below `RetryAndFollowUpInterceptor`), the first wire request
- *    calls [Reservation.stamp], replacing the active reservation with the wire-send timestamp.
- * 3. Any transport replay on the same call (e.g. OkHttp's `503 Retry-After: 0`, `421`, or
- *    Ktor/OkHttp's `408`/connection replay) must acquire an additional slot via
- *    [tryStampAdditional]; if none is available, the replay is refused before bytes leave.
- * 4. When the call finishes, the desk calls [Reservation.release]. If the reservation was never
- *    stamped (withdrawn, too late, missing key, or failed before HTTP bytes left), the slot is
- *    given back and the reservation is poisoned so no late thread can stamp it. If it was
- *    stamped, [Reservation.release] is a no-op and returns `true`; the send timestamp stays
- *    counted for a full [HOUR_MS].
+ * Lifecycle of one place:
+ * 1. [reserve] holds a place from handover (or generator entry) so the ceiling holds during prep.
+ * 2. [WireBudgetInterceptor] stamps the place via [Reservation.stamp] only once the write outcome
+ *    is known (after `chain.proceed` returns, or on a non-pre-write failure). Confirmed pre-write
+ *    failures (`ConnectionShutdownException`, `StreamResetException(REFUSED_STREAM)`, or a call
+ *    cancelled before writing) leave the place reserved so [Reservation.release] gives it back.
+ * 3. [Reservation.release] returns an unstamped place and poisons it against late use; for a
+ *    stamped place it is a no-op so the send stays counted for a full [HOUR_MS].
  *
  * Kept in memory only: restarting the process empties the window.
  */
 class AIHourlyBudget(
-    val callsPerHour: Int = AIQueryDesk.Limits().callsPerHour,
-    private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 },
+    private val nowMs: () -> Long,
+    val callsPerHour: Int = DEFAULT_CALLS_PER_HOUR,
 ) {
     private val lock = Any()
-
-    /** Wire-send timestamps (from [nowMs]) within the last [HOUR_MS]. */
     private val sentAt = ArrayDeque<Long>()
-
-    /** Reservations held by calls in preparation that have not yet stamped or finished. */
-    private val activeReservations: MutableSet<Reservation> =
-        Collections.newSetFromMap(IdentityHashMap())
+    private var reserved = 0
 
     private enum class State { RESERVED, STAMPED, RELEASED }
 
-    /**
-     * One reserved place held by a call between handover and physical wire send. Every state
-     * transition runs under [AIHourlyBudget.lock].
-     */
     inner class Reservation internal constructor() {
-        private var state: State = State.RESERVED
+        private var state = State.RESERVED
 
-        /** Whether at least one wire request was stamped against this reservation. */
-        val wasSent: Boolean
-            get() = synchronized(lock) { state == State.STAMPED }
-
-        /** Whether this reservation is still open and has not been stamped or released. */
         internal fun isReserved(): Boolean = synchronized(lock) { state == State.RESERVED }
 
-        /**
-         * Converts this active reservation into a permanent wire-send timestamp at [now] (or
-         * [nowMs] evaluated inside [lock] when null). Returns `true` only if this reservation was
-         * still [State.RESERVED]; returns `false` if already released (fail closed against late
-         * threads) or already stamped.
-         */
-        fun stamp(now: Long? = null): Boolean = synchronized(lock) {
+        /** Converts this active reservation into a permanent send timestamp read under [lock]. */
+        fun stamp(): Boolean = synchronized(lock) {
             if (state != State.RESERVED) return false
-            if (!activeReservations.remove(this)) return false
-            val at = now ?: nowMs()
-            pruneLocked(at)
-            sentAt.addLast(at)
+            val now = nowMs()
+            pruneLocked(now)
+            reserved--
+            sentAt.addLast(now)
             state = State.STAMPED
             true
         }
 
         /**
          * Ends this reservation when the call finishes. Returns `true` if a request was stamped
-         * (leaving the timestamp in the hourly window) or `false` if no request left (returning
-         * the reserved place to the budget and permanently closing this reservation).
+         * (kept for [HOUR_MS]) or `false` if nothing left (place returned and handle poisoned).
          */
         fun release(): Boolean = synchronized(lock) {
             when (state) {
                 State.RESERVED -> {
-                    activeReservations.remove(this)
+                    reserved--
                     state = State.RELEASED
                     false
                 }
@@ -102,210 +71,101 @@ class AIHourlyBudget(
         }
     }
 
-    /** Whether there is room for at least one more request at [now] (or [nowMs] inside [lock]). */
-    fun hasRoom(now: Long? = null): Boolean = synchronized(lock) {
-        val at = now ?: nowMs()
-        pruneLocked(at)
-        sentAt.size + activeReservations.size < callsPerHour
+    fun hasRoom(): Boolean = synchronized(lock) {
+        pruneLocked(nowMs())
+        sentAt.size + reserved < callsPerHour
     }
 
-    /**
-     * Reserves one place at [now] (or [nowMs] inside [lock]) if below [callsPerHour], or returns
-     * `null` when the ceiling is full.
-     */
-    fun reserve(now: Long? = null): Reservation? = synchronized(lock) {
-        val at = now ?: nowMs()
-        pruneLocked(at)
-        if (sentAt.size + activeReservations.size >= callsPerHour) return null
-        Reservation().also { activeReservations.add(it) }
+    fun reserve(): Reservation? = synchronized(lock) {
+        pruneLocked(nowMs())
+        if (sentAt.size + reserved >= callsPerHour) return null
+        reserved++
+        Reservation()
     }
 
-    /**
-     * Atomically claims and stamps a slot at [now] (or [nowMs] inside [lock]) without a prior
-     * reservation: used for HTTP client replays (2nd+ wire request of one call) and for direct
-     * generator calls made without a desk reservation.
-     */
-    internal fun tryStampAdditional(now: Long? = null): Boolean = synchronized(lock) {
-        val at = now ?: nowMs()
-        pruneLocked(at)
-        if (sentAt.size + activeReservations.size >= callsPerHour) return false
-        sentAt.addLast(at)
-        true
-    }
-
-    /** Current number of occupied places (stamped sends + active reservations) at [now]. */
-    internal fun usedCount(now: Long? = null): Int = synchronized(lock) {
-        val at = now ?: nowMs()
-        pruneLocked(at)
-        sentAt.size + activeReservations.size
+    internal fun usedCount(): Int = synchronized(lock) {
+        pruneLocked(nowMs())
+        sentAt.size + reserved
     }
 
     private fun pruneLocked(now: Long) {
-        // sentAt has at most callsPerHour entries (45); removing by predicate handles any edge
-        // ordering cleanly while never prematurely expiring entries if a clock lags.
-        val iterator = sentAt.iterator()
-        while (iterator.hasNext()) {
-            if (now - iterator.next() >= HOUR_MS) iterator.remove()
-        }
+        while (sentAt.isNotEmpty() && now - sentAt.first() >= HOUR_MS) sentAt.removeFirst()
     }
 
     companion object {
+        /** Room for a reply every two minutes (30) plus the 15 calls cooldowns allow when failing. */
+        const val DEFAULT_CALLS_PER_HOUR = 45
         const val HOUR_MS = 3_600_000L
     }
 }
 
 /**
- * Per-call state carried onto an OkHttp [Request] tag so [WireBudgetInterceptor] knows whether
- * a wire request is a paid generation call (with its reservation and deadline) or the free
- * `GET /v1/models/...` clock/warm-up probe.
+ * Per-call context tagged onto an OkHttp request. A non-null [reservation] identifies a paid
+ * reply call subject to [minTimeToSend]; `null` identifies a free `GET /v1/models/...` probe.
  */
-sealed class WireCallContext {
-    class Paid(
-        val reservation: AIHourlyBudget.Reservation?,
-        val deadline: Deadline,
-        val minTimeToSend: Duration,
-    ) : WireCallContext() {
-        val wireSends = AtomicInteger(0)
-        val lastHttpStatus = AtomicInteger(0)
-    }
-
-    class FreeModelGet(val deadline: Deadline) : WireCallContext()
-}
+class WireCallContext(
+    val deadline: Deadline,
+    val minTimeToSend: Duration,
+    val reservation: AIHourlyBudget.Reservation?,
+)
 
 /**
- * Thrown by [WireBudgetInterceptor] (or [BudgetedOkHttpClient]) when a request is refused before
- * leaving on the wire. Extends [ProtocolException] so OkHttp's `RetryAndFollowUpInterceptor`
- * always treats it as non-recoverable (even when `retryOnConnectionFailure` is enabled, as in
- * Ktor's default OkHttp engine).
+ * Thrown when a request is refused before bytes leave. Extends [ProtocolException] so OkHttp's
+ * `RetryAndFollowUpInterceptor.isRecoverable` always treats it as non-recoverable.
  */
 class WireSendBlockedException(
-    val kind: Kind,
-    val leftMs: Long,
-    val priorHttpStatus: Int?,
-    val afterWireSend: Boolean,
-) : ProtocolException("wire send blocked ($kind, afterWireSend=$afterWireSend)") {
-    enum class Kind { TOO_LATE, BUDGET_EXHAUSTED }
-
-    /** Maps a blocked wire send into a single consistent (reason, detail) pair for both generators. */
-    fun toNoReplyReasonAndDetail(): Pair<NoReplyReason, String> =
-        if (!afterWireSend) {
-            when (kind) {
-                Kind.TOO_LATE -> NoReplyReason.TOO_LATE_TO_SEND to "not sent: ${leftMs / 1000} s of the query's time were left"
-                Kind.BUDGET_EXHAUSTED -> NoReplyReason.WITHDRAWN to "not sent: hourly budget is spent"
-            }
-        } else {
-            val status = priorHttpStatus
-            if (status != null) {
-                NoReplyReason.forHttpStatus(status) to "HTTP $status (replay blocked: $kind)"
-            } else {
-                NoReplyReason.NETWORK to "replay blocked: $kind"
-            }
-        }
-
+    val reason: NoReplyReason,
+    val detail: String,
+) : ProtocolException("$reason: $detail") {
     companion object {
-        fun tooLate(leftMs: Long, priorHttpStatus: Int?, afterWireSend: Boolean) =
-            WireSendBlockedException(Kind.TOO_LATE, leftMs, priorHttpStatus, afterWireSend)
-
-        fun budgetExhausted(priorHttpStatus: Int?, afterWireSend: Boolean) =
-            WireSendBlockedException(Kind.BUDGET_EXHAUSTED, 0L, priorHttpStatus, afterWireSend)
-
-        /** Finds a [WireSendBlockedException] anywhere in [failure]'s cause chain. */
         fun findIn(failure: Throwable): WireSendBlockedException? =
-            generateSequence(failure) { it.cause }
-                .take(12)
-                .filterIsInstance<WireSendBlockedException>()
-                .firstOrNull()
+            generateSequence(failure) { it.cause }.take(12).filterIsInstance<WireSendBlockedException>().firstOrNull()
     }
 }
 
 /**
- * The ONE counting and gating place where paid requests leave the app, installed as an OkHttp
- * network interceptor (below `RetryAndFollowUpInterceptor`, immediately above
- * `CallServerInterceptor`). Runs for every physical HTTP request on the wire — initial call and
- * every transport replay alike.
+ * The ONE wire gate, installed as an OkHttp network interceptor directly below `ConnectInterceptor`
+ * and directly above `CallServerInterceptor` for both providers.
  */
-class WireBudgetInterceptor(
-    private val budget: AIHourlyBudget,
-    private val contextOf: (Request) -> WireCallContext? = { it.tag(WireCallContext::class.java) },
-) : Interceptor {
+class WireBudgetInterceptor : Interceptor {
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
-        val context = contextOf(request)
+        val ctx = request.tag(WireCallContext::class.java)
+            ?: throw WireSendBlockedException(NoReplyReason.WITHDRAWN, "not sent: untagged request")
 
-        if (context is WireCallContext.FreeModelGet) {
+        val reservation = ctx.reservation
+        if (reservation == null) {
             if (request.method != "GET") {
-                throw WireSendBlockedException.budgetExhausted(priorHttpStatus = null, afterWireSend = false)
+                throw WireSendBlockedException(NoReplyReason.WITHDRAWN, "not sent: free tag on ${request.method}")
             }
-            val leftMs = context.deadline.remainingMs()
-            if (leftMs <= 0L) {
-                throw WireSendBlockedException.tooLate(leftMs = 0L, priorHttpStatus = null, afterWireSend = false)
+            if (ctx.deadline.remainingMs() <= 0L) {
+                throw WireSendBlockedException(NoReplyReason.TIMEOUT, "not sent: free request deadline passed")
             }
             return chain.proceed(request)
         }
 
-        if (context !is WireCallContext.Paid) {
-            // Fail closed: an untagged request never bypasses the budget.
-            throw WireSendBlockedException.budgetExhausted(priorHttpStatus = null, afterWireSend = false)
-        }
-
-        if (chain.call().isCanceled()) {
-            throw IOException("Canceled")
-        }
-
-        val alreadySent = context.wireSends.get() > 0
-        val priorStatus = context.lastHttpStatus.get().takeIf { it > 0 }
-        val leftMs = context.deadline.remainingMs()
-        if (leftMs < context.minTimeToSend.toMillis()) {
-            throw WireSendBlockedException.tooLate(
-                leftMs = leftMs,
-                priorHttpStatus = priorStatus,
-                afterWireSend = alreadySent,
+        if (chain.call().isCanceled()) throw IOException("Canceled")
+        val leftMs = ctx.deadline.remainingMs()
+        if (leftMs < ctx.minTimeToSend.toMillis()) {
+            throw WireSendBlockedException(
+                NoReplyReason.TOO_LATE_TO_SEND,
+                "not sent: ${leftMs / 1000} s of the query's time were left",
             )
         }
-
-        // Hold an active reservation across chain.proceed(request) so the hourly ceiling holds
-        // during the write, and commit (stamp) only once the write outcome is known. Confirmed
-        // pre-write failures (e.g. HTTP/2 GOAWAY ConnectionShutdownException or REFUSED_STREAM
-        // before stream processing) leave zero bytes sent and release/preserve the reservation.
-        val deskReservation = context.reservation
-        val slot: AIHourlyBudget.Reservation
-        val ownsSlot: Boolean
-        if (!alreadySent && deskReservation != null) {
-            if (!deskReservation.isReserved()) {
-                throw WireSendBlockedException.budgetExhausted(
-                    priorHttpStatus = priorStatus,
-                    afterWireSend = false,
-                )
-            }
-            slot = deskReservation
-            ownsSlot = false
-        } else {
-            slot = budget.reserve() ?: throw WireSendBlockedException.budgetExhausted(
-                priorHttpStatus = priorStatus,
-                afterWireSend = alreadySent,
-            )
-            ownsSlot = true
+        if (!reservation.isReserved()) {
+            throw WireSendBlockedException(NoReplyReason.WITHDRAWN, "not sent: budget place is no longer open")
         }
 
         return try {
-            val response = chain.proceed(request)
-            slot.stamp()
-            context.wireSends.incrementAndGet()
-            context.lastHttpStatus.set(response.code)
-            response
+            chain.proceed(request).also { reservation.stamp() }
         } catch (e: Throwable) {
-            if (isConfirmedPreWriteFailure(e)) {
-                if (ownsSlot) slot.release()
-            } else {
-                slot.stamp()
-                context.wireSends.incrementAndGet()
-            }
+            if (!isPreWriteFailure(e)) reservation.stamp()
             throw e
         }
     }
 
-    private fun isConfirmedPreWriteFailure(failure: Throwable): Boolean =
+    private fun isPreWriteFailure(failure: Throwable): Boolean =
         generateSequence(failure) { it.cause }.take(12).any { cause ->
             cause is ConnectionShutdownException ||
                 (cause is StreamResetException && cause.errorCode == ErrorCode.REFUSED_STREAM)

@@ -26,10 +26,10 @@ import java.time.format.DateTimeParseException
  * Switch: `adb shell setprop debug.energysign.ai.warmup off` before the app starts leaves the
  * warm-up out, so the first query pays for the slow first use (for a comparison on the sign).
  */
-class AIReplies(
-    private val context: Context,
-    override val hourlyBudget: AIHourlyBudget = AIHourlyBudget(nowMs = { SystemClock.elapsedRealtime() }),
-) : AIReplySource {
+class AIReplies(private val context: Context) : AIReplySource {
+
+    /** The ONE rolling-hour wire budget shared by MessageManager's desk and the provider transport. */
+    override val hourlyBudget: AIHourlyBudget = AIHourlyBudget(nowMs = { SystemClock.elapsedRealtime() })
 
     // No key of this build may reach a log line, whatever a library writes into a message.
     private val secrets = Secrets(
@@ -103,7 +103,6 @@ class AIReplies(
         // Behind everything else: the sign link is slow enough in the first minute. The runner
         // calls this on the warm-up thread and goes on when Android refuses it.
         onWarmUpThread = { Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND) },
-        hourlyBudget = hourlyBudget,
     )
 
     override fun warmUp(onDone: () -> Unit): Boolean = runner.warmUp(onDone)

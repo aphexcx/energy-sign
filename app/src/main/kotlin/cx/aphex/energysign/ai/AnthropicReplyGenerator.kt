@@ -44,11 +44,12 @@ import javax.net.ssl.SSLPeerUnverifiedException
  * ONE ATTEMPT. The SDK's own retries are off ([MAX_RETRIES]): between attempts it waits as long
  * as a `Retry-After` header says, without a limit. Whether a query is asked again is decided in
  * one place, [AIQueryDesk]. Under the SDK, our own OkHttp transport ([BudgetedOkHttpClient])
- * runs [WireBudgetInterceptor] as a network interceptor immediately before bytes leave on the
- * wire, below OkHttp's `RetryAndFollowUpInterceptor`: if OkHttp replays a request (for example
- * after a 503 with `Retry-After: 0`), that replay is also gated by [AIHourlyBudget] and
- * [MIN_TIME_TO_SEND] so no replay can ever exceed the hourly ceiling or bypass the 15 s check.
- * It follows no redirect: a 3xx is a failure, and the request goes nowhere but where it was sent.
+ * marks every request body one-shot (so OkHttp never replays after 503 `Retry-After: 0` or
+ * HTTP/2 `421` — one call is at most one request on the wire) and runs [WireBudgetInterceptor]
+ * as a network interceptor immediately before bytes leave on the wire to re-check
+ * [MIN_TIME_TO_SEND] after TCP/TLS connect and stamp [AIHourlyBudget] once the write outcome is
+ * known. It follows no redirect: a 3xx is a failure, and the request goes nowhere but where it
+ * was sent.
  *
  * ONE TIME LIMIT, the deadline of the query ([AIReplyRequest.deadline]). The request gets what is
  * left of it when it goes out ([requestTimeout] at most), and that is the only thing that ends a
@@ -91,11 +92,9 @@ class AnthropicReplyGenerator(
     private val standIn: (answer: String) -> LocalStandIn = { LocalStandIn(it) },
     private val minTimeToSend: Duration = MIN_TIME_TO_SEND,
     /** Shared rolling-hour ceiling on paid HTTP requests leaving the app. */
-    private val budget: AIHourlyBudget = AIHourlyBudget(),
+    private val budget: AIHourlyBudget = AIHourlyBudget({ System.nanoTime() / 1_000_000 }),
     /** Monotonic clock in nanoseconds for internal deadlines (the free GET). */
     private val nanoTime: () -> Long = System::nanoTime,
-    /** Test-only hook run during lazy client construction to simulate slow cold start. */
-    private val onBuildClient: () -> Unit = {},
 ) : AIReplyGenerator {
 
     private val apiKey: String = apiKey.trim()
@@ -109,18 +108,16 @@ class AnthropicReplyGenerator(
     private val currentCall = ThreadLocal<WireCallContext>()
 
     private val client: AnthropicClient by lazy {
-        onBuildClient()
         val backend = AnthropicBackend.builder()
             .apiKey(this.apiKey)
             .jsonMapper(mapper)
             .apply { baseUrl?.let { baseUrl(it) } }
             .build()
         val httpClient = BudgetedOkHttpClient(
-            defaultTimeout = timeouts(requestTimeout),
             maxRequestTimeout = requestTimeout,
             connectTimeout = CONNECT_TIMEOUT,
             backend = backend,
-            networkInterceptor = WireBudgetInterceptor(budget),
+            networkInterceptor = WireBudgetInterceptor(),
             currentContext = { currentCall.get() },
         )
         val options = ClientOptions.builder()
@@ -128,7 +125,6 @@ class AnthropicReplyGenerator(
             .maxRetries(MAX_RETRIES)
             // The SDK can log requests, headers included, when an environment variable says so.
             .logLevel(LogLevel.OFF)
-            .timeout(timeouts(requestTimeout))
             .baseUrl(backend.baseUrl())
             .backend(backend)
             .openTelemetryProviderName(backend.openTelemetryProviderName())
@@ -160,10 +156,15 @@ class AnthropicReplyGenerator(
                 if (leftMs < minTimeToSend.toMillis()) {
                     noReply(NoReplyReason.TOO_LATE_TO_SEND, "not sent: ${leftMs / 1000} s of the query's time were left")
                 } else {
-                    val limit = minOf(requestTimeout, Duration.ofMillis(leftMs))
-                    currentCall.set(WireCallContext.Paid(request.reservation, request.deadline, minTimeToSend))
+                    val owned = if (request.reservation == null) {
+                        budget.reserve() ?: return noReply(NoReplyReason.WITHDRAWN, "not sent: hourly budget is spent")
+                    } else {
+                        null
+                    }
+                    val reservation = request.reservation ?: owned!!
+                    currentCall.set(WireCallContext(request.deadline, minTimeToSend, reservation))
                     try {
-                        client.beta().messages().withRawResponse().create(params, options(limit)).use { response ->
+                        client.beta().messages().withRawResponse().create(params, RequestOptions.none()).use { response ->
                             // The response has arrived; its body is read below, and that can take a while.
                             val arrivedAt = serverClock?.arrival()
                             val message = response.parse()
@@ -175,6 +176,7 @@ class AnthropicReplyGenerator(
                         }
                     } finally {
                         currentCall.remove()
+                        owned?.release()
                     }
                 }
             }
@@ -183,8 +185,7 @@ class AnthropicReplyGenerator(
         } catch (e: AnthropicIoException) {
             val blocked = WireSendBlockedException.findIn(e)
             if (blocked != null) {
-                val (reason, detail) = blocked.toNoReplyReasonAndDetail()
-                noReply(reason, detail)
+                noReply(blocked.reason, blocked.detail)
             } else {
                 // No response at all: a timeout, the network, or TLS. Only the kinds of the
                 // exceptions are logged, never their messages.
@@ -324,9 +325,9 @@ class AnthropicReplyGenerator(
                 log("$name: $what: not sent, ${leftMs} ms left after setup")
                 return
             }
-            currentCall.set(WireCallContext.FreeModelGet(deadline))
+            currentCall.set(WireCallContext(deadline, MIN_TIME_CHECK, reservation = null))
             try {
-                realClient.models().withRawResponse().retrieve(MODEL, options(Duration.ofMillis(leftMs))).use { response ->
+                realClient.models().withRawResponse().retrieve(MODEL, RequestOptions.none()).use { response ->
                     val arrivedAt = serverClock?.arrival()
                     if (describesTheModel(response.parse())) {
                         tellClock(response.headers(), arrivedAt)
@@ -341,7 +342,8 @@ class AnthropicReplyGenerator(
         } catch (e: AnthropicServiceException) {
             log("$name: $what: ${summary(e)}")
         } catch (e: AnthropicIoException) {
-            log("$name: $what: ${describe(reasonForIoFailure(e))} [${kinds(e)}]")
+            val reason = WireSendBlockedException.findIn(e)?.reason ?: reasonForIoFailure(e)
+            log("$name: $what: ${describe(reason)} [${kinds(e)}]")
         } catch (e: AnthropicInvalidDataException) {
             log("$name: $what: what came back is not from the API")
         } catch (e: Exception) {

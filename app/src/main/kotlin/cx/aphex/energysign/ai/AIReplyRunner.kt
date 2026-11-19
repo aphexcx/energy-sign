@@ -43,7 +43,6 @@ class AIReplyRunner(
      * effort: when it fails, the warm-up runs all the same.
      */
     private val onWarmUpThread: () -> Unit = {},
-    override val hourlyBudget: AIHourlyBudget? = null,
 ) : AIReplySource {
 
     /** True while the warm-up or a call is out. */

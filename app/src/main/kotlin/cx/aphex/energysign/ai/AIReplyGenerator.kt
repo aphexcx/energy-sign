@@ -373,8 +373,8 @@ object AIReplyGenerators {
         log: (String) -> Unit,
         info: (String) -> Unit = log,
         serverClock: ServerClock? = null,
-        /** Shared hourly wire-request budget. */
-        budget: AIHourlyBudget = AIHourlyBudget(),
+        /** Shared hourly wire-request budget (required so callers cannot accidentally split budgets). */
+        budget: AIHourlyBudget,
         /** Monotonic clock in nanoseconds for internal deadlines (the free GET). */
         nanoTime: () -> Long = System::nanoTime,
         /** Only tests set these, to local fakes of the two APIs. */

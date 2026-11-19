@@ -23,22 +23,26 @@ import java.util.IdentityHashMap
  *   sent and it cost nothing. It is asked again when it comes round.
  * - A call is never bought twice for an answer: a query that is out or waiting is not asked
  *   again, and a query that got an answer of any kind ([NoReplyReason.askAgain] false) is retired.
- * - A failure that may pass leaves the query a query, [Limits.maxAttempts] sent calls at most.
- *   A call for which no HTTP request ever left the app (withdrawn, too late, missing key, or
- *   failed before bytes left) is not one of those attempts.
+ * - A failure that may pass leaves the query a query, [Limits.maxAttempts] attempts at most.
+ *   Only our own withdrawal ([NoReplyReason.WITHDRAWN]) and our own lateness
+ *   ([NoReplyReason.TOO_LATE_TO_SEND]) are not an attempt. A network or TLS failure before bytes
+ *   leave (no route, handshake failure, connection shut down before the write) returns its hourly
+ *   budget place while still counting as one of the query's attempts, so a query does not loop
+ *   through an outage all evening.
  * - After a failure of the provider ([NoReplyReason.backOff]) nothing is asked for a while,
  *   longer after each failure in a row ([Limits.coolDownsMs]). An answer ends the row.
- * - A BUDGET ([AIHourlyBudget]): [Limits.callsPerHour] paid HTTP requests leaving the app in any
- *   rolling hour (3,600,000 ms), shared with the HTTP transport's network interceptor. The desk
- *   RESERVES a place when it hands a call over (holding the ceiling during preparation); the
- *   transport stamps that place with the moment bytes leave on the wire (and counts any HTTP
- *   client replay such as 503 Retry-After: 0 against the same budget, refusing a replay if the
- *   ceiling is full or too little time remains). Every request that physically left stays counted
- *   for a full hour — nothing gives it back, not an answer, not a failure, not a deleted query.
- *   A reserved place that was never used (no HTTP request left) is given back when the call ends.
- *   The pauses after failures happen inside this ceiling. While the budget is spent a query is
- *   shown as the plain message it is, with no notice, and is asked when it comes round and there
- *   is room. Kept in memory only: a restart empties it.
+ * - A BUDGET ([AIHourlyBudget]): [AIHourlyBudget.callsPerHour] paid HTTP requests leaving the app
+ *   in any rolling hour (3,600,000 ms), shared with [WireBudgetInterceptor]. One-shot request
+ *   bodies disable silent OkHttp replays, so one call puts at most one request on the wire and
+ *   this desk is the sole retry owner. The desk RESERVES a place when it hands a call over
+ *   (holding the ceiling during preparation); the wire interceptor stamps that place once the
+ *   write outcome is known, and leaves it unstamped on confirmed pre-write failures. Every
+ *   request that left stays counted for a full hour — nothing gives it back, not an answer, not
+ *   a failure, not a deleted query. Any place never stamped (withdrawn, too late, missing key,
+ *   or failed before writing) is given back when the call ends. The pauses after failures happen
+ *   inside this ceiling. While the budget is spent a query is shown as the plain message it is,
+ *   with no notice, and is asked when it comes round and there is room. Kept in memory only: a
+ *   restart empties it.
  *
  * What this costs the owner: [shown] and [thinkingWanted] look at the line only
  * ([Limits.maxWaiting] entries at most); [finished] and [warmedUp] make ONE pass over the list
@@ -55,32 +59,26 @@ class AIQueryDesk<Q : Any>(
      * and what comes back compare by identity. A query that was deleted is not sent.
      */
     private val listedAmong: (Set<Q>) -> Set<Q>,
+    /** Monotonic clock in milliseconds, read fresh when dequeuing from the waiting line. */
+    private val nowMs: () -> Long,
     private val log: (String) -> Unit = {},
     private val limits: Limits = Limits(),
     /** True while the warm-up runs: nothing is sent until [warmedUp]. */
     warmingUp: Boolean = false,
-    /** Monotonic clock in milliseconds, read fresh when dequeuing from the waiting line. */
-    private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 },
     /**
-     * Shared rolling-hour wire-request budget, or null to create a local one sized to
-     * [Limits.callsPerHour] on [nowMs].
+     * Shared rolling-hour wire-request budget, or null to create a local one on [nowMs].
      */
     budget: AIHourlyBudget? = null,
 ) {
     class Limits(
         /** How long the sign says "thinking" for one query. */
         val noticeMs: Long = 30_000,
-        /** How many calls one query may get when its calls fail in a way that may pass. */
+        /** How many attempts one query may get when its calls fail in a way that may pass. */
         val maxAttempts: Int = 3,
         /** The pause after the first, second, ... failure in a row; the last one is the longest there is. */
         val coolDownsMs: List<Long> = listOf(30_000, 60_000, 120_000, 240_000, 300_000),
         /** How many queries may stand in line behind the call that is out. */
         val maxWaiting: Int = 4,
-        /**
-         * How many calls may go out in any hour: room for a reply every two minutes (30), and
-         * for the 15 calls the pauses allow when every call fails.
-         */
-        val callsPerHour: Int = 45,
     )
 
     /** What became of a call. */
@@ -121,7 +119,7 @@ class AIQueryDesk<Q : Any>(
     private var noCallBefore = Long.MIN_VALUE
 
     /** Shared rolling-hour ceiling on paid HTTP requests leaving the app. */
-    internal val hourlyBudget: AIHourlyBudget = budget ?: AIHourlyBudget(limits.callsPerHour, nowMs)
+    internal val hourlyBudget: AIHourlyBudget = budget ?: AIHourlyBudget(nowMs)
     private var saidBudgetIsSpent = false
 
     /**
@@ -129,39 +127,34 @@ class AIQueryDesk<Q : Any>(
      * stands in line. False: show nothing; either it is being answered already or nothing may be
      * asked at the moment.
      */
-    fun shown(query: Q, now: Long = nowMs()): Boolean {
+    fun shown(query: Q, now: Long): Boolean {
         // Whoever waited past their notice is not waiting any more: they hold no place in the
         // line, and they are no reason to turn the same query away when it comes round again.
         line.removeAll { now >= it.until }
 
         if (out === query || line.any { it.query === query }) return false
         if (now < noCallBefore) return false
-        if (!free()) {
-            if (!roomInBudget(now)) {
-                sayBudgetIsSpentOnce()
-                return false
-            }
-            if (line.size >= limits.maxWaiting) return false
-            noticeFor = query
-            noticeUntil = now + limits.noticeMs
-            line.addLast(Waiting(query, noticeUntil))
-            return true
-        }
 
-        val reservation = hourlyBudget.reserve(now)
-        if (reservation == null) {
+        val reservation = if (free()) {
+            hourlyBudget.reserve()
+        } else {
+            if (line.size >= limits.maxWaiting) return false
+            null
+        }
+        val admitted = if (free()) reservation != null else hourlyBudget.hasRoom()
+        if (!admitted) {
             sayBudgetIsSpentOnce()
             return false
         }
         saidBudgetIsSpent = false
         noticeFor = query
         noticeUntil = now + limits.noticeMs
-        launch(query, reservation)
+        if (reservation != null) launch(query, reservation) else line.addLast(Waiting(query, noticeUntil))
         return true
     }
 
     /** Whether the thinking notice should still be on the sign. Asked whenever the sign takes it. */
-    fun thinkingWanted(now: Long = nowMs()): Boolean {
+    fun thinkingWanted(now: Long): Boolean {
         val query = noticeFor ?: return false
         if (now < noticeUntil) return true
         noticeFor = null
@@ -172,12 +165,11 @@ class AIQueryDesk<Q : Any>(
     }
 
     /** The call for [query] has ended with [result]. Says what to do with it, and sends whoever is next. */
-    fun finished(query: Q, result: AIReplyResult, now: Long = nowMs()): Outcome {
+    fun finished(query: Q, result: AIReplyResult, now: Long): Outcome {
         if (out !== query) return Outcome.NotOurs
         out = null
-        val reservation = outReservation
+        outReservation?.release()
         outReservation = null
-        val wasSent = reservation?.release() == true
         val watched = noticeFor === query && now < noticeUntil
         if (noticeFor === query) noticeFor = null
 
@@ -208,10 +200,13 @@ class AIQueryDesk<Q : Any>(
 
             else -> {
                 val reason = (result as AIReplyResult.NoReply).reason
-                val used = if (wasSent) {
-                    ((attempts[query] ?: 0) + 1).also { attempts[query] = it }
-                } else {
+                // Only our own withdrawal / lateness (nothingWasSent) is not an attempt; network
+                // and TLS failures before the write return their budget place but still count as
+                // an attempt so a query retires after maxAttempts during an outage.
+                val used = if (reason.nothingWasSent) {
                     attempts[query] ?: 0
+                } else {
+                    ((attempts[query] ?: 0) + 1).also { attempts[query] = it }
                 }
                 if (reason.askAgain && used < limits.maxAttempts) {
                     Outcome.Failed(reason, whileWatched = watched)
@@ -227,20 +222,13 @@ class AIQueryDesk<Q : Any>(
     }
 
     /** The warm-up is over: whoever stands in line is sent now. */
-    fun warmedUp(now: Long = nowMs()) {
+    @Suppress("UNUSED_PARAMETER")
+    fun warmedUp(now: Long) {
         warming = false
         sendNext(stillListed(null))
     }
 
     private fun free(): Boolean = out == null && !warming
-
-    private fun roomInBudget(now: Long): Boolean {
-        if (hourlyBudget.hasRoom(now)) {
-            saidBudgetIsSpent = false
-            return true
-        }
-        return false
-    }
 
     private fun sayBudgetIsSpentOnce() {
         if (!saidBudgetIsSpent) {
@@ -291,7 +279,7 @@ class AIQueryDesk<Q : Any>(
             val next = line.removeFirstOrNull() ?: break
             val checkNow = nowMs()
             val reservation = if (checkNow >= noCallBefore && checkNow < next.until && next.query in alive) {
-                hourlyBudget.reserve(checkNow)
+                hourlyBudget.reserve()
             } else {
                 null
             }

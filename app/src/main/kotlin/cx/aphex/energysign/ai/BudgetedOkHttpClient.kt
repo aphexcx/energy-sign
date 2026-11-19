@@ -1,8 +1,8 @@
+// Ported from com.anthropic:anthropic-java-client-okhttp:3.3.0 (OkHttpClient.kt); re-check on SDK upgrades.
 package cx.aphex.energysign.ai
 
 import com.anthropic.backends.Backend
 import com.anthropic.core.RequestOptions
-import com.anthropic.core.Timeout
 import com.anthropic.core.http.Headers
 import com.anthropic.core.http.HttpClient
 import com.anthropic.core.http.HttpMethod
@@ -13,7 +13,6 @@ import com.anthropic.errors.AnthropicIoException
 import okhttp3.Call
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
-import okhttp3.MediaType
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -28,16 +27,16 @@ import java.time.Duration
 import java.util.concurrent.CompletableFuture
 
 /**
- * Our own OkHttp transport implementing the Anthropic SDK's [HttpClient] so that
- * [WireBudgetInterceptor] runs as an OkHttp network interceptor directly below
- * `RetryAndFollowUpInterceptor` and directly above `CallServerInterceptor`.
+ * OkHttp transport implementing the Anthropic SDK's [HttpClient] so [WireBudgetInterceptor] runs
+ * as a network interceptor below `ConnectInterceptor` and above `CallServerInterceptor`.
  *
- * Also refreshes per-call OkHttp timeouts from the active [WireCallContext]'s absolute [Deadline]
- * right before constructing the [Call], so time spent preparing or serializing a request never
- * buys a fresh relative timeout past the query's deadline.
+ * Marks every request body one-shot (`isOneShot() = true`), so OkHttp never replays a POST after
+ * `503 Retry-After: 0` or HTTP/2 `421` — one call is at most one request on the wire and
+ * [AIQueryDesk] is the single retry owner. Prepares the URL and request body (which lazily runs
+ * Jackson serialization in `contentLength()`) BEFORE reading [WireCallContext.deadline] to build
+ * the per-call OkHttp timeout.
  */
 internal class BudgetedOkHttpClient(
-    private val defaultTimeout: Timeout,
     private val maxRequestTimeout: Duration,
     private val connectTimeout: Duration,
     private val backend: Backend,
@@ -50,20 +49,17 @@ internal class BudgetedOkHttpClient(
         .followRedirects(false)
         .followSslRedirects(false)
         .pingInterval(Duration.ofMinutes(1))
-        .connectTimeout(defaultTimeout.connect())
-        .readTimeout(defaultTimeout.read())
-        .writeTimeout(defaultTimeout.write())
-        .callTimeout(defaultTimeout.request())
         .addNetworkInterceptor(networkInterceptor)
         .build()
 
     override fun execute(request: HttpRequest, requestOptions: RequestOptions): HttpResponse {
         val prepared = prepareRequest(request)
         val context = currentContext()
+            ?: throw AnthropicIoException("Request failed", WireSendBlockedException(NoReplyReason.WITHDRAWN, "not sent: untagged request"))
         val call = try {
-            newCall(prepared, requestOptions, context)
+            newCall(prepared, context)
         } catch (e: IOException) {
-            closeBody(prepared)
+            prepared.body().orElse(null)?.close()
             throw AnthropicIoException("Request failed", e)
         }
         return try {
@@ -72,7 +68,7 @@ internal class BudgetedOkHttpClient(
         } catch (e: IOException) {
             throw AnthropicIoException("Request failed", e)
         } finally {
-            closeBody(prepared)
+            prepared.body().orElse(null)?.close()
         }
     }
 
@@ -88,12 +84,8 @@ internal class BudgetedOkHttpClient(
 
     private fun prepareRequest(request: HttpRequest): HttpRequest {
         val backendPrepared = backend.prepareRequest(request)
-        return resolveUrl(backendPrepared)
-    }
-
-    private fun resolveUrl(request: HttpRequest): HttpRequest {
-        if (request.baseUrl.isNotEmpty()) return request
-        return request.toBuilder().baseUrl(backend.baseUrl()).build()
+        return if (backendPrepared.baseUrl.isNotEmpty()) backendPrepared
+        else backendPrepared.toBuilder().baseUrl(backend.baseUrl()).build()
     }
 
     private fun prepareResponse(response: HttpResponse): HttpResponse =
@@ -104,161 +96,94 @@ internal class BudgetedOkHttpClient(
             throw e
         }
 
-    private fun newCall(request: HttpRequest, requestOptions: RequestOptions, context: WireCallContext?): Call {
-        // Prepare URL and request body FIRST: body.contentLength() lazily runs Jackson JSON
-        // serialization in the Anthropic SDK, which can take seconds. Computing timeouts only
-        // after all preparation finishes ensures OkHttp's timer and the 15 s check are never stale.
+    private fun newCall(request: HttpRequest, context: WireCallContext): Call {
+        // Materialize URL and body FIRST: body.contentLength() lazily serializes JSON in the SDK.
         val url = toUrl(request)
-        var body: RequestBody? = request.body().orElse(null)?.let(::toOkHttpRequestBody)
-        if (body == null && requiresBody(request.method)) {
-            body = "".toRequestBody(null)
-        }
+        val body = request.body().orElse(null)?.let(::toOkHttpRequestBody)
+            ?: if (request.method in BODY_METHODS) "".toRequestBody(null) else null
 
-        val effectiveTimeout = when (context) {
-            is WireCallContext.Paid -> {
-                val leftMs = context.deadline.remainingMs()
-                if (leftMs < context.minTimeToSend.toMillis()) {
-                    throw WireSendBlockedException.tooLate(
-                        leftMs = leftMs,
-                        priorHttpStatus = null,
-                        afterWireSend = false,
-                    )
-                }
-                val limit = minOf(maxRequestTimeout, Duration.ofMillis(leftMs))
-                Timeout.builder()
-                    .connect(minOf(connectTimeout, limit))
-                    .read(limit)
-                    .write(limit)
-                    .request(limit)
-                    .build()
+        val leftMs = context.deadline.remainingMs()
+        val limit = if (context.reservation != null) {
+            if (leftMs < context.minTimeToSend.toMillis()) {
+                throw WireSendBlockedException(
+                    NoReplyReason.TOO_LATE_TO_SEND,
+                    "not sent: ${leftMs / 1000} s of the query's time were left",
+                )
             }
-
-            is WireCallContext.FreeModelGet -> {
-                val leftMs = context.deadline.remainingMs()
-                if (leftMs <= 0L) {
-                    throw WireSendBlockedException.tooLate(
-                        leftMs = 0L,
-                        priorHttpStatus = null,
-                        afterWireSend = false,
-                    )
-                }
-                val limit = Duration.ofMillis(leftMs)
-                Timeout.builder()
-                    .connect(minOf(connectTimeout, limit))
-                    .read(limit)
-                    .write(limit)
-                    .request(limit)
-                    .build()
+            minOf(maxRequestTimeout, Duration.ofMillis(leftMs))
+        } else {
+            if (leftMs <= 0L) {
+                throw WireSendBlockedException(NoReplyReason.TIMEOUT, "not sent: free request deadline passed")
             }
-
-            null -> requestOptions.timeout().orElse(defaultTimeout)
+            Duration.ofMillis(leftMs)
         }
 
         val callClient = okHttpClient.newBuilder()
-            .followRedirects(false)
-            .followSslRedirects(false)
-            .connectTimeout(effectiveTimeout.connect())
-            .readTimeout(effectiveTimeout.read())
-            .writeTimeout(effectiveTimeout.write())
-            .callTimeout(effectiveTimeout.request())
+            .connectTimeout(minOf(connectTimeout, limit))
+            .readTimeout(limit)
+            .writeTimeout(limit)
+            .callTimeout(limit)
             .build()
-        return callClient.newCall(toOkHttpRequest(request, url, body, callClient, context))
-    }
 
-    private fun toOkHttpRequest(
-        request: HttpRequest,
-        url: String,
-        body: RequestBody?,
-        client: OkHttpClient,
-        context: WireCallContext?,
-    ): Request {
         val builder = Request.Builder()
             .url(url)
             .method(request.method.name, body)
             .tag(WireCallContext::class.java, context)
-
         for (name in request.headers.names()) {
-            for (value in request.headers.values(name)) {
-                builder.addHeader(name, value)
-            }
+            for (value in request.headers.values(name)) builder.addHeader(name, value)
         }
-        if ("X-Stainless-Read-Timeout" !in request.headers.names() && client.readTimeoutMillis != 0) {
-            builder.addHeader("X-Stainless-Read-Timeout", Duration.ofMillis(client.readTimeoutMillis.toLong()).seconds.toString())
-        }
-        if ("X-Stainless-Timeout" !in request.headers.names() && client.callTimeoutMillis != 0) {
-            builder.addHeader("X-Stainless-Timeout", Duration.ofMillis(client.callTimeoutMillis.toLong()).seconds.toString())
-        }
-        return builder.build()
+        val seconds = limit.seconds.toString()
+        if ("X-Stainless-Read-Timeout" !in request.headers.names()) builder.addHeader("X-Stainless-Read-Timeout", seconds)
+        if ("X-Stainless-Timeout" !in request.headers.names()) builder.addHeader("X-Stainless-Timeout", seconds)
+        return callClient.newCall(builder.build())
     }
 
-    private fun toUrl(request: HttpRequest): String {
-        val urlBuilder = request.baseUrl.toHttpUrl().newBuilder()
-        for (segment in request.pathSegments) {
-            urlBuilder.addPathSegment(segment)
-        }
-        for (key in request.queryParams.keys()) {
-            for (value in request.queryParams.values(key)) {
-                urlBuilder.addQueryParameter(key, value)
+    private fun toUrl(request: HttpRequest): String =
+        request.baseUrl.toHttpUrl().newBuilder().apply {
+            request.pathSegments.forEach(::addPathSegment)
+            for (key in request.queryParams.keys()) {
+                for (value in request.queryParams.values(key)) addQueryParameter(key, value)
             }
-        }
-        return urlBuilder.build().toString()
-    }
+        }.build().toString()
 
     private fun toOkHttpRequestBody(body: HttpRequestBody): RequestBody {
-        val mediaType: MediaType? = body.contentType()?.toMediaTypeOrNull()
+        val mediaType = body.contentType()?.toMediaTypeOrNull()
         val length = body.contentLength()
         return object : RequestBody() {
-            override fun contentType(): MediaType? = mediaType
-            override fun contentLength(): Long = length
-            override fun isOneShot(): Boolean = !body.repeatable()
-            override fun writeTo(sink: BufferedSink) {
-                body.writeTo(sink.outputStream())
-            }
+            override fun contentType() = mediaType
+            override fun contentLength() = length
+            // One-shot stops OkHttp's silent 503 Retry-After: 0 and HTTP/2 421 replays.
+            override fun isOneShot() = true
+            override fun writeTo(sink: BufferedSink) = body.writeTo(sink.outputStream())
         }
     }
 
     private fun toHttpResponse(response: Response, call: Call): HttpResponse {
-        val headersBuilder = Headers.builder()
-        for ((name, value) in response.headers) {
-            headersBuilder.put(name, value)
-        }
-        val headers = headersBuilder.build()
-        val rawBody = response.body
-        val stream: InputStream = rawBody?.let { body ->
+        val headers = Headers.builder().apply {
+            for ((name, value) in response.headers) put(name, value)
+        }.build()
+        val stream: InputStream = response.body?.let { body ->
             val inner = body.byteStream()
             object : InputStream() {
-                override fun read(): Int = inner.read()
-                override fun read(b: ByteArray, off: Int, len: Int): Int = inner.read(b, off, len)
-                override fun available(): Int = inner.available()
+                override fun read() = inner.read()
+                override fun read(b: ByteArray, off: Int, len: Int) = inner.read(b, off, len)
+                override fun available() = inner.available()
                 override fun close() {
-                    try {
-                        inner.close()
-                    } finally {
-                        body.close()
-                        call.cancel()
-                    }
+                    try { inner.close() } finally { body.close(); call.cancel() }
                 }
             }
         } ?: ByteArrayInputStream(ByteArray(0))
-
         return object : HttpResponse {
-            override fun statusCode(): Int = response.code
-            override fun headers(): Headers = headers
-            override fun body(): InputStream = stream
+            override fun statusCode() = response.code
+            override fun headers() = headers
+            override fun body() = stream
             override fun close() {
-                try {
-                    stream.close()
-                } finally {
-                    response.close()
-                }
+                try { stream.close() } finally { response.close() }
             }
         }
     }
 
-    private fun requiresBody(method: HttpMethod): Boolean =
-        method == HttpMethod.POST || method == HttpMethod.PUT || method == HttpMethod.PATCH
-
-    private fun closeBody(request: HttpRequest) {
-        request.body().orElse(null)?.close()
+    private companion object {
+        val BODY_METHODS = setOf(HttpMethod.POST, HttpMethod.PUT, HttpMethod.PATCH)
     }
 }

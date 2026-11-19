@@ -23,6 +23,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.RequestBody
+import okio.BufferedSink
+import java.io.IOException
 import java.time.Duration
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
@@ -62,7 +65,7 @@ class OpenAIReplyGenerator(
     /** How much longer than [requestTimeout] the HTTP client's own limits are. Only tests set this. */
     transportMargin: Duration = TRANSPORT_MARGIN,
     /** Shared rolling-hour ceiling on paid HTTP requests leaving the app. */
-    private val budget: AIHourlyBudget = AIHourlyBudget(),
+    private val budget: AIHourlyBudget = AIHourlyBudget({ System.nanoTime() / 1_000_000 }),
 ) : AIReplyGenerator {
 
     private val apiKey: String = apiKey.trim()
@@ -79,7 +82,7 @@ class OpenAIReplyGenerator(
     private val failedWithStatus = AtomicInteger(0)
 
     /** Carries per-call context into OkHttp's application/network interceptors on Ktor's dispatcher thread. */
-    private val activeCall = AtomicReference<WireCallContext.Paid?>(null)
+    private val activeCall = AtomicReference<WireCallContext?>(null)
 
     /** What the client is built from. */
     internal val config = OpenAIConfig(
@@ -101,13 +104,18 @@ class OpenAIReplyGenerator(
             engine {
                 val okHttp = this as? OkHttpConfig
                     ?: error("OpenAIReplyGenerator requires Ktor OkHttp engine so WireBudgetInterceptor gates every wire send")
+                // One call is at most one request on the wire: disable connection-failure retries
+                // and mark every POST body one-shot so OkHttp never replays 503 Retry-After: 0 / 408 / 421.
+                okHttp.config { retryOnConnectionFailure(false) }
                 okHttp.addInterceptor { chain ->
-                    val tagged = chain.request().newBuilder()
-                        .tag(WireCallContext::class.java, activeCall.get())
-                        .build()
-                    chain.proceed(tagged)
+                    if (chain.call().isCanceled()) throw IOException("Canceled")
+                    val req = chain.request()
+                    val body = req.body
+                    val builder = req.newBuilder().tag(WireCallContext::class.java, activeCall.get())
+                    if (body != null) builder.method(req.method, oneShot(body))
+                    chain.proceed(builder.build())
                 }
-                okHttp.addNetworkInterceptor(WireBudgetInterceptor(budget))
+                okHttp.addNetworkInterceptor(WireBudgetInterceptor())
             }
             HttpResponseValidator {
                 handleResponseExceptionWithRequest { failure, _ ->
@@ -137,14 +145,24 @@ class OpenAIReplyGenerator(
             }
             val limitMs = minOf(requestTimeout.toMillis(), leftMs)
             val stream = Stream()
-            activeCall.set(WireCallContext.Paid(request.reservation, request.deadline, minTimeToSend))
+            val owned = if (request.reservation == null) {
+                budget.reserve() ?: return noReply(NoReplyReason.WITHDRAWN, "not sent: hourly budget is spent")
+            } else {
+                null
+            }
+            val reservation = request.reservation ?: owned!!
+            activeCall.set(WireCallContext(request.deadline, minTimeToSend, reservation))
             val ended = try {
                 withTimeoutOrNull(limitMs) { collect(client, request, stream) } != null
             } catch (e: OpenAITimeoutException) {
                 // A limit of the HTTP client ended it after all: what has come is read the same way.
                 false
+            } catch (e: Throwable) {
+                WireSendBlockedException.findIn(e)?.let { return noReply(it.reason, it.detail) }
+                throw e
             } finally {
                 activeCall.set(null)
+                owned?.release()
             }
             stream.read(ended, limitMs)
         } catch (e: CancellationException) {
@@ -152,28 +170,28 @@ class OpenAIReplyGenerator(
         } catch (e: OpenAITimeoutException) {
             noReply(NoReplyReason.TIMEOUT, e.javaClass.simpleName)
         } catch (e: OpenAIIOException) {
-            WireSendBlockedException.findIn(e)?.let(::blockedResult) ?: noReply(NoReplyReason.NETWORK, e.javaClass.simpleName)
+            noReply(NoReplyReason.NETWORK, e.javaClass.simpleName)
         } catch (e: OpenAIAPIException) {
             // Every HTTP status with an error body, whatever class the client makes of it.
             noReply(NoReplyReason.forHttpStatus(e.statusCode), summary(e))
         } catch (e: OpenAIServerException) {
             noReply(NoReplyReason.SERVER_ERROR, e.javaClass.simpleName)
         } catch (e: OpenAIException) {
-            WireSendBlockedException.findIn(e)?.let(::blockedResult) ?: noReply(NoReplyReason.PROVIDER_ERROR, e.javaClass.simpleName)
+            noReply(NoReplyReason.PROVIDER_ERROR, e.javaClass.simpleName)
         } catch (e: Exception) {
-            WireSendBlockedException.findIn(e)?.let(::blockedResult) ?: run {
-                // What the client let through as it was. With a status noted, it is an error
-                // response whose body the client could not read: the status says what it means.
-                val status = failedWithStatus.get()
-                if (status > 0) noReply(NoReplyReason.forHttpStatus(status), "HTTP $status, with a body that is not the API's")
-                else noReply(NoReplyReason.PROVIDER_ERROR, e.javaClass.simpleName)
-            }
+            // What the client let through as it was. With a status noted, it is an error
+            // response whose body the client could not read: the status says what it means.
+            val status = failedWithStatus.get()
+            if (status > 0) noReply(NoReplyReason.forHttpStatus(status), "HTTP $status, with a body that is not the API's")
+            else noReply(NoReplyReason.PROVIDER_ERROR, e.javaClass.simpleName)
         }
     }
 
-    private fun blockedResult(blocked: WireSendBlockedException): AIReplyResult.NoReply {
-        val (reason, detail) = blocked.toNoReplyReasonAndDetail()
-        return noReply(reason, detail)
+    private fun oneShot(body: RequestBody): RequestBody = object : RequestBody() {
+        override fun contentType() = body.contentType()
+        override fun contentLength() = body.contentLength()
+        override fun isOneShot() = true
+        override fun writeTo(sink: BufferedSink) = body.writeTo(sink)
     }
 
     override fun syncClock(limit: Duration) {

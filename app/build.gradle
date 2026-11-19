@@ -184,8 +184,9 @@ dependencies {
     implementation platform('com.aallam.openai:openai-client-bom:3.8.2')
     implementation 'com.aallam.openai:openai-client'
 
-    // The official Anthropic SDK (Kotlin uses the Java SDK).
+    // The official Anthropic SDK (Kotlin uses the Java SDK) and the OkHttp transport we own underneath it.
     implementation 'com.anthropic:anthropic-java:3.3.0'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
 
     // JUnit 5
     testImplementation 'org.junit.jupiter:junit-jupiter-api:5.11.3'
