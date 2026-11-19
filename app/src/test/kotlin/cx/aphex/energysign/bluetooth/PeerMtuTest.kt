@@ -44,4 +44,26 @@ class PeerMtuTest {
         assertEquals(emptyList(), observed)
         assertEquals(listOf(client, client), closed)
     }
+
+    @Test
+    fun missingMtuCallbackReleasesTheClientAndAllowsForegroundRetry() {
+        val replacement = ObjenesisStd().newInstance(BluetoothGatt::class.java)
+        var expire: (() -> Unit)? = null
+        val peer = PeerMtu(SignStartup {}, pending::addLast, observed::add, { true }, closed::add) { action ->
+            expire = action
+            { expire = null }
+        }
+        peer.start { client }
+        peer.onConnectionStateChange(client, 0, STATE_CONNECTED)
+        deliver()
+        expire!!.invoke()
+        peer.start { replacement } // foreground even before timeout cleanup gets its turn
+        peer.onMtuChanged(client, 64, 0)
+        peer.onMtuChanged(replacement, 128, 0)
+        deliver()
+        assertEquals(listOf(client), closed)
+        assertEquals(listOf(128), observed)
+        peer.stop()
+        assertEquals(listOf(client, replacement), closed)
+    }
 }

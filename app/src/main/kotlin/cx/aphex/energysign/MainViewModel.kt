@@ -72,7 +72,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
         } else {
             startup.optional("BeatLink startup") { beatLink.value.ensureListening() }
             val manager = bluetooth.manager
-            if (manager == null) bluetooth.start() else manager.onForeground()
+            if (manager == null) bluetooth.start() else startup.optional("Bluetooth foreground") { manager.onForeground() }
         }
     }
 

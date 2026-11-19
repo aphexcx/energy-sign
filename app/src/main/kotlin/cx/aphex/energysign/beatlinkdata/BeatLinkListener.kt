@@ -1,6 +1,8 @@
 package cx.aphex.energysign.beatlinkdata
 
 import android.content.Context
+import cx.aphex.energysign.StartAlarm
+import cx.aphex.energysign.startupAlarm
 import cx.aphex.energysign.BoundedStart
 import cx.aphex.energysign.serialWorker
 import cx.aphex.energysign.SignStartup
@@ -34,10 +36,11 @@ internal const val BEATLINK_PORT = 8080
 internal class BeatLinkListener(
     context: Context,
     private val dispatch: Executor = serialWorker("beatlink-http"),
+    arm: StartAlarm = ::startupAlarm,
 ) : KoinComponent {
     private val messageManager: MessageManager by inject()
     private val startup = SignStartup { logW(it) }
-    private val binding = BoundedStart()
+    private val binding = BoundedStart(arm)
     private val discovery = DnsSdAnnouncer(context, dispatch)
     private var server: ApplicationEngine? = null
     private val queued = AtomicBoolean()
@@ -56,7 +59,9 @@ internal class BeatLinkListener(
                     ticket.fail()
                     return@Runnable
                 }
-                val running = startup.optional("BeatLink listener startup") { engine.start(wait = false) }
+                val running = if (ticket.pending() && !closed) {
+                    startup.optional("BeatLink listener startup") { engine.start(wait = false) }
+                } else null
                 if (running == null || closed || !ticket.done()) {
                     ticket.fail()
                     startup.optional("BeatLink listener cleanup") { engine.stop(0, 0) }
@@ -68,7 +73,7 @@ internal class BeatLinkListener(
             startup.optional("DNS-SD startup") { discovery.start() }
         }
         try {
-            dispatch.execute(job)
+            dispatch.execute { startup.optional("BeatLink worker", job::run) }
         } catch (failure: Throwable) {
             queued.set(false)
             throw failure
@@ -76,6 +81,7 @@ internal class BeatLinkListener(
     }
 
     fun close() {
+        if (closed) return
         closed = true
         binding.reset()
         dispatch.execute {
@@ -83,6 +89,7 @@ internal class BeatLinkListener(
             val old = server
             server = null
             startup.optional("BeatLink listener cleanup") { old?.stop(0, 0) }
+            (dispatch as? java.util.concurrent.ExecutorService)?.shutdown()
         }
     }
 

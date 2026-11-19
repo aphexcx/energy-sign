@@ -174,9 +174,16 @@ class SignResponder(
          * the first icon. The link does this once before its first read, so an answer never
          * races a background warm-up. Returns how many classes it prepared.
          */
-        fun warmUp(): Int {
+        fun warmUp(nanoTime: () -> Long = System::nanoTime): Int {
+            val started = nanoTime()
+            fun checkBudget() {
+                if (nanoTime() - started >= java.util.concurrent.TimeUnit.SECONDS.toNanos(20)) {
+                    throw java.util.concurrent.TimeoutException("JSON adapter preparation deadline")
+                }
+            }
             var prepared = 0
             fun visit(type: Class<*>) {
+                checkBudget()
                 if (Message::class.java.isAssignableFrom(type) && !Modifier.isAbstract(type.modifiers)) {
                     try {
                         GSON.getAdapter(type)
@@ -188,6 +195,7 @@ class SignResponder(
                 type.declaredClasses.forEach(::visit)
             }
             visit(Message::class.java)
+            checkBudget()
             GSON.toJson(ChooserProtocol.chooserMessage(emptyList(), 0))
             return prepared
         }

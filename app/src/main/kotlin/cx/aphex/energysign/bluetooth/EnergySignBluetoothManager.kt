@@ -36,7 +36,7 @@ class EnergySignBluetoothManager(
 
     private fun post(action: () -> Unit) {
         try {
-            worker.execute(action)
+            worker.execute { startup.optional("Bluetooth worker", action) }
         } catch (failure: RejectedExecutionException) {
             if (!worker.isShutdown) throw failure
         }
@@ -155,7 +155,7 @@ class EnergySignBluetoothManager(
         if (!listening) ensureRegistered() else {
             receivers.ensurePairing(bondStateReceiver)
             session.checkAdapter()
-            server?.retryPeerMtu()
+            server?.retryPeerSetup()
         }
     }
 

@@ -41,4 +41,23 @@ class BeatLinkListenerTest {
         while (jobs.isNotEmpty()) jobs.removeFirst().run()
         verify(engine).stop(0, 0)
     }
+
+    @Test
+    fun aBindReturningAfterItsDeadlineIsClosedAndForegroundRetries() {
+        var expire: (() -> Unit)? = null
+        val listener = BeatLinkListener(ContextWrapper(null), Executor { it.run() }) { action ->
+            expire = action
+            { expire = null }
+        }
+        val stale = mock(ApplicationEngine::class.java)
+        val healthy = mock(ApplicationEngine::class.java)
+        `when`(stale.start(false)).thenAnswer { expire!!.invoke(); stale }
+        `when`(healthy.start(false)).thenReturn(healthy)
+        listener.ensureListening { stale }
+        verify(stale).stop(0, 0)
+        listener.ensureListening { healthy }
+        listener.ensureListening { error("duplicate bind") }
+        verify(healthy).start(false)
+        listener.close()
+    }
 }

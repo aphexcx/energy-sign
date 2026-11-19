@@ -58,7 +58,7 @@ internal class EnergySignBluetoothGattServer(
         mtuClients.clear()
         requestedBonds.values.forEach { it.reset() }
         requestedBonds.clear()
-        if (gattServer != null) showPeer(BluetoothStatusUpdate(null, null))
+        if (gattServer != null) startup.optional("Bluetooth status display") { showPeer(BluetoothStatusUpdate(null, null)) }
         registeredDevices.clear()
         val server = gattServer
         gattServer = null
@@ -77,7 +77,7 @@ internal class EnergySignBluetoothGattServer(
         showPeer(BluetoothStatusUpdate(device, mtu))
     }
 
-    fun retryPeerMtu() {
+    fun retryPeerSetup() {
         mtuClients.forEach { (device, peer) -> connectMtu(device, peer) }
         requestedBonds.keys.forEach(::ensureBond)
     }

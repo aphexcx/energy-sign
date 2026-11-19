@@ -15,10 +15,11 @@ import java.util.concurrent.Executor
 internal class DnsSdAnnouncer(
     private val context: Context,
     private val worker: Executor,
-    private val arm: StartAlarm = ::startupAlarm,
+    arm: StartAlarm = ::startupAlarm,
 ) {
     private val startup = SignStartup { logW(it) }
     private val operation = BoundedStart(arm)
+    @Volatile private var stopped = false
     private var current: NsdManager.RegistrationListener? = null
     private val manager get() = context.getSystemService(Context.NSD_SERVICE) as NsdManager
     internal var submit: (NsdManager.RegistrationListener) -> Unit = { listener ->
@@ -31,10 +32,19 @@ internal class DnsSdAnnouncer(
     }
     internal var unregister: (NsdManager.RegistrationListener) -> Unit = { manager.unregisterService(it) }
 
+    private fun post(action: () -> Unit) {
+        if (stopped) return
+        try {
+            worker.execute(action)
+        } catch (failure: java.util.concurrent.RejectedExecutionException) {
+            if (!stopped) throw failure
+        }
+    }
+
     fun start() {
         val ticket = operation.begin { expired ->
             startup.failed("DNS-SD registration", "callback deadline")
-            worker.execute { if (activeTicket === expired) release() }
+            post { if (activeTicket === expired) release() }
         } ?: return
         release()
         val listener = object : NsdManager.RegistrationListener {
@@ -43,9 +53,13 @@ internal class DnsSdAnnouncer(
             }
 
             override fun onRegistrationFailed(info: NsdServiceInfo, code: Int) {
-                if (ticket.fail()) startup.failed("DNS-SD registration", "Android status $code")
-                // Android removes the listener after a failed registration.
-                worker.execute { if (current === this) current = null }
+                if (ticket.pending()) post {
+                    if (current === this && ticket.fail()) {
+                        // Android has already removed this registration listener.
+                        current = null
+                        startup.failed("DNS-SD registration", "Android status $code")
+                    }
+                }
             }
 
             override fun onServiceUnregistered(info: NsdServiceInfo) { ticket.fail() }
@@ -71,6 +85,7 @@ internal class DnsSdAnnouncer(
     }
 
     fun stop() {
+        stopped = true
         operation.reset()
         release()
     }

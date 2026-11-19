@@ -22,4 +22,30 @@ class DnsSdRecoveryTest {
         dns.start()
         assertEquals(2, calls.size)
     }
+
+    @Test
+    fun absentCallbackReleasesRegistrationAndOldSuccessCannotClaimReplacement() {
+        var expire: (() -> Unit)? = null
+        val dns = DnsSdAnnouncer(ContextWrapper(null), java.util.concurrent.Executor { it.run() }) { action ->
+            expire = action
+            { expire = null }
+        }
+        val calls = mutableListOf<NsdManager.RegistrationListener>()
+        val releases = mutableListOf<NsdManager.RegistrationListener>()
+        dns.submit = { calls.add(it) }
+        dns.unregister = { releases.add(it) }
+        dns.start()
+        val old = calls.single()
+        expire!!.invoke()
+        assertEquals(listOf(old), releases)
+        dns.start()
+        old.onServiceRegistered(NsdServiceInfo())
+        expire!!.invoke()
+        dns.start()
+        calls.last().onServiceRegistered(NsdServiceInfo())
+        dns.start()
+        assertEquals(3, calls.size)
+        dns.stop()
+        assertEquals(calls, releases)
+    }
 }
