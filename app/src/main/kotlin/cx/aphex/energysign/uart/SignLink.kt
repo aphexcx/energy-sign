@@ -297,8 +297,8 @@ class LineClock(private val baud: Int, startNs: Long) {
  *  - a pushed frame, whole and begun in time, to a sign known to be in its chooser display:
  *    DONE; the app is told, the screen has the text.
  *  - a pushed frame to a sign NOT known to be in its chooser display (entering chooser mode;
- *    after a request that was not answered; after the app started): pending, and nobody is
- *    told. The sign listens for a push only in its chooser display, so nothing can be claimed
+ *    after a request that was not answered; a sign that polls; after the app started):
+ *    pending, and nobody is told. The sign listens for a push only in its chooser display, so nothing can be claimed
  *    for it. It goes out once for a change, whole or not ([givenOnceFor]); the answer to the
  *    sign's next request, whole and in time, is DONE and is what the screen is told.
  *  - a pushed frame torn, or with a piece that may have come late: pending, tried again.
@@ -401,11 +401,12 @@ class SignLink(
     /**
      * The sign IS KNOWN to be in its chooser display, the only place where it listens for a
      * push (the contract: "while it shows a chooser message"). The other question to
-     * [chooserDisplay], and answered the other way in every doubt: it is known when the last
-     * thing the sign sent was a poll, or when its last request was answered with a chooser
-     * message that the line calls proven. Whatever else it sends (a request, the name of an
-     * error) ends that until it is answered so; a message of another kind ends it. Not known
-     * when the link starts.
+     * [chooserDisplay], and answered the other way in every doubt: it is known when the sign's
+     * last request was answered with a chooser message that the line calls proven, and the
+     * sign has sent nothing since. Whatever it sends ends that until it is answered so: a
+     * request, the name of an error, and a poll too (a sign that polls is in its chooser
+     * display, but it is the 2.1 firmware, which listens for no push). A message of another
+     * kind ends it. Not known when the link starts.
      */
     private var signInChooser = false
 
@@ -584,9 +585,10 @@ class SignLink(
         }
         lastHeardNs = readNs
         val last = buffer[count - 1]
-        // What the sign sends says where it is: only the chooser display polls. A sign that asks,
-        // or prints an error, is in its chooser display again only when it has been answered so
-        signInChooser = last == POLL
+        // Whatever the sign sends ends what was known of it. A sign that asks, or prints an
+        // error, listens for a push again only when it has been answered with a chooser message
+        // ([send]); and a sign that POLLS is the 2.1 firmware, which listens for no push at all
+        signInChooser = false
         if (pushedFrameInVoid && cameAfterNs - voidBeforeNs < 0 && last != POLL) {
             // SETS: the sign was sending while a pushed frame that was called done was on the
             // line, or just before it. It may not have that frame (it does not hear while it

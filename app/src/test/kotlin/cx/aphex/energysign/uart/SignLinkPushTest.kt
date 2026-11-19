@@ -1025,14 +1025,20 @@ class SignLinkPushTest {
     }
 
     @Test
-    fun `a sign that polls is in its chooser display, a push to it is told`() {
-        signShowsAnOrdinaryMessage()
-        chooser = "A"
+    fun `a sign that polls listens for no push at all, a push to it is told to nobody and its own requests bring the selection`() {
+        // only the 2.1 firmware polls. Its poll is in its chooser display, and is no proof that a push is taken there
         arrives(100, "?")
         command(200, "B")
+        arrives(300, "?")
+        arrives(310, "~") // the report said another count: it asks for the message
+        command(600, "C")
         runUntil(1_000)
-        assertEquals(listOf("tx[M1]@0", "tx[{c:A}]@100", "tx[00x72]@200", "tx[H:B]@270"), wire())
-        assertEquals(listOf("B"), told)
+        assertEquals(
+            listOf("tx[{c:A}]@100", "tx[00x72]@200", "tx[H:B]@270", "tx[{c:B}]@300", "tx[H:B]@310", "tx[00x72]@600", "tx[H:C]@670"),
+            wire(),
+        )
+        // the first push went to a sign that had polled; the second to one that had just been given its message
+        assertEquals(listOf("C"), told)
     }
 
     // ================= a push takes nothing
@@ -1475,7 +1481,7 @@ class SignLinkPushTest {
         arrives(180, "?")
         runUntil(1_000)
         assertEquals(listOf("tx[{c:B}]@20", "tx[00x72]@100", "tx[H:B]@170", "tx[{c:B}]@180"), wire())
-        assertEquals(listOf("B"), told)
+        assertEquals(emptyList(), told) // (a sign that polls: the push is told to nobody)
     }
 
     @Test
