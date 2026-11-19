@@ -113,6 +113,21 @@ object ChooserProtocol {
 }
 
 /**
+ * Does [cleanUp] after this failure and returns this failure, for the caller to throw on. When
+ * the clean-up fails too, its failure is attached to this one (suppressed): it does not take
+ * its place, as it would when thrown from a `catch` or a `finally`. An Error of the clean-up
+ * is not held back: it goes on as it is.
+ */
+internal inline fun <T : Throwable> T.keptThrough(crossinline cleanUp: () -> Unit): T {
+    try {
+        cleanUp()
+    } catch (second: Exception) {
+        if (second !== this) addSuppressed(second)
+    }
+    return this
+}
+
+/**
  * Answers the sign's requests. Keeps no state: every reply is made from what [nextMessage]
  * returns at that moment, never from what was written before.
  *
@@ -162,8 +177,7 @@ class SignResponder(
             write(frame, if (message is Message.Chooser) Reply.CHOOSER else Reply.MESSAGE)
         } catch (e: Throwable) {
             // Not on the wire as far as anybody can say: handed back like a write that says so.
-            unsent(message)
-            throw e
+            throw e.keptThrough { unsent(message) }
         }
         if (!written) unsent(message)
         return if (written) message else null
