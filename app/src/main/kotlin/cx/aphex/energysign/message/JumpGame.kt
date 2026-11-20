@@ -358,14 +358,9 @@ class GameShows(
     )
 }
 
-/** What the game keeps across a restart, in the app's files: whether it is switched on, and the best score. Loading never writes. */
+/** What the game keeps across a restart, in the app's files: the best score. Loading never writes. */
 class GameStore(private val dir: File, private val warn: (String) -> Unit = {}) {
-    fun loadOn(): Boolean = read(SWITCH_FILE_NAME) != "off"
-
     fun loadBest(): Int = read(BEST_FILE_NAME)?.toIntOrNull()?.coerceAtLeast(0) ?: 0
-
-    @Throws(IOException::class)
-    fun saveOn(on: Boolean) = write(SWITCH_FILE_NAME, if (on) "on" else "off")
 
     @Throws(IOException::class)
     fun saveBest(best: Int) = write(BEST_FILE_NAME, best.toString())
@@ -381,7 +376,6 @@ class GameStore(private val dir: File, private val warn: (String) -> Unit = {}) 
         File(dir, name).replaceContent(SaveSteps(), warn) { it.write(text.toByteArray()) }
 
     companion object {
-        const val SWITCH_FILE_NAME = "game.txt"
         const val BEST_FILE_NAME = "game-best.txt"
     }
 }
@@ -399,7 +393,6 @@ class GameStore(private val dir: File, private val warn: (String) -> Unit = {}) 
 class GameOnTheSign(
     private val shows: GameShows,
     private var best: Int = 0,
-    on: Boolean = true,
     private val say: (String) -> Unit = {},
     /** The best has changed (a new best, or none any more): for whoever keeps it. */
     private val bestIs: (Int) -> Unit = {},
@@ -416,10 +409,6 @@ class GameOnTheSign(
 
     /** When the press arrived that the next frame answers; -1 when none is waiting for its frame. */
     private var pressedAt = -1L
-    private var saidItIsOff = false
-
-    var on: Boolean = on
-        private set
 
     /** Whether a game is being played right now (not its intro, not a closing show). */
     val playing: Boolean get() = stage == Stage.PLAY
@@ -448,14 +437,6 @@ class GameOnTheSign(
         bestIs(best)
     }
 
-    /** The switch. Off ends whatever of a game there is. */
-    fun switch(to: Boolean, at: Long) {
-        on = to
-        saidItIsOff = false
-        if (!to) end("it was switched off", at)
-        say("Game: switched ${if (to) "on" else "off"}.")
-    }
-
     /** There is no best any more: the next score above none is one. */
     fun forgetBest(at: Long) {
         settle(at)
@@ -473,11 +454,6 @@ class GameOnTheSign(
     fun start(at: Long): Boolean {
         settle(at)
         if (closedAfter(at)) return false // (a game was being played when this arrived: nothing starts twice)
-        if (!on) {
-            if (!saidItIsOff) say("Game: it is switched off (!game on); nothing is started.")
-            saidItIsOff = true
-            return false
-        }
         if (stage == Stage.INTRO || stage == Stage.PLAY) return false
         show(shows.intro()) // a closing show that was still on makes way
         stage = Stage.INTRO
@@ -511,7 +487,7 @@ class GameOnTheSign(
         pressedAt = at
     }
 
-    /** Somebody else takes the sign (the chooser, a typist) at [at], or the game is switched off: no game, no show. A game that had ended before [at] keeps its score. */
+    /** Somebody else takes the sign (the chooser, a typist) at [at]: no game, no show. A game that had ended before [at] keeps its score. */
     fun end(why: String, at: Long) {
         settle(at)
         if (closedAfter(at)) takeBackTheBest() // (it was ended by this, before its hit: no score)

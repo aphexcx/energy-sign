@@ -2627,7 +2627,6 @@ class MessageManagerOwnerTest {
         "a game, in the air" to { app -> intoPlay(app); command(app, "!jump"); check(asks(app, 100) == "frame, in the air") },
         // nobody plays: the hit, its picture for a moment, then the show's first message
         "the closing show" to { app -> intoPlay(app); check(asks(app, 10_000) == "frame"); check(asks(app, 800) == "X") },
-        "the game switched off" to { app -> command(app, "!game off") },
         "the chooser" to { app -> command(app, "!choose") },
         "somebody typing" to { _ -> KeyboardManager.processNewKeyboardKey('x'); ownerRuns() },
     )
@@ -2661,7 +2660,6 @@ class MessageManagerOwnerTest {
             "a game, in the air" to List(7) { jumps },
             // !game is the next game at once; a jump that comes a moment after the hit is nothing, on any key
             "the closing show" to listOf("D") + List(6) { GAME_OVER[1] },
-            "the game switched off" to listOf(STORED, STORED, STORED, STORED, "echo  _", STORED, "echo  _"),
             // the sign is somebody else's: no game begins behind it, not later either
             "the chooser" to listOf(STORED, STORED, STORED, STORED, "echo  _", STORED, "echo  _"),
             "somebody typing" to listOf("", "", "", "", "echo x _", "", "echo x _"),
@@ -2728,7 +2726,6 @@ class MessageManagerOwnerTest {
             Arrives("the chooser", takesTheSign = "chooser", givenBack = { command(it, "!endchoose") }) { command(it, "!choose") },
             // (the stars are the keyboard's own, at the end of typing)
             Arrives("a typed key", takesTheSign = "echo x_", then = listOf(""), givenBack = { endTyping() }) { KeyboardManager.processNewKeyboardKey('x'); ownerRuns() },
-            Arrives("!game off", takesTheSign = STORED) { command(it, "!game off") },
             Arrives("an ad command", then = listOf("AD")) { command(it, "!$A\n${O}AD") },
             Arrives("!pause") { command(it, "!pause") },
             Arrives("a new message", then = listOf(newMessage)) { command(it, "HELLO") },
@@ -2920,7 +2917,7 @@ class MessageManagerOwnerTest {
     }
 
     @Test
-    fun `the game's switch and its best are there again after a restart, and a game is not`() {
+    fun `the game's best is there again after a restart, and a game is not`() {
         val home = newFilesDir()
         /** A game from !game to the next stored message, nobody playing: its score and its best as the sign showed them. */
         fun scoreAndBest(app: App): List<String> {
@@ -2949,15 +2946,8 @@ class MessageManagerOwnerTest {
         }
         rows += "a first score of 1 is a new best, with its own show" to show
         saveAll()
-        command(app, "!game off")
-        saveAll()
         app = gameApp(home)
-        command(app, "!game")
-        rows += "switched off before the restart, !game after it" to asks(app)
-        command(app, "!game on")
-        saveAll()
-        app = gameApp(home)
-        rows += "switched on again, a game without a score after the restart" to scoreAndBest(app)
+        rows += "a game without a score after the restart" to scoreAndBest(app)
         command(app, "!game reset")
         rows += "!game reset, and a game without a score" to scoreAndBest(app)
         saveAll()
@@ -2968,8 +2958,7 @@ class MessageManagerOwnerTest {
             listOf<Pair<String, Any?>>(
                 "after a restart in the middle of a game the sign gets" to STORED,
                 "a first score of 1 is a new best, with its own show" to listOf("X", "HIGH SCORE", "  1   ", ""),
-                "switched off before the restart, !game after it" to STORED,
-                "switched on again, a game without a score after the restart" to listOf("SCORE 0", "BEST 1"),
+                "a game without a score after the restart" to listOf("SCORE 0", "BEST 1"),
                 "!game reset, and a game without a score" to listOf("SCORE 0", "BEST 0"),
                 "and after a restart" to listOf("SCORE 0", "BEST 0"),
             ),
