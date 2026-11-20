@@ -70,13 +70,14 @@ class AIReplyService(
         userText: String,
         deadline: Deadline = Deadline.after(AIReplyRunner.QUERY_BUDGET),
         stillWanted: () -> Boolean = { true },
+        reservation: AIHourlyBudget.Reservation? = null,
     ): AIReplyResult =
         try {
             if (userText.isBlank()) {
                 noReply(NoReplyReason.NOTHING_TO_ASK, "the text is blank")
             } else {
                 val request = AIReplyRequest(
-                    AIPrompts.directAnswerSystemPrompt(contextNow(deadline)), userText, deadline, stillWanted,
+                    AIPrompts.directAnswerSystemPrompt(contextNow(deadline)), userText, deadline, stillWanted, reservation,
                 )
                 when (val result = generator.generateReply(request)) {
                     is AIReplyResult.NoReply -> result.copy(detail = redact(result.detail))

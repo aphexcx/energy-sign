@@ -99,8 +99,9 @@ class AIProviderTest {
 
     @Test
     fun `each provider gets its own generator`() {
-        val anthropic = AIReplyGenerators.forProvider(AIProvider.ANTHROPIC, "a", "o", { AIEffort.DEFAULT }, {})
-        val openAi = AIReplyGenerators.forProvider(AIProvider.OPENAI, "a", "o", { AIEffort.DEFAULT }, {})
+        val budget = AIHourlyBudget({ 0L })
+        val anthropic = AIReplyGenerators.forProvider(AIProvider.ANTHROPIC, "a", "o", { AIEffort.DEFAULT }, {}, budget = budget)
+        val openAi = AIReplyGenerators.forProvider(AIProvider.OPENAI, "a", "o", { AIEffort.DEFAULT }, {}, budget = budget)
 
         assertIs<AnthropicReplyGenerator>(anthropic)
         assertIs<OpenAIReplyGenerator>(openAi)
@@ -123,6 +124,7 @@ class AIProviderTest {
                 effort = { AIEffort.DEFAULT },
                 log = {},
                 serverClock = clock,
+                budget = AIHourlyBudget({ 0L }),
                 anthropicBaseUrl = anthropicApi.baseUrl,
                 openAiBaseUrl = "http://127.0.0.1:9/v1/",
             )
@@ -153,6 +155,7 @@ class AIProviderTest {
                     openAiApiKey = "openai-key-made-up",
                     effort = { AIEffort.DEFAULT },
                     log = {},
+                    budget = AIHourlyBudget({ 0L }),
                     anthropicBaseUrl = anthropicApi.baseUrl,
                     openAiBaseUrl = "${openAiApi.baseUrl}/v1/",
                 )

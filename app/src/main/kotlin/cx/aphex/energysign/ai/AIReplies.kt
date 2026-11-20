@@ -28,6 +28,9 @@ import java.time.format.DateTimeParseException
  */
 class AIReplies(private val context: Context) : AIReplySource {
 
+    /** The ONE rolling-hour wire budget shared by MessageManager's desk and the provider transport. */
+    override val hourlyBudget: AIHourlyBudget = AIHourlyBudget(nowMs = { SystemClock.elapsedRealtime() })
+
     // No key of this build may reach a log line, whatever a library writes into a message.
     private val secrets = Secrets(
         listOf(BuildConfig.ANTHROPIC_API_KEY, BuildConfig.OPENAI_API_KEY, BuildConfig.DEEPGRAM_API_KEY)
@@ -58,6 +61,8 @@ class AIReplies(private val context: Context) : AIReplySource {
             log = warn,
             info = info,
             serverClock = serverClock,
+            budget = hourlyBudget,
+            nanoTime = { SystemClock.elapsedRealtimeNanos() },
         )
         info("Replies are written by ${generator.name}")
         val service = AIReplyService(
@@ -82,7 +87,9 @@ class AIReplies(private val context: Context) : AIReplySource {
     }
 
     private val runner = AIReplyRunner(
-        reply = { text, deadline, stillWanted -> parts.service.replyTo(text, deadline, stillWanted) },
+        reply = { text, deadline, stillWanted, reservation ->
+            parts.service.replyTo(text, deadline, stillWanted, reservation)
+        },
         warmUp = if (warmUpWanted()) ({ parts.generator.warmUp() }) else null,
         log = info,
         // The same clock as the desk's (AppModule): it goes on while the board sleeps.
@@ -100,8 +107,12 @@ class AIReplies(private val context: Context) : AIReplySource {
 
     override fun warmUp(onDone: () -> Unit): Boolean = runner.warmUp(onDone)
 
-    override fun ask(text: String, stillWanted: () -> Boolean, onResult: (AIReplyResult) -> Unit) =
-        runner.ask(text, stillWanted, onResult)
+    override fun ask(
+        text: String,
+        stillWanted: () -> Boolean,
+        reservation: AIHourlyBudget.Reservation?,
+        onResult: (AIReplyResult) -> Unit,
+    ) = runner.ask(text, stillWanted, reservation, onResult)
 
     /** Asked on the main thread while this object is made: whatever fails in it, the warm-up is wanted. */
     private fun warmUpWanted(): Boolean =
