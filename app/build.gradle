@@ -148,7 +148,7 @@ dependencies {
     implementation 'androidx.recyclerview:recyclerview:1.4.0'
     implementation "androidx.activity:activity-ktx:1.13.0"
     implementation "androidx.lifecycle:lifecycle-extensions:2.2.0"
-    implementation 'androidx.lifecycle:lifecycle-viewmodel-ktx:2.11.0'
+    implementation 'androidx.lifecycle:lifecycle-viewmodel-ktx:2.11.1'
     implementation 'com.ibm.icu:icu4j:79.1'
     implementation 'com.google.code.gson:gson:2.15.0'
     implementation "org.jetbrains.kotlin:kotlin-serialization:$kotlin_version"
