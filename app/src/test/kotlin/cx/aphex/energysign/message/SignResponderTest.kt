@@ -109,16 +109,6 @@ class SignResponderTest {
         assertSame(Message.Marquee.User::class, sent!!::class)
     }
 
-    @Test
-    fun `garbled request bytes are answered like a normal request`() {
-        source.inChooserMode = true
-        request("~")
-
-        request("InvalidInput")
-
-        assertEquals(listOf(chooserJson(), chooserJson()), written)
-    }
-
     // ---- what a reply is to the sign
 
     @Test

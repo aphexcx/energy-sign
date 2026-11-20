@@ -389,7 +389,7 @@ class SignLinkTest {
         assertEquals(0, answers)
         assertEquals("micOff", ordinary.first())
         assertTrue(line.any { it.startsWith("log:Read an old request from UART") }, line.toString())
-        arrives(1_300, "~") // it asks again
+        arrives(1_300, "~") // its next request (in its chooser display: at a stand-still of its text, or within 8 s)
         runUntil(1_400)
         assertEquals(listOf("tx[micOff]@1300"), wire())
         assertEquals(listOf("micOff"), taken)

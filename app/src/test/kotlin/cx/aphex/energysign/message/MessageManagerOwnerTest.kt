@@ -66,7 +66,7 @@ class MessageManagerOwnerTest {
     private val owner = OwnerQueue()
     private lateinit var manager: MessageManager
 
-    /** How often the manager said that what the chooser shows has changed (each is a push, when pushes are on). */
+    /** How often the manager said that what the chooser shows has changed (each is a push). */
     private var pushes = 0
 
     private val countPushes: () -> Unit = { pushes++ }

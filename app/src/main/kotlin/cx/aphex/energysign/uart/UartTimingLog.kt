@@ -15,7 +15,7 @@ package cx.aphex.energysign.uart
  * different lines can be subtracted. The lines:
  *
  *     rx t_us=T n=N bytes=[...] chunks=1 first_us=T empty_us=E
- *         One request read from the sign: N bytes, the last of them `~` or `?` (bytes outside
+ *         One request read from the sign: N bytes, the last of them `~` (bytes outside
  *         printable ASCII as \xNN). T: the read that found it returned. E: the last read before
  *         it that found nothing returned, so the byte became readable between E and T. Two
  *         request bytes in one rx with T - E of a few ms mean the platform delivered them

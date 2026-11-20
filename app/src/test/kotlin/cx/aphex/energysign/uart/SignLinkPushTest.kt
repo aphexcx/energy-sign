@@ -75,7 +75,7 @@ class SignLinkPushTest {
     private var failWrites = 0
     private var failZeroWrites = 0
 
-    /** The next write or break call stalls this long BEFORE the line sees it (once): the thread was taken off the processor. */
+    /** The next write call stalls this long BEFORE the line sees it (once): the thread was taken off the processor. */
     private var stallNs = 0L
 
     /** Every write call that takes bytes returns this much AFTER the line saw them. */
@@ -293,7 +293,7 @@ class SignLinkPushTest {
     private fun warnings() = line.filter { it.startsWith("warn:") }
     private fun drops() = timingLines.filter { it.startsWith("drop ") }
 
-    /** The frames among what was handed over: neither zeros nor a poll report. */
+    /** The frames among what was handed over: what is not zeros. */
     private fun frames() = txs.filter { !it.zeros }
 
     @AfterEach
@@ -733,8 +733,8 @@ class SignLinkPushTest {
         // once more. The frame may be a damaged answer to that request, and then the sign wants the line quiet
         // for a second and ten ms: not before that. Nothing crossed the second one, and it is the last
         assertEquals(listOf("tx[00x72]@100", "tx[H:$long]@170", "tx[00x72]@1230", "tx[H:$long]@1300"), wire())
-        // the second one is told to nobody: the sign asked and was not answered, and where it is
-        // by now (it gives its chooser display up when no answer comes) the link does not know
+        // the second one is told to nobody: the sign asked and was not answered, and the link does not
+        // know it to be in its chooser display any more (only a chooser message that answers it says so)
         assertEquals(listOf(long), told)
         assertTrue(line.any { it.startsWith("log:Pushed >H:$long< to UART, which is not known to be in its chooser display") }, line.toString())
     }

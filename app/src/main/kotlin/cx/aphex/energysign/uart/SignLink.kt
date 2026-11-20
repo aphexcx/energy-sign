@@ -136,8 +136,8 @@ class LineClock(private val baud: Int, startNs: Long) {
  * [ACTIVE_WINDOW_MS], one every [IDLE_PAUSE_MS] otherwise, and a sleep after every read that
  * finds nothing, so the loop never spins. Measured: a read costs 0.6 ms, 6 % of one core.
  *
- * WHAT ONE REQUEST IS. The sign sends one byte (`~`) and then listens. (The firmware that
- * listens for pushes does not poll: a `?` is no request any more.) So a read that
+ * WHAT ONE REQUEST IS. The sign sends one byte (`~`) and then listens. (It does not poll: a
+ * `?` is no request.) So a read that
  * ends in the request byte is one request, and is answered at once: [answer] gets the bytes and
  * calls [send] (what the reply is, is not decided here). A read that does not end in the request
  * byte is not a request. It is the name of a parse error the firmware prints (`InvalidInput`,
@@ -151,7 +151,9 @@ class LineClock(private val baud: Int, startNs: Long) {
  * thread was kept from the wire: a sleep that overran, reads that kept failing). And it knows
  * how long the sign listens: a second behind every `~`, wherever it is. A request that may have
  * waited longer than [FRESH_MS] is old: it is read away unanswered, nothing is taken, and the
- * sign asks again. Reading it away ends nothing and owes nothing. The same limit holds for the
+ * sign asks again (the firmware: once more when a read brought nothing usable, and in its
+ * chooser display at every stand-still of its text and every 8 s). Reading it away ends nothing
+ * and owes nothing. The same limit holds for the
  * answer: its first byte must be with the transmitter before the limit, or the frame is a
  * failed one.
  *
@@ -257,7 +259,9 @@ class LineClock(private val baud: Int, startNs: Long) {
  *  - a pushed frame that was DONE, and then something the sign sent into it: pending again,
  *    pushed again 1010 ms behind it.
  *  - a request read away as old: nothing changes. The sign asks again, and that request is
- *    answered.
+ *    answered. (When the link is kept from the wire for over a second, the sign's request and
+ *    the one it makes behind it can both be old; it then shows what it has until its next
+ *    request in its chooser display, at a stand-still of its text or within 8 s.)
  *  - the attention alone (leaving chooser mode): pending. It carries nothing and proves
  *    nothing. It is not raised a second time for the same change ([givenOnceFor]: runs of
  *    zeros without end at a sign that may be showing a text); the sign's next request is
@@ -267,8 +271,8 @@ class LineClock(private val baud: Int, startNs: Long) {
  *    It ends the changes before it; the new one was counted after it was made and is pending.
  *  - [stop]: nothing is written any more and nothing is called done.
  *
- * BEHIND A PUSHED FRAME. The firmware that listens for pushes sends a request only when the line
- * has been quiet for [SIGN_QUIET_BEFORE_REQUEST_MS]. Rule 3 ends where the frame ends, by the
+ * BEHIND A PUSHED FRAME. The sign sends a request only when the line has been quiet for
+ * [SIGN_QUIET_BEFORE_REQUEST_MS]. Rule 3 ends where the frame ends, by the
  * line clock; so a request can be told from what came into the frame as long as the link looks
  * at the wire once inside those 10 ms. It does: after a push the loop keeps its short pause.
  * The line clock may say the frame is gone a call's length late (see [LineClock]), a read costs
@@ -379,7 +383,7 @@ class SignLink(
     private var lastEmptyReadNs = takenUpToNs
     private var readFailures = 0
 
-    /** The attention of the words `auto` and `zeros`: 0x00 is the start bit and eight data bits LOW, then the stop bit HIGH. */
+    /** The attention: 0x00 is the start bit and eight data bits LOW, then the stop bit HIGH. */
     private val zeroRun = ByteArray(ATTN_BREAK_MS * baud / 10_000)
 
     // What send() did for the request being answered; logged after the write.
@@ -405,8 +409,8 @@ class SignLink(
      */
     fun requestPush() {
         want()
-        // (The link thread asking for itself, from a change it has just made, needs no waking; the
-        // push follows in that very turn, and a wake-up it gives itself costs it nothing.)
+        // From any thread. The link thread asking for itself, from a change it has just made,
+        // pushes in that very turn; the wake-up it gives itself cuts one later pause short.
         wake()
     }
 
@@ -843,10 +847,9 @@ class SignLink(
         /**
          * From the START of the attention (before the call that begins it: the earliest the line
          * can have gone LOW) to the first byte of the pushed frame being with the transmitter.
-         * The sign listens 150 ms for that byte and then asks with `~` (the firmware's lists,
-         * lm-t7f ROUND-3-PR6-fixes-lists, rows 4 and 7: "150 ms from the line going HIGH",
-         * "150 ms from the LOW"; the stricter of the two is counted here, from the LOW's start).
-         * A frame begun later can run into that request. 30 ms are kept in hand for what the
+         * The sign listens 150 ms for that byte, counted from the line going HIGH again, and then
+         * asks with `~` (the firmware lane's answer of 2026-11-19); counted here from the LOW's
+         * start, about 50 ms stricter, as ruled. A frame begun later can run into that request. 30 ms are kept in hand for what the
          * link cannot see: where in its call the write handed the byte over, and the sign's own
          * clock. Measured on the sign: an attention and its guard take 70 to 90 ms.
          */
@@ -861,13 +864,13 @@ class SignLink(
 
         /**
          * How long the sign can be busy with a frame of which it got the start and not the end:
-         * the second the push firmware gives the next byte of an answer, and the 10 ms more it
+         * the second the sign gives the next byte of an answer, and the 10 ms more it
          * adds itself when it lets the rest of such a frame pass (its 1010). No push starts in
          * that time.
          */
         const val TORN_FRAME_MS: Int = 1_010
 
-        /** The firmware that listens for pushes asks only after the line has been quiet for this long (its REQUEST_QUIET_MS). */
+        /** The sign asks only after the line has been quiet for this long (its REQUEST_QUIET_MS). */
         const val SIGN_QUIET_BEFORE_REQUEST_MS: Int = 10
 
         // ---- Reading
