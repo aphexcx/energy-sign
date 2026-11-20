@@ -2777,7 +2777,7 @@ class MessageManagerOwnerTest {
         }
         /** The score and the best as the sign is shown them, from here to the next stored message. */
         fun shown(app: App): List<String> = untilStored(app).zipWithNext().mapNotNull { (before, it) ->
-            if (before == "NEW${Message.VT}BEST!") "a new best of ${it.trim()}" else it.takeIf { it.startsWith("SCORE") || it.startsWith("BEST") }
+            if (before == "HIGH SCORE") "a new best of ${it.trim()}" else it.takeIf { it.startsWith("SCORE") || it.startsWith("BEST") }
         }
         val presses: Map<String, (App) -> Unit> = linkedMapOf(
             "!jump from the phone" to { app -> app.phone("!jump") },
@@ -2910,7 +2910,7 @@ class MessageManagerOwnerTest {
             ownerRuns()
             asks(app, 100)
         }
-        cell("the sign asks again three seconds into a game: the picture of the hit is the one of the hit (the post at column 12, the starfield where it stood then), not the last it asked for", "00a12p22e2s16") {
+        cell("the sign asks again three seconds into a game: the picture of the hit is the one of the hit (the post at column 12, the starfield where it stood then, the score), not the last it asked for", "00a12p22e2s16n0") {
             val (app, began) = inPlay()
             app.now = began + 3_000
             app.manager.getNextMessage().str
@@ -2967,7 +2967,7 @@ class MessageManagerOwnerTest {
         assertEquals(
             listOf<Pair<String, Any?>>(
                 "after a restart in the middle of a game the sign gets" to STORED,
-                "a first score of 1 is a new best, with its own show" to listOf("X", "NEW${Message.VT}BEST!", "  1   ", ""),
+                "a first score of 1 is a new best, with its own show" to listOf("X", "HIGH SCORE", "  1   ", ""),
                 "switched off before the restart, !game after it" to STORED,
                 "switched on again, a game without a score after the restart" to listOf("SCORE 0", "BEST 1"),
                 "!game reset, and a game without a score" to listOf("SCORE 0", "BEST 0"),
