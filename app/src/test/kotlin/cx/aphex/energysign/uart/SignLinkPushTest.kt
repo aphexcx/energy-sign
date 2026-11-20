@@ -646,14 +646,14 @@ class SignLinkPushTest {
 
     @Test
     fun `a reply whose first byte is handed over after the sign has stopped listening does not settle the change either`() {
-        // called at 0, in time; the thread is taken off inside the call and the line sees the first byte at 60:
-        // in its chooser display the sign listened 60 ms, and the link's own limit for the first byte is 50
-        stallNs = 60 * ms
+        // called at 0, in time; the thread is taken off inside the call and the line sees the first byte at 950:
+        // the sign listens a second, and the link's own limit for the first byte is 900 ms
+        stallNs = 950 * ms
         command(0, "B")
         arrives(0, "~")
         runUntil(2_000)
         // the reply went out and counts as sent; the change is pushed when the line is free
-        assertEquals(listOf("tx[H:B]@60", "tx[00x72]@62", "tx[H:B]@132"), wire())
+        assertEquals(listOf("tx[H:B]@950", "tx[00x72]@952", "tx[H:B]@1022"), wire())
         // the push is told to nobody: a sign that asked and may not have its answer is not known to be in its chooser display
         assertEquals(emptyList(), told)
     }
@@ -833,6 +833,44 @@ class SignLinkPushTest {
         assertEquals(2, warnings().size)
         runUntil(5_400)
         assertEquals(4, warnings().size, warnings().toString())
+    }
+
+    // ================= how long a request is good for: a second, wherever the sign is (the 3.1 firmware waits a second behind every `~`)
+
+    @Test
+    fun `wherever the sign is, a request that waited up to 900 ms is answered, an older one is read away, takes nothing and brings no push`() {
+        // where the sign is, as the link has seen it. Each place starts from a link of its own
+        val places = linkedMapOf<String, SignLinkPushTest.() -> Unit>(
+            "the link has just started" to { runUntil(0) },
+            "it asked and got the chooser message" to { theSignIsInItsChooserDisplay() },
+            "it asked and got an ordinary message" to { theSignIsInItsChooserDisplay(); signShowsAnOrdinaryMessage() },
+            "the chooser was pushed to it" to { theSignIsInItsChooserDisplay(); command(0, "B"); runUntil(400) },
+            "it was given the attention alone, the app has left chooser mode" to { theSignIsInItsChooserDisplay(); command(0, null); runUntil(400) },
+        )
+        val wrong = mutableListOf<String>()
+        for ((place, getThere) in places) for (waitedMs in listOf(80L, 950L)) {
+            SignLinkPushTest().apply {
+                getThere()
+                val answered = answers
+                val written = txs.size
+                val takenBefore = taken.toList()
+                // the link is kept from the wire this long, and the request comes just after the read before it
+                val t = now / ms
+                sleepOverrunNs = waitedMs * ms
+                arrives(t + 1, "~")
+                runUntil(t + waitedMs + 1_500)
+                val after = txs.drop(written)
+                val right = if (waitedMs <= SignLink.FRESH_MS) {
+                    answers == answered + 1 && after.none { it.zeros }
+                } else {
+                    answers == answered && after.isEmpty() && taken == takenBefore && line.any { it.contains("Read an old request") }
+                }
+                if (!right || faults.isNotEmpty()) {
+                    wrong += "$place, $waitedMs ms: ${answers - answered} answers, then ${after.map { if (it.zeros) "00x${it.bytes.size}" else it.text }} $faults"
+                }
+            }
+        }
+        assertEquals(emptyList(), wrong)
     }
 
     // ================= what a push can claim: the sign listens for one only in its chooser display (the mayor's ruling, round 3)

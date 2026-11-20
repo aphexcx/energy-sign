@@ -382,16 +382,16 @@ class SignLinkTest {
         inChooserDisplay()
         chooser = null // !micOff, then !endchoose: the app has left, the sign does not know yet
         ordinary.addFirst("micOff")
-        failReads = SignLink.QUICK_READ_RETRIES + 2 // 20 ms of quick tries, then two long pauses: 220 ms off the wire
+        failReads = SignLink.QUICK_READ_RETRIES + 10 // 20 ms of quick tries, then ten long pauses: 1020 ms off the wire
         arrives(1, "~")
-        runUntil(300)
-        assertEquals(emptyList(), wire()) // the sign gave up 160 ms ago
+        runUntil(1_200)
+        assertEquals(emptyList(), wire()) // the sign gave up after its second
         assertEquals(0, answers)
         assertEquals("micOff", ordinary.first())
         assertTrue(line.any { it.startsWith("log:Read an old request from UART") }, line.toString())
-        arrives(400, "~") // it asks again
-        runUntil(500)
-        assertEquals(listOf("tx[micOff]@400"), wire())
+        arrives(1_300, "~") // it asks again
+        runUntil(1_400)
+        assertEquals(listOf("tx[micOff]@1300"), wire())
         assertEquals(listOf("micOff"), taken)
     }
 
@@ -462,15 +462,16 @@ class SignLinkTest {
 
     @Test
     fun `the first byte of an answer must leave while the sign listens, a transmitter that takes it too late gets nothing more`() {
-        // the gate's case: a request 45 ms old is fresh, but its first byte could only go at 70 ms; the sign left at 60
+        // the gate's case, by the second the sign listens: a request 880 ms old is fresh, but its first byte could
+        // only go at 925 ms, after the 900 in which the link wants it out
         inChooserDisplay()
         chooser = null
         ordinary.addFirst("micOff")
-        sleepOverrunNs = 43 * ms // read 45 ms after the read before it
+        sleepOverrunNs = 878 * ms // read 880 ms after the read before it
         arrives(now / ms + 1, "~")
         takesBeforeStuck = 0
-        stuckUntilNs = now + 70 * ms
-        runUntil(now / ms + 150)
+        stuckUntilNs = now + 925 * ms
+        runUntil(now / ms + 1_100)
         assertEquals(emptyList(), wire()) // nothing was written after the sign had stopped listening
         assertEquals(emptyList(), taken)
         assertEquals("micOff", ordinary.first()) // handed back
@@ -527,9 +528,9 @@ class SignLinkTest {
         // 33 bytes with a request byte last: the first read is full, so it says nothing about when the rest came
         inChooserDisplay()
         chooser = null
-        sleepOverrunNs = 80 * ms
+        sleepOverrunNs = 950 * ms
         arrives(5, "x".repeat(SignLink.READ_BUFFER_LEN) + "~")
-        runUntil(200)
+        runUntil(1_200)
         assertEquals(emptyList(), wire())
         assertEquals(emptyList(), taken)
     }
@@ -685,7 +686,7 @@ class SignLinkTest {
         arrives(13, "x")
         runUntil(30)
         assertEquals("rx t_us=10000 n=1 bytes=[~] chunks=1 first_us=10000 empty_us=0", timingLines.single { it.startsWith("rx ") })
-        assertEquals("tx t_us=10000 n=5/5 kind=report call_us=10000 rx_us=10000", timingLines.single { it.startsWith("tx ") })
+        assertEquals("tx t_us=10000 n=3/3 kind=message call_us=10000 rx_us=10000", timingLines.single { it.startsWith("tx ") })
         assertEquals("drop t_us=14000 n=1 bytes=[x]", timingLines.single { it.startsWith("drop ") })
     }
 
