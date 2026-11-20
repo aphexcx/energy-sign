@@ -1,0 +1,186 @@
+package cx.aphex.energysign.ai
+
+import okhttp3.Interceptor
+import okhttp3.Response
+import okhttp3.internal.http2.ConnectionShutdownException
+import okhttp3.internal.http2.ErrorCode
+import okhttp3.internal.http2.StreamResetException
+import java.io.IOException
+import java.net.ProtocolException
+import java.time.Duration
+
+/**
+ * The ONE rolling-hour ceiling on paid HTTP requests leaving the app, shared between
+ * [AIQueryDesk] (owner thread) and [WireBudgetInterceptor] (call I/O thread).
+ *
+ * Invariant under [lock]: after head-pruning timestamps at least [HOUR_MS] old,
+ * `sentAt.size + reserved <= callsPerHour`. The budget reads its own monotonic [nowMs] clock
+ * under [lock] on every operation. Kept in memory only: a restart empties it.
+ */
+class AIHourlyBudget(
+    private val nowMs: () -> Long,
+    val callsPerHour: Int = DEFAULT_CALLS_PER_HOUR,
+) {
+    private val lock = Any()
+    private val sentAt = ArrayDeque<Long>()
+    private var reserved = 0
+
+    private enum class State { RESERVED, IN_FLIGHT, STAMPED, RELEASED }
+
+    internal enum class BeginResult { OK, ALREADY_SENT, RELEASED }
+
+    inner class Reservation internal constructor() {
+        private var state = State.RESERVED
+
+        internal fun isReserved(): Boolean = synchronized(lock) { state == State.RESERVED }
+
+        internal fun beginSend(): BeginResult = synchronized(lock) {
+            when (state) {
+                State.RESERVED -> {
+                    state = State.IN_FLIGHT
+                    BeginResult.OK
+                }
+                State.IN_FLIGHT, State.STAMPED -> BeginResult.ALREADY_SENT
+                State.RELEASED -> BeginResult.RELEASED
+            }
+        }
+
+        internal fun abortPreWrite() = synchronized(lock) {
+            if (state == State.IN_FLIGHT) state = State.RESERVED
+        }
+
+        /** Records a send using [nowMs] under [lock]. Returns false if already stamped or released. */
+        fun stamp(): Boolean = synchronized(lock) {
+            if (state != State.RESERVED && state != State.IN_FLIGHT) return false
+            stampLocked()
+            true
+        }
+
+        /**
+         * Ends this reservation. Returns true if a request was sent (or is still in flight on an
+         * async transport such as Ktor-OkHttp after timeout cancellation, stamped conservatively),
+         * or false if nothing left (place returned and handle poisoned).
+         */
+        fun release(): Boolean = synchronized(lock) {
+            when (state) {
+                State.RESERVED -> {
+                    reserved--
+                    state = State.RELEASED
+                    false
+                }
+                State.IN_FLIGHT -> {
+                    stampLocked()
+                    true
+                }
+                State.STAMPED -> true
+                State.RELEASED -> false
+            }
+        }
+
+        private fun stampLocked() {
+            val now = nowMs()
+            pruneLocked(now)
+            reserved--
+            sentAt.addLast(now)
+            state = State.STAMPED
+        }
+    }
+
+    fun hasRoom(): Boolean = synchronized(lock) {
+        pruneLocked(nowMs())
+        sentAt.size + reserved < callsPerHour
+    }
+
+    fun reserve(): Reservation? = synchronized(lock) {
+        pruneLocked(nowMs())
+        if (sentAt.size + reserved >= callsPerHour) return null
+        reserved++
+        Reservation()
+    }
+
+    internal fun usedCount(): Int = synchronized(lock) {
+        pruneLocked(nowMs())
+        sentAt.size + reserved
+    }
+
+    private fun pruneLocked(now: Long) {
+        while (sentAt.isNotEmpty() && now - sentAt.first() >= HOUR_MS) sentAt.removeFirst()
+    }
+
+    companion object {
+        /** Room for a reply every two minutes (30) plus the 15 calls cooldowns allow when failing. */
+        const val DEFAULT_CALLS_PER_HOUR = 45
+        const val HOUR_MS = 3_600_000L
+    }
+}
+
+/** Per-call context tagged onto an OkHttp request; `reservation == null` marks a free model GET. */
+class WireCallContext(
+    val deadline: Deadline,
+    val minTimeToSend: Duration,
+    val reservation: AIHourlyBudget.Reservation?,
+)
+
+/** Refusal thrown before bytes leave; extends [ProtocolException] so OkHttp never retries it. */
+class WireSendBlockedException(
+    val reason: NoReplyReason,
+    val detail: String,
+) : ProtocolException("$reason: $detail") {
+    companion object {
+        fun findIn(failure: Throwable): WireSendBlockedException? =
+            generateSequence(failure) { it.cause }.take(12).filterIsInstance<WireSendBlockedException>().firstOrNull()
+    }
+}
+
+/**
+ * The ONE wire gate, installed as an OkHttp network interceptor below `ConnectInterceptor`
+ * and above `CallServerInterceptor` for both providers.
+ */
+class WireBudgetInterceptor : Interceptor {
+
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        val ctx = request.tag(WireCallContext::class.java)
+            ?: throw WireSendBlockedException(NoReplyReason.WITHDRAWN, "not sent: untagged request")
+
+        val reservation = ctx.reservation
+        if (reservation == null) {
+            if (request.method != "GET") {
+                throw WireSendBlockedException(NoReplyReason.WITHDRAWN, "not sent: free tag on ${request.method}")
+            }
+            if (ctx.deadline.remainingMs() <= 0L) {
+                throw WireSendBlockedException(NoReplyReason.TIMEOUT, "not sent: free request deadline passed")
+            }
+            return chain.proceed(request)
+        }
+
+        if (chain.call().isCanceled()) throw IOException("Canceled")
+        val leftMs = ctx.deadline.remainingMs()
+        if (leftMs < ctx.minTimeToSend.toMillis()) {
+            throw WireSendBlockedException(
+                NoReplyReason.TOO_LATE_TO_SEND,
+                "not sent: ${leftMs / 1000} s of the query's time were left",
+            )
+        }
+        when (reservation.beginSend()) {
+            AIHourlyBudget.BeginResult.OK -> Unit
+            AIHourlyBudget.BeginResult.ALREADY_SENT ->
+                throw WireSendBlockedException(NoReplyReason.PROVIDER_ERROR, "not sent: budget place already used")
+            AIHourlyBudget.BeginResult.RELEASED ->
+                throw WireSendBlockedException(NoReplyReason.WITHDRAWN, "not sent: budget place was released")
+        }
+
+        return try {
+            chain.proceed(request).also { reservation.stamp() }
+        } catch (e: Throwable) {
+            if (isPreWriteFailure(e)) reservation.abortPreWrite() else reservation.stamp()
+            throw e
+        }
+    }
+
+    private fun isPreWriteFailure(failure: Throwable): Boolean =
+        generateSequence(failure) { it.cause }.take(12).any { cause ->
+            cause is ConnectionShutdownException ||
+                (cause is StreamResetException && cause.errorCode == ErrorCode.REFUSED_STREAM)
+        }
+}

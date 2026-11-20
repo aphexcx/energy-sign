@@ -161,8 +161,8 @@ class MessageManager(
      * the warm-up. (Declared after [change]: the warm-up may end at any moment from here on.)
      */
     private val desk: AIQueryDesk<Message.Marquee.AIQuery> = AIQueryDesk(
-        start = { query ->
-            replies.ask(query.str, stillWanted = { stillListed(query) }) { result ->
+        start = { query, reservation ->
+            replies.ask(query.str, stillWanted = { stillListed(query) }, reservation = reservation) { result ->
                 // On the call's thread: the reply is made into its message here, so that the
                 // owner has nothing to do with its text. Whatever happens in that, the end of
                 // the call is posted.
@@ -181,6 +181,8 @@ class MessageManager(
         },
         log = { logD(it) },
         warmingUp = replies.warmUp { change { warmUpEnded() } },
+        nowMs = nowMs,
+        budget = replies.hourlyBudget,
     )
 
     /**
@@ -272,6 +274,7 @@ class MessageManager(
             runnerColour = context.getColor(R.color.icon_defaultblue),
             crashColour = context.getColor(R.color.instahandle),
             scoreColour = context.getColor(R.color.chonkyslide_defaultpink),
+            rules = jumpGame.rules,
         ),
         best = gameStore.loadBest(),
         on = gameStore.loadOn(),

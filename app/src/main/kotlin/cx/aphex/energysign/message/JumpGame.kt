@@ -66,14 +66,25 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
         val longestMs: Long = 180_000,
         /** The runner's two pictures take turns this often while it is on the ground. */
         val strideMs: Long = 160,
-    )
+        /**
+         * The starfield behind the play moves at this share of the ground's speed (what is far
+         * away goes by slower), so it gets faster as the game does. Its place is a column,
+         * counted up to [starColumns], where it begins again.
+         */
+        val starsShare: Double = 0.25,
+        val starColumns: Int = GAME_STAR_COLUMNS,
+    ) {
+        /** Where the starfield stands when the ground has moved [groundColumns] (before the start: less than none). */
+        fun stars(groundColumns: Double): Int = Math.floorMod(Math.floor(groundColumns * starsShare + 1e-6).toInt(), starColumns)
+    }
 
     class Obstacle(val kind: Int, val column: Int)
 
     /**
      * What the sign draws: how many rows the runner is up, which of its two pictures, the
      * obstacles on the face. For the shows also: the runner's column when it is not its place
-     * in the game, the colours of the runner and of the obstacles, and an effect.
+     * in the game, the colours of the runner and of the obstacles, and an effect. And where the
+     * starfield behind it all stands ([Rules.stars]); null: no starfield.
      */
     class Frame(
         val rise: Int,
@@ -82,6 +93,7 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
         val runnerAt: Int? = null,
         val colours: Pair<Int, Int>? = null,
         val effect: Int = 0,
+        val stars: Int? = null,
     )
 
     enum class End { HIT, TOO_LONG }
@@ -100,8 +112,10 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
         var started: Int = 0,
         var score: Int = 0,
         var ended: End? = null,
+        /** How many columns the ground has moved since the game began: what the starfield goes by. */
+        var ground: Double = 0.0,
     ) {
-        fun copy() = Moment(ticks, jumpedAt, coming.mapTo(ArrayList()) { Coming(it.kind, it.shape, it.x, it.passed) }, nextAfter, started, score, ended)
+        fun copy() = Moment(ticks, jumpedAt, coming.mapTo(ArrayList()) { Coming(it.kind, it.shape, it.x, it.passed) }, nextAfter, started, score, ended, ground)
     }
 
     private var began = false
@@ -172,7 +186,7 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
     fun picture(): Frame {
         val stride = if (at.jumpedAt >= 0) 0 else ((at.ticks * rules.tickMs / rules.strideMs) % 2).toInt()
         val onTheFace = at.coming.filter { it.x < rules.faceColumns }.map { Obstacle(it.kind, Math.floor(it.x).toInt()) }
-        return Frame(rise().coerceAtMost(rules.rows), stride, onTheFace)
+        return Frame(rise().coerceAtMost(rules.rows), stride, onTheFace, stars = rules.stars(at.ground))
     }
 
     /**
@@ -191,6 +205,7 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
 
         val speed = minOf(rules.topSpeed, rules.startSpeed + rules.fasterEverySecond * elapsedMs / 1000.0)
         val moved = speed * rules.tickMs / 1000.0
+        now.ground += moved
         val runnerEnd = rules.runnerAt + rules.runner.width
         val each = now.coming.iterator()
         while (each.hasNext()) {
@@ -238,8 +253,11 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
  * the contract note of the firmware's half (game-contract.md, version 1). The text is the rise
  * (one digit), the picture (one digit), then the obstacles (kind letter and left column), the
  * runner's column when it is not the usual one, the colours and the effect when they are not
- * the usual ones (the sign's own: a blue runner, red obstacles, so a game in play sends none). Whatever a frame holds, what is written here is a frame the sign can read:
- * the sign draws nothing of a frame with a fifth obstacle or a number out of range.
+ * the usual ones (the sign's own: a blue runner, red obstacles, so a game in play sends none).
+ * Last, the starfield's place (`s` and a column: the sign draws its fixed pattern of dim stars
+ * shifted left by that much; the note's version 4). Whatever a frame holds,
+ * what is written here is a frame the sign can read: the sign draws nothing of a frame with a
+ * fifth obstacle or a number out of range.
  */
 fun gameFrame(frame: JumpGame.Frame): Message.GameFrame {
     val text = StringBuilder().append(frame.rise.coerceIn(0, 7)).append(frame.picture.coerceIn(0, 1))
@@ -247,8 +265,16 @@ fun gameFrame(frame: JumpGame.Frame): Message.GameFrame {
     frame.runnerAt?.let { text.append('r').append(it.coerceIn(-99, 99)) }
     frame.colours?.let { (runner, obstacles) -> text.append('p').append(runner.coerceIn(0, 7)).append(obstacles.coerceIn(0, 7)) }
     if (frame.effect in 1..2) text.append('e').append(frame.effect)
+    // THE STARFIELD NEEDS FIRMWARE OF THE CONTRACT NOTE'S VERSION 4. Firmware of versions 1 to 3 reads
+    // `s` as a letter it does not know and draws nothing of the frame. That is not guarded against
+    // here, by the owner's rule (one code path: no switch, no fallback for an older firmware): the
+    // app with the starfield and the firmware with it go on the sign together and come off together.
+    frame.stars?.let { text.append('s').append(Math.floorMod(it, GAME_STAR_COLUMNS)) }
     return Message.GameFrame(text.toString())
 }
+
+/** The starfield's place on the wire is 0 to one less than this (the contract note, version 4: `s` and 0 to 59; anything else is a bad frame). */
+const val GAME_STAR_COLUMNS: Int = 60
 
 /** One step of a show: a message of a kind the sign has, shown once; or game frames for [ms], each made for the time since the step began. */
 sealed class Beat {
@@ -263,20 +289,35 @@ sealed class Beat {
  * The frames' effects are decoration only: a sign that draws them as none shows the same show.
  * The colours of the messages come from whoever makes this (the app's resources).
  */
-class GameShows(private val runnerColour: Int, private val crashColour: Int, private val scoreColour: Int) {
+class GameShows(
+    private val runnerColour: Int,
+    private val crashColour: Int,
+    private val scoreColour: Int,
+    /** The rules of the game the shows are around: for the starfield, which moves in them as it does in the game. */
+    private val rules: JumpGame.Rules = JumpGame.Rules(),
+) {
     private fun flash(text: String) = Beat.Once(Message.FlashingAnnouncement.CustomFlashyAnnouncement(text))
 
     fun intro(): List<Beat> = listOf(
         Beat.Once(Message.ColorMessage.IconInvaders.DREAMSTATE(runnerColour)),
         Beat.Once(Message.ColorMessage.ChonkySlide("READY?", scoreColour, delayMs = 600)),
         flash("JUMP!"),
-        // the runner runs in from the left to its place, in half a second, with stars behind it
-        Beat.Frames(500) { t -> JumpGame.Frame(0, (t / 100 % 2).toInt(), emptyList(), runnerAt = (-12 + 14 * t / 500).toInt(), effect = 1) },
+        // the runner runs in from the left to its place, in half a second, with stars behind it; the
+        // starfield slides at the game's first speed into the place the game begins at
+        Beat.Frames(500) { t ->
+            JumpGame.Frame(
+                0, (t / 100 % 2).toInt(), emptyList(), runnerAt = (-12 + 14 * t / 500).toInt(), effect = 1,
+                stars = rules.stars(-(500 - t) * rules.startSpeed / 1000.0),
+            )
+        },
     )
 
-    /** The picture of the hit ([last], the last frame of the game) stands for a moment, the runner blinking red. */
+    /** The picture of the hit ([last], the last frame of the game) stands for a moment, the runner blinking red; the starfield stands where it was. */
     private fun hit(last: JumpGame.Frame?) = Beat.Frames(700) { t ->
-        JumpGame.Frame(last?.rise ?: 0, 0, last?.obstacles.orEmpty(), colours = (if (t / 100 % 2 == 0L) 2 else 0) to 2, effect = if (t < 100) 2 else 0)
+        JumpGame.Frame(
+            last?.rise ?: 0, 0, last?.obstacles.orEmpty(), colours = (if (t / 100 % 2 == 0L) 2 else 0) to 2, effect = if (t < 100) 2 else 0,
+            stars = last?.stars,
+        )
     }
 
     fun over(score: Int, best: Int, last: JumpGame.Frame?): List<Beat> = listOf(
@@ -296,9 +337,13 @@ class GameShows(private val runnerColour: Int, private val crashColour: Int, pri
         Beat.Once(Message.ColorMessage.ChonkySlide(score.toString().let { it.padStart((6 + it.length) / 2).padEnd(6) }, scoreColour, delayMs = 1500)),
         // two seconds of the runner hopping across the face through all the colours, with stars.
         // It sets off in its own colour, blue (6: the sign's colour for the runner when none is sent).
+        // The starfield goes by as at the game's top speed.
         Beat.Frames(2_000) { t ->
             val hop = Math.abs(Math.sin(t / 140.0)) * 3
-            JumpGame.Frame(hop.toInt(), 0, emptyList(), runnerAt = (2 + 45 * t / 2_000).toInt(), colours = (1 + (5 + t / 120) % 7).toInt() to 2, effect = 1)
+            JumpGame.Frame(
+                hop.toInt(), 0, emptyList(), runnerAt = (2 + 45 * t / 2_000).toInt(), colours = (1 + (5 + t / 120) % 7).toInt() to 2, effect = 1,
+                stars = rules.stars(t * rules.topSpeed / 1000.0),
+            )
         },
         Beat.Once(Message.Starfield(stars = 600)),
     )
