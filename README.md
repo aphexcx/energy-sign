@@ -59,9 +59,16 @@ One command brings it up:
 tools/sign-on-mac.sh --firmware ../arduino-led-marquee
 ```
 
-It starts an Android emulator (or uses the one that runs), installs the debug build, tells
-the app where the sign is, starts the app, and then runs the firmware emulator with its view
-in the terminal. `Ctrl-C` ends it and stops the Android emulator it started.
+A fresh checkout needs `app/google-services.json` (the Firebase settings, which are not in the
+repository: copy it from a checkout that has it) before `:app:assembleDebug` builds.
+
+It starts an Android emulator (or uses the sign's own one that runs), installs the debug build,
+tells the app where the sign is, starts the app, and then runs the firmware emulator with its
+view in the terminal. `Ctrl-C` ends it and stops the Android emulator it started, and only
+that one: a port that something else holds (another virtual device, or one still starting) is
+refused, and nothing is stopped. When the installed app cannot be replaced (a build signed with
+another key, or no room), the script removes it and everything it saved there, says so, and
+installs the build: the virtual device is the script's own and holds test data, so it does not ask.
 
 - **The keyboard** of the sign is the Android emulator's window: click it and type. The up
   arrow starts the jump game and jumps.
