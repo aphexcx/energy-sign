@@ -27,7 +27,8 @@ FIRMWARE="${SIGN_FIRMWARE:-$(dirname "$REPO")/arduino-led-marquee}"
 EMU=""
 IMAGE=""
 APK="$REPO/app/build/outputs/apk/debug/app-debug.apk"
-AVD="${SIGN_AVD:-EnergySign}"
+DEFAULT_AVD=EnergySign
+AVD="${SIGN_AVD:-$DEFAULT_AVD}"
 AVD_HOME="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
 DEFAULT_ADB_PORT=5584
 ADB_PORT="${SIGN_ADB_PORT:-$DEFAULT_ADB_PORT}"
@@ -84,8 +85,29 @@ running() { [ "$(adb_emu get-state 2>/dev/null)" = "device" ]; }
 # The process that listens on a TCP port of this computer; nothing when none does.
 listener() { lsof -nP -t -iTCP:"$1" -sTCP:LISTEN 2>/dev/null | head -1; }
 
-# An Android emulator of the sign's own virtual device is up at $SERIAL (not another one).
+# THE ONE CHECK: at this moment the device at $SERIAL is up and is the sign's own virtual device
+# ($AVD), not another one that has the port.
 sign_device_runs() { running && [ "$(adb_emu emu avd name 2>/dev/null | head -1 | tr -d '\r')" = "$AVD" ]; }
+
+# THE ONE WAY TO ACT ON THE DEVICE (install, uninstall, set, start, send, press, stop): the check,
+# made again right before each act, or nothing is done to it and the script ends. (need_sign_device
+# stands on its own line before an act whose answer is kept: a die inside $(...) ends only that.)
+need_sign_device() {
+    sign_device_runs || die "no running $AVD at $SERIAL (none there, or another virtual device has the port; the sign's starts with: up): nothing was done to it"
+}
+adb_sign() { need_sign_device && adb_emu "$@"; }
+
+# Until Android at $SERIAL has finished starting (its package manager takes an app only then); a
+# process this run started must stay alive meanwhile.
+wait_booted() {
+    local waited=0
+    until [ "$(adb_emu shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; do
+        [ -z "$emulator_pid" ] || kill -0 "$emulator_pid" 2>/dev/null || die "the Android emulator ended while starting; see $emulator_log"
+        [ "$waited" -lt "$BOOT_WAIT_S" ] || die "Android at $SERIAL has not finished starting within $BOOT_WAIT_S s${emulator_log:+; see $emulator_log}"
+        sleep 2
+        waited=$((waited + 2))
+    done
+}
 
 # A small virtual device of the sign's own, from a system image that is installed (nothing is
 # downloaded): the newest with Google's APIs for this computer's processor, or else the newest.
@@ -113,7 +135,6 @@ make_avd() {
         "target=$api" "showDeviceFrame=no" | tee "$dir/config.ini" >/dev/null
 }
 
-need_running() { running || die "no Android emulator is running as $SERIAL (start it: tools/sign-on-mac.sh up)"; }
 
 command=up
 case "${1:-}" in
@@ -154,9 +175,9 @@ SERIAL="emulator-$ADB_PORT"
 case "$command" in
     send)
         [ ${#words[@]} -eq 1 ] || die "send takes one text, in quotes: send '!game'"
-        need_running
         # base64, so that no shell on the way changes a character of it. The app answers result -1
         # when it took the command (1 refused, 2 failed, 3 under way; 0 is no answer at all).
+        need_sign_device
         said="$(adb_emu shell am broadcast -n "$PACKAGE/.adb.AdbCommandReceiver" -a "$PACKAGE.COMMAND" \
             --es b64 "$(printf '%s' "${words[0]}" | base64 | tr -d '\n')" 2>&1)"
         printf '%s\n' "$said"
@@ -173,13 +194,12 @@ case "$command" in
             KEYCODE_[A-Z0-9_]*) code="${words[0]}" ;;
             *) die "no such key: ${words[0]}" ;;
         esac
-        need_running
-        adb_emu shell input keyevent "$code"
+        adb_sign shell input keyevent "$code"
         exit $?
         ;;
     down)
         sign_device_runs || { echo "sign-on-mac: no Android emulator of $AVD runs as $SERIAL: nothing was stopped"; exit 0; }
-        adb_emu emu kill
+        adb_sign emu kill
         exit $?
         ;;
 esac
@@ -199,9 +219,9 @@ emulator_log=""
 stop_android() {
     [ -n "$emulator_pid" ] && [ "$KEEP" -eq 0 ] && kill -0 "$emulator_pid" 2>/dev/null || return 0
     echo "sign-on-mac: stopping the Android emulator $SERIAL (process $emulator_pid, started by this run)"
-    # by its console, which saves its state, when the console on the port is that process's own;
-    # else by the process
-    [ "$(listener "$ADB_PORT")" = "$emulator_pid" ] && adb_emu emu kill >/dev/null 2>&1 && return 0
+    # by its console, which saves its state, when the device is the sign's own and the console on
+    # the port is that process's own; else by the process
+    sign_device_runs && [ "$(listener "$ADB_PORT")" = "$emulator_pid" ] && adb_emu emu kill >/dev/null 2>&1 && return 0
     kill "$emulator_pid" 2>/dev/null
 }
 trap stop_android EXIT
@@ -209,6 +229,7 @@ trap 'exit 130' INT TERM
 
 if sign_device_runs; then
     echo "sign-on-mac: using the Android emulator of $AVD that runs as $SERIAL"
+    wait_booted
 else
     # A port that anything holds is taken: an Android emulator still starting there, another
     # virtual device or another program is not this run's to use or to stop.
@@ -227,20 +248,18 @@ else
     "$EMULATOR" -avd "$AVD" -port "$ADB_PORT" -memory 2048 -cores 2 -no-audio -no-boot-anim \
         ${window[@]+"${window[@]}"} >"$emulator_log" 2>&1 &
     emulator_pid=$!
-    waited=0
-    until [ "$(adb_emu shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; do
-        kill -0 "$emulator_pid" 2>/dev/null || die "the Android emulator ended while starting; see $emulator_log"
-        [ "$waited" -lt "$BOOT_WAIT_S" ] || die "the Android emulator has not started within $BOOT_WAIT_S s; see $emulator_log"
-        sleep 2
-        waited=$((waited + 2))
-    done
+    wait_booted
 fi
+# (what answers at the port now may not be what was started or found: the one check, here and
+# before every act below)
+need_sign_device
 
 if [ "$INSTALL" -eq 1 ]; then
     echo "sign-on-mac: installing $APK"
+    need_sign_device
     if ! said="$(adb_emu install -r -g "$APK" 2>&1)"; then
         case "$said" in
-            *"not enough space"* | *INSTALL_FAILED_UPDATE_INCOMPATIBLE*)
+            *[Nn]"ot enough space"* | *INSTALL_FAILED_INSUFFICIENT_STORAGE* | *INSTALL_FAILED_UPDATE_INCOMPATIBLE*)
                 # THE INSTALLED APP AND ALL IT SAVED ARE REMOVED HERE, AND NOBODY IS ASKED (decided
                 # 2026-11-20 by the mayor, PR 21's gate): the device is this script's own Android
                 # emulator (every adb call names an emulator serial), what the app keeps there is
@@ -249,7 +268,9 @@ if [ "$INSTALL" -eq 1 ]; then
                 # often full; a build signed with another key (another computer's debug key) cannot
                 # replace the installed one at all.
                 echo "sign-on-mac: removing the installed app and its data on $SERIAL: $(printf '%s\n' "$said" | tail -1)"
+                need_sign_device
                 adb_emu uninstall "$PACKAGE" >/dev/null 2>&1
+                need_sign_device
                 said="$(adb_emu install -g "$APK" 2>&1)" || {
                     echo "$said" | head -3 >&2
                     die "the app could not be installed; room in the Android emulator: $(adb_emu shell df -h /data 2>/dev/null | tail -1)"
@@ -263,14 +284,15 @@ if [ "$INSTALL" -eq 1 ]; then
     fi
 fi
 # where the app finds the sign: this computer's localhost, seen from inside the Android emulator
-adb_emu shell setprop debug.energysign.link "10.0.2.2:$LINK_PORT" || die "could not tell the app where the sign is"
-adb_emu shell am force-stop "$PACKAGE"
-adb_emu shell am start -n "$PACKAGE/.GattServerActivity" >/dev/null || die "the app could not be started"
+adb_sign shell setprop debug.energysign.link "10.0.2.2:$LINK_PORT" || die "could not tell the app where the sign is"
+adb_sign shell am force-stop "$PACKAGE"
+adb_sign shell am start -n "$PACKAGE/.GattServerActivity" >/dev/null || die "the app could not be started"
 
-# (the examples name this script and this port, so that they reach this Android emulator)
+# (the examples name this script, this port and this virtual device, so that they reach this one)
 me="$HERE/$(basename "$0")"
 port=""
 [ "$ADB_PORT" = "$DEFAULT_ADB_PORT" ] || port=" --adb-port $ADB_PORT"
+[ "$AVD" = "$DEFAULT_AVD" ] || port="$port --avd $AVD"
 cat <<EOF
 
 THE SIGN IS UP: the app runs in the Android emulator $SERIAL, the firmware in this terminal.
