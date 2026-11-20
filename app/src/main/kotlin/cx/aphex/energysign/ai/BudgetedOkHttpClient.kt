@@ -1,4 +1,6 @@
 // Ported from com.anthropic:anthropic-java-client-okhttp:3.3.0 (OkHttpClient.kt); re-check on SDK upgrades.
+// Read against 3.12.0: same HttpClient and Backend interfaces. Its one change, path segments percent-encoded
+// by the SDK's own table, sends the same bytes for the paths this app calls (v1/messages, v1/models/<id>).
 package cx.aphex.energysign.ai
 
 import com.anthropic.backends.Backend
