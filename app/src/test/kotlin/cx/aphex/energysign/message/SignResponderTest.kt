@@ -1,12 +1,10 @@
 package cx.aphex.energysign.message
 
-import com.google.gson.JsonParser
 import com.google.gson.reflect.TypeToken
 import org.mockito.Mockito
 import kotlin.test.assertFailsWith
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue

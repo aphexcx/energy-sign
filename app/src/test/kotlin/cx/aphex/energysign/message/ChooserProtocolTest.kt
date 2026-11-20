@@ -5,7 +5,6 @@ import com.google.gson.JsonParser
 import cx.aphex.energysign.message.ChooserProtocol.CHOOSER_MAX_CHARS
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertNotEquals
 
 /** The pure parts of the chooser contract: the text rule and the chooser message on the wire. */
 class ChooserProtocolTest {
