@@ -34,8 +34,9 @@ package cx.aphex.energysign.uart
  *         is old (the link was kept from the wire for longer than the sign listens).
  *     push t_us=T call_us=C break_us=B guard_us=G wanted_us=W n=N
  *         One push of the chooser (contract VERSION 3.1). W: the push began. C: the attention
- *         was asked for (the write of the zeros, whose tx line comes before this one, or
- *         sendBreak). B: that call returned. G: the guard after the attention was over. T: the
+ *         was asked for (the write of the zeros, whose tx line comes before this one). B: that
+ *         call returned (the field keeps its name for the tool that reads this log). G: the
+ *         guard after the attention was over. T: the
  *         frame was handed over (its tx line comes just before this one). N: the bytes of the
  *         frame, 0 for attention alone (leaving chooser mode). A push that failed has no line;
  *         it is tried again.

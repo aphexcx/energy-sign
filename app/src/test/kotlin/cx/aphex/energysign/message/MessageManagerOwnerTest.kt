@@ -2005,11 +2005,11 @@ class MessageManagerOwnerTest {
         app.repo.dropOnePieceOf(reply)
     }
 
-    /** In chooser mode a request of the sign, for the next message or a poll, is answered and takes nothing out of the queue. */
+    /** In chooser mode a request of the sign is answered and takes nothing out of the queue. */
     private val requestsInTheChooser = Leaving("two requests of the sign in chooser mode, then a pause and its end", emptiesTheQueue = false) { app ->
         app.phone("!choose")
         ownerRuns()
-        for (request in "~?") {
+        for (request in "~~") {
             val answered = SignResponder(nextMessage = { app.manager.getNextMessage() }, write = { _, _ -> true })
                 .onRequest(byteArrayOf(request.code.toByte()), 1)
             check(answered == null || answered is Message.Chooser) { "in chooser mode the sign was sent ${answered?.str}" }

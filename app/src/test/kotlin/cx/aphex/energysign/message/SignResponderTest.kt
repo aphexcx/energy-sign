@@ -14,9 +14,6 @@ import kotlin.test.assertTrue
 /**
  * The request -> reply sequence the view model runs for every UART callback,
  * driven with a fake message source and a fake UART.
- *
- * The expected checksums are literals worked out outside the app (CRC-16/CCITT-FALSE over
- * str, one zero byte, flashy), so these tests do not lean on the app's own checksum code.
  */
 class SignResponderTest {
 

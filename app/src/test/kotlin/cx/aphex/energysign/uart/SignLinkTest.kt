@@ -315,7 +315,7 @@ class SignLinkTest {
         failReads = 1
         arrives(11, "~")
         runUntil(60)
-        assertEquals("tx[micOff]@12", wire().last()) // 2 ms after the failure, inside the sign's 60 ms
+        assertEquals("tx[micOff]@12", wire().last()) // 2 ms after the failure
         assertEquals(listOf("micOff"), taken)
         // and so is every later single failure: the count starts again after a read that worked
         repeat(SignLink.QUICK_READ_RETRIES + 5) {
@@ -396,71 +396,6 @@ class SignLinkTest {
     }
 
     @Test
-    fun `in the chooser display a request found after the link slept 80 ms is old, the first and the one the sign makes after it alike`() {
-        // measured on the Pico: the 2 ms sleep runs 40 to 83 ms late a few times a minute
-        inChooserDisplay()
-        sleepOverrunNs = 80 * ms
-        arrives(5, "~")
-        runUntil(150)
-        assertEquals(emptyList(), wire())
-        assertEquals(1, drops().size)
-
-        sleepOverrunNs = 80 * ms
-        arrives(155, "~") // the request the sign makes after one that failed
-        runUntil(300)
-        assertEquals(emptyList(), wire())
-        assertEquals(2, drops().size)
-
-        arrives(300, "~")
-        runUntil(350)
-        assertEquals(listOf("tx[H:A]@300"), wire())
-    }
-
-    @Test
-    fun `a request that waited less than the sign listens is answered`() {
-        inChooserDisplay()
-        sleepOverrunNs = 30 * ms // 32 ms off the wire: the sign is still listening
-        arrives(5, "~")
-        runUntil(100)
-        assertEquals(listOf("tx[H:A]@32"), wire())
-    }
-
-    @Test
-    fun `outside the chooser display the sign listens a second, a request half a second old is answered and one older than that is not`() {
-        inNormalDisplay()
-        chooser = null
-        sleepOverrunNs = 500 * ms
-        arrives(5, "~")
-        runUntil(600)
-        assertEquals(listOf("M2"), taken)
-
-        sleepOverrunNs = 1_000 * ms
-        arrives(now / ms + 5, "~")
-        runUntil(2_000)
-        assertEquals(listOf("M2"), taken)
-        assertEquals(1, drops().size)
-    }
-
-    @Test
-    fun `a link that has just started counts 60 ms until it has written a message in time`() {
-        // the gate's case: the app restarts under a sign that stays in its chooser display and asks with a `~`
-        chooser = null
-        ordinary.addFirst("micOff")
-        sleepOverrunNs = 80 * ms
-        arrives(5, "~")
-        runUntil(150)
-        assertEquals(emptyList(), wire()) // 80 ms old: the sign may have waited only 60
-        assertEquals("micOff", ordinary.first())
-        arrives(200, "~") // it asks again, and is answered in time
-        runUntil(250)
-        assertEquals(listOf("micOff"), taken)
-        sleepOverrunNs = 500 * ms // from here on the link knows the sign is in its normal display
-        arrives(now / ms + 5, "~")
-        runUntil(1_200)
-        assertEquals(listOf("micOff", "M1"), taken)
-    }
-
-    @Test
     fun `the first byte of an answer must leave while the sign listens, a transmitter that takes it too late gets nothing more`() {
         // the gate's case, by the second the sign listens: a request 880 ms old is fresh, but its first byte could
         // only go at 925 ms, after the 900 in which the link wants it out
@@ -476,51 +411,6 @@ class SignLinkTest {
         assertEquals(emptyList(), taken)
         assertEquals("micOff", ordinary.first()) // handed back
         assertTrue(line.contains("log:Wrote 0 of 6 bytes to UART"), line.toString())
-    }
-
-    @Test
-    fun `the first edge, the request that brings the chooser message is judged by a second, every request after it by 60 ms`() {
-        inNormalDisplay()
-        chooser = "A" // !choose
-        runUntil(1_000)
-        sleepOverrunNs = 300 * ms
-        arrives(1_001, "~")
-        runUntil(1_400)
-        assertEquals(listOf("tx[H:A]@1302"), wire()) // 300 ms old, answered: the sign was in its normal display
-        // the chooser message has put the sign in its chooser display: from here on 80 ms is too old
-        sleepOverrunNs = 80 * ms
-        arrives(now / ms + 1, "~")
-        runUntil(now / ms + 200)
-        assertEquals(1, wire().size)
-        assertEquals(1, drops().size)
-    }
-
-    @Test
-    fun `the second edge, after the chooser is left the first answer in time ends the chooser display`() {
-        inChooserDisplay()
-        command(100, null) // !endchoose
-        arrives(200, "~")
-        runUntil(250)
-        assertEquals(listOf("tx[M1]@200"), wire()) // fresh: the sign gets the message and leaves its chooser display
-        sleepOverrunNs = 500 * ms
-        arrives(now / ms + 5, "~")
-        runUntil(1_200)
-        assertEquals(listOf("M1", "M2"), taken) // and from here on it listens a second again
-    }
-
-    @Test
-    fun `a message that was not written in full does not end the chooser display`() {
-        inChooserDisplay()
-        command(100, null)
-        takesBeforeStuck = 0
-        stuckUntilNs = 300 * ms
-        arrives(200, "~")
-        runUntil(400) // the write of M1 failed: the sign is still in its chooser display
-        sleepOverrunNs = 80 * ms
-        arrives(405, "~")
-        runUntil(600)
-        assertEquals(emptyList(), taken)
-        assertEquals(emptyList(), wire())
     }
 
     @Test
@@ -780,13 +670,14 @@ class SignLinkTest {
     }
 
     @Test
-    fun `a request buffered during a cold start cannot borrow a new 50 ms window`() {
+    fun `a request buffered during a cold start cannot borrow a new window`() {
+        // the preparation takes 950 ms: the request that came at its start is older than the second the sign waits
         arrives(0, "~")
-        arrives(621, "~")
+        arrives(960, "~")
         lateinit var cold: SignLink
         cold = SignLink(
             wire = wire, baud = baud, name = "UART", events = {},
-            prepareAnswers = { now += 611 * ms },
+            prepareAnswers = { now += 950 * ms },
             answer = { _, _ ->
                 cold.send("FIRST", Reply.MESSAGE)
                 cold.stop()
@@ -796,7 +687,7 @@ class SignLinkTest {
         )
         cold.run()
         assertEquals(1, drops().size)
-        assertEquals(listOf("tx[FIRST]@621"), wire())
+        assertEquals(listOf("tx[FIRST]@960"), wire())
     }
 
     @Test

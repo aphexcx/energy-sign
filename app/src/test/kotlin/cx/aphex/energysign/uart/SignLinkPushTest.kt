@@ -280,8 +280,7 @@ class SignLinkPushTest {
 
     /**
      * The sign asks for a message outside chooser mode and gets M1: from here on the link knows
-     * the sign is NOT in its chooser display, where a request is good for a second. So a request
-     * that is read away afterwards is read away because of the push, not because it is old.
+     * the sign is NOT in its chooser display, where it listens for a push.
      */
     private fun signShowsAnOrdinaryMessage() {
         chooser = null
@@ -782,34 +781,6 @@ class SignLinkPushTest {
     }
 
     @Test
-    fun `a request behind a pushed frame that is found too late to answer is not thrown away with what it says, the frame is pushed again`() {
-        // the sign could not read the pushed frame and asks; the link's pause runs over, and by its limit of
-        // 50 ms (the polling firmware's) the request is old. A sign that listens for pushes waits a second there
-        command(0, "B")
-        runUntil(180)
-        assertEquals(listOf("B"), told) // done: the frame left the line at 72
-        sleepOverrunNs = 80 * ms
-        runUntil(200)
-        arrives(now / ms - 70, "~") // behind the frame, not into it
-        runUntil(1_500)
-        assertTrue(line.any { it.contains("Read an old request") }, line.toString())
-        assertEquals(0, answers)
-        // the zeros are padding in front of the answer it waits for, and the pushed frame is that answer
-        assertEquals(listOf("tx[00x72]@0", "tx[H:B]@70", "tx[00x72]@322", "tx[H:B]@392"), wire())
-    }
-
-    @Test
-    fun `an old request from a sign that is not in its chooser display brings no push, it has given the answer up`() {
-        signShowsAnOrdinaryMessage()
-        sleepOverrunNs = 1_000 * ms
-        runUntil(100)
-        arrives(now / ms - 950, "~")
-        runUntil(now / ms + 600)
-        assertTrue(line.any { it.contains("Read an old request") }, line.toString())
-        assertEquals(listOf("tx[M1]@0"), wire())
-    }
-
-    @Test
     fun `the attention alone proves nothing and is given once, with no new change the loop goes back to its long pause`() {
         command(0, null)
         runUntil(5_000)
@@ -1035,18 +1006,6 @@ class SignLinkPushTest {
     }
 
     @Test
-    fun `the attention alone does not put the sign into its chooser display, a request half a second late is still answered`() {
-        signShowsAnOrdinaryMessage()
-        command(100, null)
-        runUntil(180)
-        sleepOverrunNs = 300 * ms
-        runUntil(200)
-        arrives(now / ms - 250, "~") // it came while the link was kept from the wire, after the attention was over
-        runUntil(now / ms + 10)
-        assertEquals(listOf("M1", "M2"), taken)
-    }
-
-    @Test
     fun `rule 3, more than one read's worth sent into the attention is void to its last byte`() {
         // 33 bytes with a request byte last: the first read is full, so it says nothing about when the rest came
         command(0, null)
@@ -1120,36 +1079,6 @@ class SignLinkPushTest {
                 "zeros ${(next.atNs - tx.goneAtNs) / ms} ms behind a frame"
             )
         }
-    }
-
-    @Test
-    fun `after a pushed chooser frame the sign is taken to be in its chooser display, where it listens 60 ms`() {
-        // out of the chooser display first: an ordinary message, written in time
-        chooser = null
-        arrives(0, "~")
-        runUntil(10)
-        assertEquals(listOf("M1"), taken)
-        // half a second late outside the chooser display is still an answer
-        sleepOverrunNs = 500 * ms
-        runUntil(300)
-        arrives(now / ms - 400, "~")
-        runUntil(now / ms + 10)
-        assertEquals(listOf("M1", "M2"), taken)
-        // now the chooser is pushed, and a request found 80 ms late is old
-        command(now / ms, "B")
-        runUntil(now / ms + 400)
-        assertEquals("H:B", txs.last().text)
-        val before = txs.size
-        sleepOverrunNs = 80 * ms
-        runUntil(now / ms + 20)
-        arrives(now / ms - 70, "~")
-        runUntil(now / ms + 10)
-        assertTrue(line.any { it.contains("Read an old request") }, line.toString())
-        // no answer was written (the push that follows is another test's)
-        assertEquals(2, answers)
-        assertTrue(txs[before].zeros, wire().toString())
-        // and none of these pushes was told: the sign was last given an ordinary message, whole
-        assertEquals(emptyList(), told)
     }
 
     // ================= a push that did not go out is not done

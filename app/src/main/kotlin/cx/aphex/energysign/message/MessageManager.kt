@@ -565,8 +565,8 @@ class MessageManager(
 //    }
 
     /**
-     * The chooser message for the current index. No side effects and no logging: the sign polls
-     * about five times a second in chooser mode and every poll evaluates this without sending it.
+     * The chooser message for the current index. No side effects and no logging: every push
+     * evaluates it ([chooserShown]) and takes nothing, and a push may not go out at all.
      */
     private fun getNextChooserMessage(): Message.Chooser =
         ChooserProtocol.chooserMessage(msgRepo.marqueeMessages, currentIdx.value)
