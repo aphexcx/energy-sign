@@ -2910,7 +2910,7 @@ class MessageManagerOwnerTest {
             ownerRuns()
             asks(app, 100)
         }
-        cell("the sign asks again three seconds into a game: the picture of the hit is the one of the hit (the post at column 12), not the last it asked for", "00a12p22e2") {
+        cell("the sign asks again three seconds into a game: the picture of the hit is the one of the hit (the post at column 12, the starfield where it stood then), not the last it asked for", "00a12p22e2s16") {
             val (app, began) = inPlay()
             app.now = began + 3_000
             app.manager.getNextMessage().str

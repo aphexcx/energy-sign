@@ -278,6 +278,7 @@ class MessageManager(
             runnerColour = context.getColor(R.color.icon_defaultblue),
             crashColour = context.getColor(R.color.instahandle),
             scoreColour = context.getColor(R.color.chonkyslide_defaultpink),
+            rules = jumpGame.rules,
         ),
         best = gameStore.loadBest(),
         on = gameStore.loadOn(),
