@@ -83,15 +83,17 @@ class SignLinkTest {
             val take = minOf(length, takesPerWrite, takesBeforeStuck)
             if (take == 0) return 0
             if (takesBeforeStuck != Int.MAX_VALUE) takesBeforeStuck -= take
+            if ((0 until take).all { buffer[it] == 0.toByte() }) {
+                // the attention of a push (those are SignLinkPushTest's): kept apart from what answers a request
+                line += "zeros@${now / ms}"
+                return take
+            }
             txAtMs += now / ms
             line += "tx[${String(buffer, 0, take)}]@${now / ms}"
             now += writeLastsNs
             writeLastsNs = 0
             return take
         }
-
-        // no test in this file asks for a push: those are in SignLinkPushTest
-        override fun sendBreak(millis: Int) = throw IOException("no break was asked for")
 
         override fun close() {}
     }
@@ -131,7 +133,7 @@ class SignLinkTest {
         warn = { line += "warn:$it" },
     )
 
-    /** What MainViewModel and SignResponder do: a poll in chooser mode gets a report, everything else a message. */
+    /** What MainViewModel and SignResponder do: in chooser mode the chooser message, otherwise the next message. */
     private fun answer(buffer: ByteArray, count: Int) {
         answers++
         if (answerThrows > 0) {
@@ -140,7 +142,6 @@ class SignLinkTest {
         }
         val text = chooser
         when {
-            text != null && buffer[count - 1] == '?'.code.toByte() -> link.send("{c:$text}", Reply.REPORT)
             text != null -> link.send("H:$text", Reply.CHOOSER)
             else -> {
                 val message = ordinary.removeFirst()
@@ -180,20 +181,20 @@ class SignLinkTest {
 
     @Test
     fun `a request byte is answered by the read that found it, with no further wait`() {
-        arrives(0, "?")
+        arrives(0, "~")
         link.step()
-        assertEquals(listOf("tx[{c:A}]@0"), wire())
+        assertEquals(listOf("tx[H:A]@0"), wire())
         assertEquals(1, reads)
         assertEquals(emptyList(), sleeps)
     }
 
     @Test
     fun `each request byte that arrives on its own gets its own reply`() {
-        arrives(0, "?")
+        arrives(0, "~")
         arrives(60, "~")
         arrives(120, "~")
         runUntil(130)
-        assertEquals(listOf("tx[{c:A}]@0", "tx[H:A]@60", "tx[H:A]@120"), wire())
+        assertEquals(listOf("tx[H:A]@0", "tx[H:A]@60", "tx[H:A]@120"), wire())
     }
 
     @Test
@@ -258,8 +259,8 @@ class SignLinkTest {
 
     @Test
     fun `while the sign is talking the wire is read at most five hundred times a second`() {
-        // a chooser poll every 200 ms, as contract 2.1 has it
-        for (t in 0 until 10_000 step 200) arrives(t.toLong(), "?")
+        // a request every 200 ms
+        for (t in 0 until 10_000 step 200) arrives(t.toLong(), "~")
         runUntil(10_000)
         assertEquals(50, wire().size)
         assertTrue(sleeps.all { it == SignLink.ACTIVE_PAUSE_MS * ms })
@@ -270,9 +271,9 @@ class SignLinkTest {
     }
 
     @Test
-    fun `a poll is seen at most one short pause after it arrives`() {
+    fun `a request is seen at most one short pause after it arrives`() {
         arrives(0, "~")
-        for (t in 201 until 5_000 step 197) arrives(t.toLong(), "?")
+        for (t in 201 until 5_000 step 197) arrives(t.toLong(), "~")
         runUntil(5_000)
         val late = txAtMs.drop(1).mapIndexed { i, at -> at - (201 + i * 197) }
         assertTrue(late.all { it in 0..SignLink.ACTIVE_PAUSE_MS }, "late by $late ms")
@@ -306,13 +307,13 @@ class SignLinkTest {
 
     @Test
     fun `one failed read is tried again at once, the request behind it is answered while the sign listens`() {
-        // the gate's sequence: the microphone command is queued, the chooser is left, a read fails, the poll comes 1 ms later
-        arrives(0, "?")
+        // the gate's sequence: the microphone command is queued, the chooser is left, a read fails, the request comes 1 ms later
+        arrives(0, "~")
         runUntil(10) // the sign is in its chooser display
         chooser = null
         ordinary.addFirst("micOff")
         failReads = 1
-        arrives(11, "?")
+        arrives(11, "~")
         runUntil(60)
         assertEquals("tx[micOff]@12", wire().last()) // 2 ms after the failure, inside the sign's 60 ms
         assertEquals(listOf("micOff"), taken)
@@ -367,9 +368,9 @@ class SignLinkTest {
         answers = 0
     }
 
-    /** The sign is in its chooser display: it has polled and got its report. */
+    /** The sign is in its chooser display: it has asked and got the chooser message. */
     private fun inChooserDisplay() {
-        arrives(now / ms, "?")
+        arrives(now / ms, "~")
         link.step()
         line.clear()
         txAtMs.clear()
@@ -382,30 +383,30 @@ class SignLinkTest {
         chooser = null // !micOff, then !endchoose: the app has left, the sign does not know yet
         ordinary.addFirst("micOff")
         failReads = SignLink.QUICK_READ_RETRIES + 2 // 20 ms of quick tries, then two long pauses: 220 ms off the wire
-        arrives(1, "?")
+        arrives(1, "~")
         runUntil(300)
         assertEquals(emptyList(), wire()) // the sign gave up 160 ms ago
         assertEquals(0, answers)
         assertEquals("micOff", ordinary.first())
         assertTrue(line.any { it.startsWith("log:Read an old request from UART") }, line.toString())
-        arrives(400, "?") // it polls again
+        arrives(400, "~") // it asks again
         runUntil(500)
         assertEquals(listOf("tx[micOff]@400"), wire())
         assertEquals(listOf("micOff"), taken)
     }
 
     @Test
-    fun `in the chooser display a request found after the link slept 80 ms is old, a poll and a request for the message alike`() {
+    fun `in the chooser display a request found after the link slept 80 ms is old, the first and the one the sign makes after it alike`() {
         // measured on the Pico: the 2 ms sleep runs 40 to 83 ms late a few times a minute
         inChooserDisplay()
         sleepOverrunNs = 80 * ms
-        arrives(5, "?")
+        arrives(5, "~")
         runUntil(150)
         assertEquals(emptyList(), wire())
         assertEquals(1, drops().size)
 
         sleepOverrunNs = 80 * ms
-        arrives(155, "~") // the request the sign makes after a failed poll: it listens 60 ms for that too
+        arrives(155, "~") // the request the sign makes after one that failed
         runUntil(300)
         assertEquals(emptyList(), wire())
         assertEquals(2, drops().size)
@@ -419,9 +420,9 @@ class SignLinkTest {
     fun `a request that waited less than the sign listens is answered`() {
         inChooserDisplay()
         sleepOverrunNs = 30 * ms // 32 ms off the wire: the sign is still listening
-        arrives(5, "?")
+        arrives(5, "~")
         runUntil(100)
-        assertEquals(listOf("tx[{c:A}]@32"), wire())
+        assertEquals(listOf("tx[H:A]@32"), wire())
     }
 
     @Test
@@ -438,16 +439,6 @@ class SignLinkTest {
         runUntil(2_000)
         assertEquals(listOf("M2"), taken)
         assertEquals(1, drops().size)
-    }
-
-    @Test
-    fun `a poll says the sign is in its chooser display, whatever the app has sent before`() {
-        inNormalDisplay()
-        chooser = null
-        sleepOverrunNs = 80 * ms
-        arrives(5, "?")
-        runUntil(150)
-        assertEquals(emptyList(), taken) // judged by 60 ms, not by a second
     }
 
     @Test
@@ -476,7 +467,7 @@ class SignLinkTest {
         chooser = null
         ordinary.addFirst("micOff")
         sleepOverrunNs = 43 * ms // read 45 ms after the read before it
-        arrives(now / ms + 1, "?")
+        arrives(now / ms + 1, "~")
         takesBeforeStuck = 0
         stuckUntilNs = now + 70 * ms
         runUntil(now / ms + 150)
@@ -507,7 +498,7 @@ class SignLinkTest {
     fun `the second edge, after the chooser is left the first answer in time ends the chooser display`() {
         inChooserDisplay()
         command(100, null) // !endchoose
-        arrives(200, "?")
+        arrives(200, "~")
         runUntil(250)
         assertEquals(listOf("tx[M1]@200"), wire()) // fresh: the sign gets the message and leaves its chooser display
         sleepOverrunNs = 500 * ms
@@ -522,7 +513,7 @@ class SignLinkTest {
         command(100, null)
         takesBeforeStuck = 0
         stuckUntilNs = 300 * ms
-        arrives(200, "?")
+        arrives(200, "~")
         runUntil(400) // the write of M1 failed: the sign is still in its chooser display
         sleepOverrunNs = 80 * ms
         arrives(405, "~")
@@ -537,7 +528,7 @@ class SignLinkTest {
         inChooserDisplay()
         chooser = null
         sleepOverrunNs = 80 * ms
-        arrives(5, "x".repeat(SignLink.READ_BUFFER_LEN) + "?")
+        arrives(5, "x".repeat(SignLink.READ_BUFFER_LEN) + "~")
         runUntil(200)
         assertEquals(emptyList(), wire())
         assertEquals(emptyList(), taken)
@@ -559,13 +550,6 @@ class SignLinkTest {
             ),
             line,
         )
-    }
-
-    @Test
-    fun `a poll report is not logged`() {
-        arrives(0, "?")
-        link.step()
-        assertEquals(listOf("tx[{c:A}]@0"), line)
     }
 
     // ================= writes: all of a frame in time, or a failure
@@ -669,15 +653,6 @@ class SignLinkTest {
     }
 
     @Test
-    fun `a poll report that is cut short is logged all the same`() {
-        takesBeforeStuck = 2
-        stuckUntilNs = 500 * ms
-        arrives(0, "?")
-        link.step()
-        assertEquals(listOf("tx[{c]@0", "log:Wrote 2 of 5 bytes to UART"), line)
-    }
-
-    @Test
     fun `a write that throws is a failed frame, said once, and the loop goes on`() {
         chooser = null
         failWrites = 1
@@ -706,10 +681,10 @@ class SignLinkTest {
 
     @Test
     fun `a read, a write and what was read away are each one timing line`() {
-        arrives(3, "?")
+        arrives(3, "~")
         arrives(13, "x")
         runUntil(30)
-        assertEquals("rx t_us=10000 n=1 bytes=[?] chunks=1 first_us=10000 empty_us=0", timingLines.single { it.startsWith("rx ") })
+        assertEquals("rx t_us=10000 n=1 bytes=[~] chunks=1 first_us=10000 empty_us=0", timingLines.single { it.startsWith("rx ") })
         assertEquals("tx t_us=10000 n=5/5 kind=report call_us=10000 rx_us=10000", timingLines.single { it.startsWith("tx ") })
         assertEquals("drop t_us=14000 n=1 bytes=[x]", timingLines.single { it.startsWith("drop ") })
     }
@@ -733,7 +708,6 @@ class SignLinkTest {
         val closes = AtomicInteger()
         override fun read(buffer: ByteArray, length: Int): Int = 0.also { reads.incrementAndGet() }
         override fun write(buffer: ByteArray, length: Int): Int = length
-        override fun sendBreak(millis: Int) {}
         override fun close() {
             closes.incrementAndGet()
             closedBy.set(Thread.currentThread())

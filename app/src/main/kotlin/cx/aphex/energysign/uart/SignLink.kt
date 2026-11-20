@@ -225,9 +225,9 @@ class LineClock(private val baud: Int, startNs: Long) {
  *
  *  SETS (the sign is behind):
  *  - [requestPush] / [want]: what the chooser shows has changed.
- *  - [readRequest]: a request in the chooser display that was found too late to answer (old by
- *    [CHOOSER_FRESH_MS]). The sign waits a second there: it asked for the selection and has
- *    not got it.
+ *  - [readRequest]: a request that was found too late to answer (old by [CHOOSER_FRESH_MS])
+ *    from a sign known to be in its chooser display. It waits a second there: it asked for
+ *    the selection and has not got it.
  *  - [readRequest], rule 3: the sign sent something into a pushed frame that had been called
  *    done. It may not have the frame; it is owed again, and not before the sign has had the
  *    quiet it wants behind an answer it could not read ([Behind.TORN_FRAME]).
@@ -261,7 +261,7 @@ class LineClock(private val baud: Int, startNs: Long) {
  *    tried again; the app is not told.
  *  - a pushed frame that was DONE, and then something the sign sent into it: pending again,
  *    pushed again 1010 ms behind it.
- *  - a request in the chooser display read away as old: pending, whatever was
+ *  - a request read away as old, from a sign known to be in its chooser display: pending, whatever was
  *    called done before; the push that follows is the answer the sign still waits for.
  *  - the attention alone (leaving chooser mode): pending. It carries nothing and proves
  *    nothing. It is not raised a second time for the same change ([givenOnceFor]: runs of
@@ -412,9 +412,9 @@ class SignLink(
      */
     fun requestPush() {
         want()
-        // The link thread asking for itself (a change it has just made) is awake: a wake-up
-        // would only cut its next sleep short
-        if (Thread.currentThread() !== thread) wake()
+        // (The link thread asking for itself, from a change it has just made, needs no waking; the
+        // push follows in that very turn, and a wake-up it gives itself costs it nothing.)
+        wake()
     }
 
     /** SETS: the sign is behind by one more change. */
@@ -535,6 +535,7 @@ class SignLink(
         // Whatever the sign sends ends what was known of it. A sign that asks, or prints an
         // error, listens for a push again only when it has been answered with a chooser message
         // ([send])
+        val wasInChooser = signInChooser
         signInChooser = false
         if (pushedFrameInVoid && cameAfterNs - voidBeforeNs < 0) {
             // SETS: the sign was sending while a pushed frame that was called done was on the
@@ -562,10 +563,12 @@ class SignLink(
             // The link was kept from the wire for longer than the sign waits for this answer
             timing.dropped(readNs, buffer, count)
             log("Read an old request from $name (up to $waitedMs ms ago): not answered")
-            // SETS: old by the limit of the chooser display. The sign waits a second there: it
-            // asked for the selection and has not got it, and a push is still its answer (the
-            // zeros are padding in front). Outside its chooser display the sign has given up.
-            if (chooserDisplay) want()
+            // SETS: old by the limit of the chooser display, from a sign that was KNOWN to be
+            // there. It waits a second: it asked for the selection and has not got it, and a
+            // push is still its answer (the zeros are padding in front). Not for a sign of which
+            // nothing is known (a request that waited while the app started): a push would only
+            // make the link deaf to its next one.
+            if (wasInChooser) want()
             return true
         }
         // Not after stop: a message taken now would be written to a port that is closing
