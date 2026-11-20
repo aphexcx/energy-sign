@@ -16,14 +16,19 @@ import com.aallam.openai.client.OpenAI
 import com.aallam.openai.client.OpenAIConfig
 import com.aallam.openai.client.OpenAIHost
 import com.aallam.openai.client.RetryStrategy
+import io.ktor.client.engine.okhttp.OkHttpConfig
 import io.ktor.client.plugins.HttpResponseValidator
 import io.ktor.client.plugins.ResponseException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.RequestBody
+import okio.BufferedSink
+import java.io.IOException
 import java.time.Duration
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
@@ -59,6 +64,8 @@ class OpenAIReplyGenerator(
     private val minTimeToSend: Duration = AnthropicReplyGenerator.MIN_TIME_TO_SEND,
     /** How much longer than [requestTimeout] the HTTP client's own limits are. Only tests set this. */
     transportMargin: Duration = TRANSPORT_MARGIN,
+    /** Shared rolling-hour ceiling on paid HTTP requests leaving the app. */
+    private val budget: AIHourlyBudget = AIHourlyBudget({ System.nanoTime() / 1_000_000 }),
 ) : AIReplyGenerator {
 
     private val apiKey: String = apiKey.trim()
@@ -73,6 +80,9 @@ class OpenAIReplyGenerator(
      * anybody looks at the body. One request at a time uses this object.
      */
     private val failedWithStatus = AtomicInteger(0)
+
+    /** Carries per-call context into OkHttp's application/network interceptors on Ktor's dispatcher thread. */
+    private val activeCall = AtomicReference<WireCallContext?>(null)
 
     /** What the client is built from. */
     internal val config = OpenAIConfig(
@@ -91,6 +101,27 @@ class OpenAIReplyGenerator(
         host = baseUrl?.let { OpenAIHost(baseUrl = it) } ?: OpenAIHost.OpenAI,
         retry = RetryStrategy(maxRetries = 0),
         httpClientConfig = {
+            followRedirects = false
+            engine {
+                val okHttp = this as? OkHttpConfig
+                    ?: error("OpenAIReplyGenerator requires Ktor OkHttp engine so WireBudgetInterceptor gates every wire send")
+                // One call is at most one request on the wire: disable redirects and connection-failure
+                // retries and mark every POST body one-shot so OkHttp never replays 503/408/421.
+                okHttp.config {
+                    retryOnConnectionFailure(false)
+                    followRedirects(false)
+                    followSslRedirects(false)
+                }
+                okHttp.addInterceptor { chain ->
+                    if (chain.call().isCanceled()) throw IOException("Canceled")
+                    val req = chain.request()
+                    val body = req.body
+                    val builder = req.newBuilder().tag(WireCallContext::class.java, activeCall.get())
+                    if (body != null) builder.method(req.method, oneShot(body))
+                    chain.proceed(builder.build())
+                }
+                okHttp.addNetworkInterceptor(WireBudgetInterceptor())
+            }
             HttpResponseValidator {
                 handleResponseExceptionWithRequest { failure, _ ->
                     (failure as? ResponseException)?.let { failedWithStatus.set(it.response.status.value) }
@@ -119,11 +150,24 @@ class OpenAIReplyGenerator(
             }
             val limitMs = minOf(requestTimeout.toMillis(), leftMs)
             val stream = Stream()
+            val owned = if (request.reservation == null) {
+                budget.reserve() ?: return noReply(NoReplyReason.WITHDRAWN, "not sent: hourly budget is spent")
+            } else {
+                null
+            }
+            val reservation = request.reservation ?: owned!!
+            activeCall.set(WireCallContext(request.deadline, minTimeToSend, reservation))
             val ended = try {
                 withTimeoutOrNull(limitMs) { collect(client, request, stream) } != null
             } catch (e: OpenAITimeoutException) {
                 // A limit of the HTTP client ended it after all: what has come is read the same way.
                 false
+            } catch (e: Throwable) {
+                WireSendBlockedException.findIn(e)?.let { return noReply(it.reason, it.detail) }
+                throw e
+            } finally {
+                activeCall.set(null)
+                owned?.release()
             }
             stream.read(ended, limitMs)
         } catch (e: CancellationException) {
@@ -146,6 +190,13 @@ class OpenAIReplyGenerator(
             if (status > 0) noReply(NoReplyReason.forHttpStatus(status), "HTTP $status, with a body that is not the API's")
             else noReply(NoReplyReason.PROVIDER_ERROR, e.javaClass.simpleName)
         }
+    }
+
+    private fun oneShot(body: RequestBody): RequestBody = object : RequestBody() {
+        override fun contentType() = body.contentType()
+        override fun contentLength() = body.contentLength()
+        override fun isOneShot() = true
+        override fun writeTo(sink: BufferedSink) = body.writeTo(sink)
     }
 
     override fun syncClock(limit: Duration) {

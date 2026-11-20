@@ -34,7 +34,7 @@ class AIReplyRunnerTest {
         warmUp: (() -> Unit)? = null,
         log: (String) -> Unit = {},
         reply: suspend (String) -> AIReplyResult,
-    ) = AIReplyRunner(reply = { text, _, _ -> reply(text) }, warmUp = warmUp, log = log)
+    ) = AIReplyRunner(reply = { text, _, _, _ -> reply(text) }, warmUp = warmUp, log = log)
 
     @Test
     fun `the reply is handed back, on another thread`() {
@@ -100,7 +100,7 @@ class AIReplyRunnerTest {
         val started = CountDownLatch(1)
         val mayStart = CountDownLatch(1)
         val runner = AIReplyRunner(
-            reply = { _, deadline, _ ->
+            reply = { _, deadline, _, _ ->
                 started.countDown()
                 handed.add(deadline.remainingMs())
                 AIReplyResult.Reply("ok")
@@ -130,7 +130,7 @@ class AIReplyRunnerTest {
     fun `the question whether the query is still wanted is handed to the reply as it was given`() {
         val asked = AtomicInteger()
         val stillWanted = { asked.incrementAndGet(); false }
-        val runner = AIReplyRunner(reply = { _, _, wanted -> AIReplyResult.Reply(if (wanted()) "wanted" else "not wanted") })
+        val runner = AIReplyRunner(reply = { _, _, wanted, _ -> AIReplyResult.Reply(if (wanted()) "wanted" else "not wanted") })
 
         runner.ask("hello", stillWanted) { results.add(it) }
 
@@ -143,7 +143,7 @@ class AIReplyRunnerTest {
         // The time limit is handed down and each step keeps to it. The runner has no clock of
         // its own that could end the wait while the provider is still writing a paid answer.
         val runner = AIReplyRunner(
-            reply = { _, _, _ ->
+            reply = { _, _, _, _ ->
                 delay(700)
                 AIReplyResult.Reply("paid for, and late")
             },
@@ -159,7 +159,7 @@ class AIReplyRunnerTest {
     fun `the slot is free only when the call has really ended`() {
         val mayEnd = CountDownLatch(1)
         val runner = AIReplyRunner(
-            reply = { _, _, _ ->
+            reply = { _, _, _, _ ->
                 mayEnd.await()
                 AIReplyResult.Reply("first")
             },
@@ -276,7 +276,7 @@ class AIReplyRunnerTest {
         var onThread: Thread? = null
         var warmedOn: Thread? = null
         val runner = AIReplyRunner(
-            reply = { text, _, _ -> AIReplyResult.Reply(text) },
+            reply = { text, _, _, _ -> AIReplyResult.Reply(text) },
             warmUp = { warmedOn = Thread.currentThread() },
             onWarmUpThread = {
                 onThread = Thread.currentThread()
@@ -298,7 +298,7 @@ class AIReplyRunnerTest {
     fun `when the warm-up thread cannot be started there is no warm-up, and queries are not held up for ever`() {
         val logged = LinkedBlockingQueue<String>()
         val runner = AIReplyRunner(
-            reply = { text, _, _ -> AIReplyResult.Reply(text) },
+            reply = { text, _, _, _ -> AIReplyResult.Reply(text) },
             warmUp = {},
             log = { logged.add(it) },
             warmUpThread = { throw OutOfMemoryError("unable to create new native thread") },
@@ -320,7 +320,7 @@ class AIReplyRunnerTest {
         var nanos = 5_000_000_000L
         val handed = LinkedBlockingQueue<Pair<Long, Long>>()
         val runner = AIReplyRunner(
-            reply = { _, deadline, _ ->
+            reply = { _, deadline, _, _ ->
                 val atStart = deadline.remainingMs()
                 nanos += 60_000_000_000L // a minute passes on that clock, the board asleep or not
                 handed.add(atStart to deadline.remainingMs())
@@ -366,7 +366,7 @@ class AIReplyRunnerTest {
         quiet.ask("hey") { throw IllegalStateException("the caller failed") } // must not throw here either
         assertFalse(quiet.warmUp {})
 
-        val real = AIReplyRunner(reply = { _, _, _ -> AIReplyResult.Reply("ok") })
+        val real = AIReplyRunner(reply = { _, _, _, _ -> AIReplyResult.Reply("ok") })
         assertSame(real, aiRepliesOrNone(warn = { error("nothing to warn of") }) { real })
     }
 }

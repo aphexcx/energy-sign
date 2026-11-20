@@ -1,5 +1,6 @@
 package cx.aphex.energysign.message
 
+import cx.aphex.energysign.ai.AIHourlyBudget
 import cx.aphex.energysign.ai.AIReplyResult
 import cx.aphex.energysign.ai.AIReplySource
 
@@ -21,7 +22,19 @@ class FakeReplies : AIReplySource {
         return true
     }
 
-    override fun ask(text: String, stillWanted: () -> Boolean, onResult: (AIReplyResult) -> Unit) {
-        asked.add(Asked(text, stillWanted, onResult))
+    override fun ask(
+        text: String,
+        stillWanted: () -> Boolean,
+        reservation: AIHourlyBudget.Reservation?,
+        onResult: (AIReplyResult) -> Unit,
+    ) {
+        asked.add(Asked(text, stillWanted) { result ->
+            // Stand-in for the HTTP wire gate: outcomes that represent a sent request stamp the
+            // reservation, while pre-send outcomes (nothingWasSent) leave it unstamped.
+            if (result is AIReplyResult.Reply || !(result as AIReplyResult.NoReply).reason.nothingWasSent) {
+                reservation?.stamp()
+            }
+            onResult(result)
+        })
     }
 }
