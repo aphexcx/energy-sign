@@ -167,15 +167,16 @@ class JumpGameTest {
                     game.frame(30_000)?.stars
                 }
             },
-            // THE FRAME on the wire: two keys, the text of the note with the starfield's place and the score behind it, 36 bytes at most in play
+            // THE FRAME on the wire: two keys, the text of the note with a treat, a sparkle, the starfield's place and the score
+            // behind it, 39 bytes at most in play (two obstacles, `t-3`, `s59`, `n999`)
             row("every frame of that minute as the sign reads it: longest in bytes, and how many are not of the note's form", listOf(true, 0)) {
                 val game = game()
-                val form = Regex("""\{"str":"[0-7][01]([abc]-?\d{1,2}){0,4}s[1-5]?\dn(0|[1-9]\d{0,2})","type":"G"\}""")
+                val form = Regex("""\{"str":"[0-7][01]([abc]-?\d{1,2}){0,4}(t-?\d{1,2})?(e1)?s[1-5]?\dn(0|[1-9]\d{0,2})","type":"G"\}""")
                 val frames = (pressed.map { it to true } + every(10, minute).map { it to false }).sortedBy { it.first }.mapNotNull { (now, press) ->
                     if (press) game.jump(now)
                     game.frame(now)?.let { SignResponder.GSON.toJson(gameFrame(it)) }
                 }
-                listOf(frames.maxOf { it.length } in 27..36, frames.count { !form.matches(it) })
+                listOf(frames.maxOf { it.length } in 27..39, frames.count { !form.matches(it) })
             },
             // THE RUNNER IS BLUE, by the sign's own default: in play and when it runs in no colour is sent; where a show names its colour, it begins blue (6)
             row("the first frame of the run-in, of a game, and of the new best's hop", listOf("00r-12e1s56", "00s0n0", "00r2p62e1s0")) {
@@ -264,6 +265,185 @@ class JumpGameTest {
             row("not a new best: as it was, GAME OVER, the score and BEST",
                 listOf("frames", "Explosion 'X'", "CustomFlashyAnnouncement 'GAME${Message.VT}OVER'", "OneByOneMessage 'SCORE 12'", "OneByOneMessage 'BEST 30'", "Starfield ''")) {
                 says(shows.over(12, 30, last))
+            },
+        )
+
+        assertEquals(emptyList(), wrong(rows))
+    }
+
+    /**
+     * THE TREAT (es-osx): now and then a box to eat at the top of the face, `t` and its left column
+     * on the wire (the contract note's version 8). A jump that meets it on the way up eats it, +3.
+     * About one in three is a dilemma: the jump that eats it loses to the obstacle behind it.
+     */
+    @Test
+    fun `a treat comes now and then, a jump that meets it on the way up eats it for 3, and a third are a dilemma`() {
+        val nothingToHit = listOf(JumpGame.Shape(listOf(0)))
+        /**
+         * A game of [rules], with the button pressed at [presses]: its frames at every tick up to [untilMs] of it. A
+         * [secondGame] is played after a whole first game on the same [JumpGame], nobody pressing in that.
+         */
+        fun frames(rules: JumpGame.Rules, untilMs: Long, presses: List<Long> = emptyList(), seed: Int = 7, secondGame: Boolean = false): List<JumpGame.Frame> {
+            val game = JumpGame(rules, Random(seed))
+            val from = if (secondGame) rules.longestMs + 1_000 else 0L
+            if (secondGame) {
+                game.start(0)
+                game.frame(rules.longestMs)
+            }
+            game.start(from)
+            val left = presses.sorted().toMutableList()
+            return every(10, untilMs).mapNotNull { now ->
+                while (left.isNotEmpty() && left.first() <= now) game.jump(from + left.removeAt(0))
+                game.frame(from + now)
+            }
+        }
+
+        /** Each treat of a game, as the run of its frames. */
+        fun treats(game: List<JumpGame.Frame>): List<List<JumpGame.Frame>> {
+            val runs = mutableListOf<MutableList<JumpGame.Frame>>()
+            game.zipWithNext().forEach { (a, b) -> if (b.treat != null) (if (a.treat == null) runs.add(mutableListOf(b)) else runs.last().add(b)) }
+            return runs
+        }
+
+        /** The same game with only [presses], worked out to [untilMs]: its score then. */
+        fun scoreAt(rules: JumpGame.Rules, presses: List<Long>, untilMs: Long): Int {
+            val game = JumpGame(rules, Random(7)).also { it.start(0) }
+            presses.forEach { game.jump(it) }
+            game.frame(untilMs)
+            return game.score
+        }
+
+        /** At a fixed [speed] and with nothing to hit, one game a press: the treat's columns at the presses that eat it, and for how long one does. */
+        fun eatenWhenAt(speed: Double): String {
+            val rules = JumpGame.Rules(obstacles = nothingToHit, startSpeed = speed, topSpeed = speed, treatEvery = 3..3)
+            // (the world does not depend on the presses: where the first treat is at each tick, from a game nobody plays)
+            val world = frames(rules, 20_000)
+            val first = world.indexOfFirst { it.treat != null }
+            val span = world.drop(first).takeWhile { it.treat != null }
+            val eating = span.withIndex().filter { (i, _) ->
+                val press = (first + i + 1) * 10L
+                frames(rules, press + 1_000, listOf(press)).any { it.effect == 1 }
+            }.map { it.value.treat!! }
+            return "${eating.min()} to ${eating.max()}, ${eating.size * 10} ms"
+        }
+
+        /**
+         * With one [kind] of obstacle, the speed starting at [speed] and growing as in a game, the first treat after the
+         * third obstacle, placed as a [dilemma] or free. The player jumps the first three obstacles when they are 8
+         * columns from the runner. Then: how many presses eat the treat; how many plans that eat it (that press, and
+         * for a dilemma any one more after landing) get past the fourth obstacle; and whether leaving it does.
+         */
+        fun againstTheObstacle(kind: Int, speed: Double, dilemma: Boolean): String {
+            val rules = JumpGame.Rules(
+                obstacles = listOf(JumpGame.Rules().obstacles[kind]), startSpeed = speed, treatEvery = 3..3, dilemmaShare = if (dilemma) 1.0 else 0.0,
+            )
+            val presses = play(JumpGame(rules, Random(7)).also { it.start(0) }, every(10, 30_000))
+            if (presses.size < 4) return "${"abc"[kind]} from ${speed.toInt()}: the player is hit before the fourth obstacle"
+            val firstThree = presses.take(3)
+            // (past the fourth obstacle: the first three, the treat's 3 and the fourth)
+            val past = 3 + rules.treatScore + 1
+            val eating = (firstThree.last() + 900..presses[3] + 600 step 10).filter { press ->
+                val game = JumpGame(rules, Random(7)).also { it.start(0) }
+                (firstThree + press).forEach { game.jump(it) }
+                (press..press + 1_000 step 10).any { game.frame(it)?.effect == 1 }
+            }
+            val survive = eating.count { press ->
+                if (scoreAt(rules, firstThree + press, press + 2_500) >= past) return@count true
+                dilemma && (press + 900..press + 2_500 step 10).any { again -> scoreAt(rules, firstThree + press + again, again + 1_500) >= past }
+            }
+            val said = "${"abc"[kind]} from ${speed.toInt()}: ${if (eating.isEmpty()) "never eaten" else "eaten"}"
+            if (!dilemma) return "$said, every jump that eats it clears it: ${survive == eating.size}"
+            // (leaving it: the player's own jump over the fourth obstacle, which by the rule cannot eat it)
+            val left = scoreAt(rules, presses.take(4), presses[3] + 1_000) == 4
+            return "$said, eaten and past it: $survive, left: ${if (left) "cleared" else "not cleared"}"
+        }
+
+        /** Three games of three minutes with nothing to hit and nobody pressing (the third after another on the same game). */
+        val unplayed = listOf(7, 8, 9).map { frames(JumpGame.Rules(obstacles = nothingToHit), 180_000, seed = it, secondGame = it == 9) }
+        /** Three games of three minutes of the real game, played by the player who jumps every obstacle 8 columns from the runner. */
+        val played = listOf(7, 8, 9).map { seed ->
+            val presses = play(JumpGame(JumpGame.Rules(), Random(seed)).also { it.start(0) }, every(10, 180_000))
+            frames(JumpGame.Rules(), 180_000, presses, seed)
+        }
+        val shows = GameShows(0, 0, 0)
+
+        val rows = listOf(
+            // WHEN: after 10 to 15 obstacles, the first and every next. A treat came after the obstacles the runner has passed
+            // when the treat is past the runner's left column (the obstacle after it is 4 or more columns behind it)
+            row("the obstacles before the first treat and between two, in three games: all 10 to 15, and some of each", listOf(true, true)) {
+                val counts = unplayed.map { game -> treats(game).map { frames -> frames.first { it.treat!! <= 1 }.score!! } }
+                // (a game without a treat counts as one whose first came after none)
+                val apart = counts.flatMap { listOf(it.firstOrNull() ?: 0) + it.zipWithNext { a, b -> b - a } }
+                listOf(apart.all { it in 10..15 }, apart.size >= 15 && apart.distinct().size >= 4)
+            },
+            // WHERE: a free one 4 columns in front of the next obstacle (or 5, by a part of a tick), a dilemma one round(0.77 x
+            // speed - 6.5): 17 at 30, 35 at 54. About one in three is a dilemma
+            row("each treat's place in front of the next obstacle in those games (4 or 5; or 17 to 36), and the dilemmas' share", listOf(true, true)) {
+                val before = unplayed.flatMap { game ->
+                    treats(game).map { frames ->
+                        val frame = frames.first { it.treat!! <= 20 }
+                        frame.obstacles.map { it.column - frame.treat!! }.filter { it > 0 }.minOrNull() ?: 99
+                    }
+                }
+                val dilemmas = before.count { it >= 12 }
+                listOf(before.all { it in 4..5 || it in 17..36 }, dilemmas * 1.0 / before.size in 0.2..0.47)
+            },
+            // STANDING NEVER EATS: nobody presses, no treat is eaten in three whole games
+            row("nobody presses: no score goes up by more than 1, and no sparkle", listOf(true, true)) {
+                listOf(unplayed.all { game -> game.zipWithNext().all { (a, b) -> b.score!! - a.score!! in 0..1 } }, unplayed.none { game -> game.any { it.effect == 1 } })
+            },
+            // THE EAT RULE: met first while the runner rises (rise 1 and up, before the top of its jump): pressed earlier, the
+            // runner comes down on it; later, it met the runner standing and a jump into it after that does not eat it
+            row("the treat's columns at the presses that eat it, at 30, 42 and 54 columns a second", listOf("14 to 18, 130 ms", "14 to 20, 140 ms", "15 to 22, 150 ms")) {
+                listOf(eatenWhenAt(30.0), eatenWhenAt(42.0), eatenWhenAt(54.0))
+            },
+            // +3 ONCE, AT ONCE: the frame of the tick it is eaten carries the new score and no treat; the sparkle for 400 ms
+            row("eaten at 30 a second when at column 16: the score's step at that frame, a treat in the frames after, the sparkle's frames, +3s in the game",
+                listOf(3, false, 40, 1)) {
+                val rules = JumpGame.Rules(obstacles = nothingToHit, startSpeed = 30.0, topSpeed = 30.0, treatEvery = 3..3)
+                val press = (frames(rules, 20_000).indexOfFirst { it.treat == 16 } + 1) * 10L
+                val game = frames(rules, 20_000, listOf(press))
+                val eaten = game.indexOfFirst { it.effect == 1 }
+                listOf(
+                    game[eaten].score!! - game[eaten - 1].score!!, game.subList(eaten, eaten + 100).any { it.treat != null },
+                    game.drop(eaten).takeWhile { it.effect == 1 }.size, game.zipWithNext().count { (a, b) -> b.score!! - a.score!! == 3 },
+                )
+            },
+            // THE COLUMNS: never right of column 46 (its left column 44 at most), it appears there and only goes left until it
+            // is off the face and gone (-3 at the least), and never in a column an obstacle has. In three real games, played
+            row("in three real games of three minutes: frames that break the treat's columns, and how many treats were seen", listOf(emptyList<String>(), true)) {
+                val broken = played.flatMap { game ->
+                    game.zipWithNext().mapNotNull { (a, b) ->
+                        val t = b.treat ?: return@mapNotNull null
+                        val box = t..t + 2
+                        when {
+                            t > 44 -> "right of 46: $t"
+                            t < -3 -> "sent off the face: $t"
+                            a.treat == null && t != 44 -> "appears at $t"
+                            a.treat != null && t > a.treat -> "goes right: ${a.treat} to $t"
+                            b.obstacles.any { o -> (o.column until o.column + JumpGame.Rules().obstacles[o.kind].width).any { it in box } } -> "in an obstacle's column: ${gameFrame(b).str}"
+                            else -> null
+                        }
+                    }
+                }
+                listOf(broken, played.sumOf { treats(it).size } >= 12)
+            },
+            // A DILEMMA REALLY IS ONE: no press that eats it gets past the obstacle behind it, nor does it with one more press
+            // after landing; leaving it, the obstacle is cleared. For each kind, from the first speed to the top
+            row("dilemmas", (0..2).flatMap { kind -> listOf(30, 36, 42, 48, 54).map { "${"abc"[kind]} from $it: eaten, eaten and past it: 0, left: cleared" } }) {
+                (0..2).flatMap { kind -> listOf(30.0, 36.0, 42.0, 48.0, 54.0).map { againstTheObstacle(kind, it, dilemma = true) } }
+            },
+            // AND A FREE ONE CAN BE HAD: every jump that eats it clears the obstacle right behind it
+            row("free ones", (0..2).flatMap { kind -> listOf(30, 42, 54).map { "${"abc"[kind]} from $it: eaten, every jump that eats it clears it: true" } }) {
+                (0..2).flatMap { kind -> listOf(30.0, 42.0, 54.0).map { againstTheObstacle(kind, it, dilemma = false) } }
+            },
+            // THE FRAME'S TEXT: `t` and the left column after the obstacles; out of the note's range, none
+            row("a frame with a treat, at 44, at -3, at -99, at 100 and at -100", listOf("70a12t30s41n17", "00t44", "00t-3", "00t-99", "00", "00")) {
+                listOf(gameFrame(JumpGame.Frame(7, 0, listOf(JumpGame.Obstacle(0, 12)), stars = 41, score = 17, treat = 30)).str) +
+                    listOf(44, -3, -99, 100, -100).map { gameFrame(JumpGame.Frame(0, 0, emptyList(), treat = it)).str }
+            },
+            row("the picture of a hit keeps the treat that was on the face", "00t20p22e2s3n5") {
+                gameFrame((shows.over(5, 9, JumpGame.Frame(0, 0, emptyList(), stars = 3, treat = 20)).first() as Beat.Frames).at(0)).str
             },
         )
 
