@@ -115,8 +115,9 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
          * column is at 14 to 22 (the eat rule, [JumpGame]); begun then, the jump is too soon for
          * the obstacle behind it, which the runner comes down on, and after the 900 ms in the air
          * (the world moves 0.9 x [speed] columns in them) too late to jump it again.
-         * It is a dilemma from 12 to 20 columns at 30 a second, 22 to 29 at 42 and 32 to 37 at
-         * 54; this is the middle of that, a column higher for the speed that grows on the way.
+         * It is a dilemma (measured on a model of this tick) from 12 to 20 columns at 30 a second,
+         * 22 to 29 at 42 and 32 to 37 at 54; this is the middle, a column higher for the speed that
+         * grows on the way.
          */
         fun dilemmaBefore(speed: Double): Int = Math.round(0.77 * speed - 6.5).toInt()
     }
