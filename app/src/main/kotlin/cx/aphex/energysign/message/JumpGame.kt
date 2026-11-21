@@ -97,6 +97,14 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
         val freeBefore: Int = 4,
         /** After a treat is eaten, the frames sparkle (`e1`) this long. */
         val sparkleMs: Long = 400,
+        /**
+         * THE CATCH: the first time the treat and the runner meet, the runner eats it when it is off
+         * the ground and its jump is younger than this. 450 ms is the top of the jump: it eats only
+         * on its way up, a catch of 130 to 150 ms of presses. A wider catch is this one number, but
+         * the dilemmas need it narrow: [dilemmaBefore] is measured for 450, and a wider catch adds
+         * presses that eat a treat, so it can only take dilemmas away (measure it again then).
+         */
+        val catchMs: Long = 450,
     ) {
         /** Where the starfield stands when the ground has moved [groundColumns] (before the start: less than none). */
         fun stars(groundColumns: Double): Int = Math.floorMod(Math.floor(groundColumns * starsShare + 1e-6).toInt(), starColumns)
@@ -297,9 +305,9 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
 
         val up = rise()
         // THE EAT RULE: the first time the treat and the runner have an LED in common, the runner eats it if it is then on its
-        // way up (in the air, before the top of its jump). Met standing, at the top or coming down, it goes on by, uneaten.
+        // way up (in the air, before the top of its jump: [Rules.catchMs]). Met standing or coming down, it goes on by, uneaten.
         now.treat?.takeIf { !it.touched && touches(rules.treat, it.x, up) }?.let { treat ->
-            if (up >= 1 && (now.ticks - now.jumpedAt) * rules.tickMs * 2 < rules.jumpMs) {
+            if (up >= 1 && (now.ticks - now.jumpedAt) * rules.tickMs < rules.catchMs) {
                 now.score += rules.treatScore
                 now.treat = null
                 now.ateAt = now.ticks
