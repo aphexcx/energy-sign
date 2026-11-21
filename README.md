@@ -65,15 +65,19 @@ repository: copy it from a checkout that has it) before `:app:assembleDebug` bui
 It starts an Android emulator (or uses the sign's own one that runs), installs the debug build,
 tells the app where the sign is, starts the app, and then runs the firmware emulator with its
 view in the terminal. `Ctrl-C` ends it and stops the Android emulator it started, and only
-that one: a port that something else holds (another virtual device, or one still starting) is
-refused, and nothing is stopped. When the installed app cannot be replaced (a build signed with
+that one: a port that something else holds (another virtual device, or one still starting, or
+another sign's firmware emulator on the link port, 14400 or `--link-port`) is refused before
+anything is started, installed or restarted. The sign boots when the app has connected, so a
+recording begins there; when no app connects within 60 s the run fails, with a status that is
+not 0. When the installed app cannot be replaced (a build signed with
 another key, or no room), the script removes it and everything it saved there, says so, and
 installs the build: the virtual device is the script's own and holds test data, so it does not ask.
 
 - **The keyboard** of the sign is the Android emulator's window: click it and type. The up
   arrow starts the jump game and jumps.
 - **A command**, as a phone would send it: `tools/sign-on-mac.sh send '!game'` (the adb
-  command hook of the debug build).
+  command hook of the debug build). It says what the app answered: taken (status 0), refused or
+  failed (status 1), or taken and still being carried out (status 3: do not send it again).
 - **Without a window**, for a script: `--headless`, with `--record out.gif` (what the sign
   showed), `--frames out.jsonl` (every frame and every byte on the line) and `--duration 60`.
   Keys without the window: `tools/sign-on-mac.sh key up`.
