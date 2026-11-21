@@ -11,8 +11,6 @@ import cx.aphex.energysign.ai.PostedAIAnswer
 import cx.aphex.energysign.beatlinkdata.currentTrack
 import cx.aphex.energysign.bluetooth.takeWrite
 import cx.aphex.energysign.keyboard.KeyboardManager
-import cx.aphex.energysign.uart.Attention
-import cx.aphex.energysign.uart.AttentionSwitch
 import cx.aphex.energysign.uart.SignLink
 import cx.aphex.energysign.uart.SignWire
 import cx.aphex.energysign.uart.UartTimingLog
@@ -68,11 +66,9 @@ class MessageManagerOwnerTest {
     private val owner = OwnerQueue()
     private lateinit var manager: MessageManager
 
-    /** How often the manager said that what the chooser shows has changed (each is a push, when pushes are on). */
+    /** How often the manager said that what the chooser shows has changed (each is a push). */
     private var pushes = 0
 
-    /** The words of the `!attn` commands the manager handed on. */
-    private val attnWords = mutableListOf<String>()
     private val countPushes: () -> Unit = { pushes++ }
 
     private val immediateTasks = object : TaskExecutor() {
@@ -93,7 +89,6 @@ class MessageManagerOwnerTest {
         }
         manager = MessageManager(context, repo, owner)
         manager.onChooserChanged = countPushes
-        manager.onAttentionCommand = { attnWords += it }
     }
 
     @AfterAll
@@ -117,7 +112,6 @@ class MessageManagerOwnerTest {
         unsaved.forEach { it.run() } // the saver gets through what the test before left it
         unsaved.clear()
         pushes = 0
-        attnWords.clear()
     }
 
     /** Escape twice, as at the sign: the first press turns the echo into the warning, the second ends the input. */
@@ -491,7 +485,6 @@ class MessageManagerOwnerTest {
                 writeAt = System.nanoTime()
                 return length
             }
-            override fun sendBreak(millis: Int) = error("no push is asked for here")
             override fun close() {}
         }
         val manager = startWithTwoStoredMessages().manager
@@ -827,28 +820,19 @@ class MessageManagerOwnerTest {
         assertEquals("1/0 <empty>", manager.chooserShown()?.let { "${it.flashy} ${it.str}" })
     }
 
-    // ---- the push switch command
+    // ---- there is no push switch: the old command is no command
 
     @Test
-    fun `the attn command hands its word on, in any case, and is not taken for the ad period command`() {
+    fun `attn, the command of the switch that was, changes nothing, it is not taken for the ad period command and asks for no push`() {
         phone("!attn zeros")
         phone("!attn")
         phone("!attn  off ")
         phone("!ATTN Auto")
-        phone("!attn 5")
+        phone("!attn 5") // it begins like the ad period command, and is no number behind it
         ownerRuns()
-        assertEquals(listOf("zeros", "", "off", "auto", "5"), attnWords)
         assertEquals(0, repo.oneTimeMessages.size) // an ad period command would have announced itself
         assertEquals(emptyList(), unsaved) // and saved the period
         assertEquals(0, pushes)
-    }
-
-    @Test
-    fun `the attn command changes nothing until the owner runs it`() {
-        phone("!attn zeros")
-        assertEquals(emptyList(), attnWords)
-        ownerRuns()
-        assertEquals(listOf("zeros"), attnWords)
     }
 
     // ---- the whole push: the real manager, the real frame maker and the real link, on a fake line
@@ -866,7 +850,6 @@ class MessageManagerOwnerTest {
             }
 
             override fun write(buffer: ByteArray, length: Int): Int = length.also { written += buffer.copyOf(length) }
-            override fun sendBreak(millis: Int) = error("the break is not the attention")
             override fun close() {}
         }
         // wired as MainViewModel and EnergySignUartManager wire them
@@ -884,7 +867,6 @@ class MessageManagerOwnerTest {
             answer = { buffer, count -> responder.onRequest(buffer, count)?.let { current += it.str } },
             chooserFrame = push::frame,
             pushed = push::written,
-            attention = { Attention.AUTO },
             timing = UartTimingLog(isEnabled = { false }, emit = {}),
             nanoTime = { now },
             sleepNanos = { now += it },
@@ -947,72 +929,6 @@ class MessageManagerOwnerTest {
         } finally {
             manager.onChooserChanged = countPushes
         }
-    }
-
-    /**
-     * The real manager, the real switch (on a file of its own, off) and the real link on a line
-     * that takes everything: [commands] are sent by the phone and run by ONE turn of the link,
-     * then the link runs on for more than the distance two pushes keep. What was written.
-     */
-    private fun writtenAfterOneTurnOf(vararg commands: String): List<ByteArray> {
-        var now = 0L
-        val written = mutableListOf<ByteArray>()
-        val wire = object : SignWire {
-            override fun read(buffer: ByteArray, length: Int): Int = 0
-            override fun write(buffer: ByteArray, length: Int): Int = length.also { written += buffer.copyOf(length) }
-            override fun sendBreak(millis: Int) = error("the break is not the attention")
-            override fun close() {}
-        }
-        val switch = AttentionSwitch(
-            file = File(newFilesDir(), AttentionSwitch.FILE_NAME),
-            property = { null },
-            saveLater = {},
-            log = {},
-        )
-        assertEquals(Attention.OFF, switch.inForce())
-        val push = ChooserPush(shown = { manager.chooserShown() }, sent = {})
-        val link = SignLink(
-            wire = wire, baud = 14400, name = "UART",
-            events = { owner.drain(onError = { throw it }) },
-            answer = { _, _ -> },
-            chooserFrame = push::frame,
-            pushed = push::written,
-            attention = switch::inForce,
-            timing = UartTimingLog(isEnabled = { false }, emit = {}),
-            nanoTime = { now },
-            sleepNanos = { now += it },
-        )
-        manager.onChooserChanged = link::requestPush
-        manager.onAttentionCommand = { switch.set(it) }
-        try {
-            commands.forEach(::phone)
-            repeat(300) { link.step() }
-            return written
-        } finally {
-            manager.onChooserChanged = countPushes
-            manager.onAttentionCommand = { attnWords += it }
-        }
-    }
-
-    @Test
-    fun `the gate's case, choose and then attn auto in one turn of the owner, the change made while pushes were off is not pushed`() {
-        assertEquals(emptyList(), writtenAfterOneTurnOf("!choose", "!attn auto"))
-        assertEquals("1/5", manager.chooserShown()?.flashy) // the command was carried out; the sign's next request gets it
-    }
-
-    @Test
-    fun `attn auto and then choose in one turn of the owner, the change is pushed, zeros and its frame`() {
-        val written = writtenAfterOneTurnOf("!attn auto", "!choose")
-        assertEquals(2, written.size)
-        assertEquals(72, written[0].size)
-        assertTrue(written[0].all { it == 0.toByte() })
-        assertEquals(SignResponder.GSON.toJson(manager.chooserShown()), String(written[1]))
-    }
-
-    @Test
-    fun `choose and then attn off in one turn of the owner, nothing is pushed`() {
-        assertEquals(2, writtenAfterOneTurnOf("!attn auto", "!choose").size)
-        assertEquals(emptyList(), writtenAfterOneTurnOf("!attn auto", "!next", "!attn off"))
     }
 
     // ---- ads: the command, the restart, the period (PR 5)
@@ -2089,11 +2005,11 @@ class MessageManagerOwnerTest {
         app.repo.dropOnePieceOf(reply)
     }
 
-    /** In chooser mode a request of the sign, for the next message or a poll, is answered and takes nothing out of the queue. */
+    /** In chooser mode a request of the sign is answered and takes nothing out of the queue. */
     private val requestsInTheChooser = Leaving("two requests of the sign in chooser mode, then a pause and its end", emptiesTheQueue = false) { app ->
         app.phone("!choose")
         ownerRuns()
-        for (request in "~?") {
+        for (request in "~~") {
             val answered = SignResponder(nextMessage = { app.manager.getNextMessage() }, write = { _, _ -> true })
                 .onRequest(byteArrayOf(request.code.toByte()), 1)
             check(answered == null || answered is Message.Chooser) { "in chooser mode the sign was sent ${answered?.str}" }
@@ -2774,7 +2690,7 @@ class MessageManagerOwnerTest {
         }
         /** The score and the best as the sign is shown them, from here to the next stored message. */
         fun shown(app: App): List<String> = untilStored(app).zipWithNext().mapNotNull { (before, it) ->
-            if (before == "NEW${Message.VT}BEST!") "a new best of ${it.trim()}" else it.takeIf { it.startsWith("SCORE") || it.startsWith("BEST") }
+            if (before == "HIGH SCORE") "a new best of ${it.trim()}" else it.takeIf { it.startsWith("SCORE") || it.startsWith("BEST") }
         }
         val presses: Map<String, (App) -> Unit> = linkedMapOf(
             "!jump from the phone" to { app -> app.phone("!jump") },
@@ -2907,7 +2823,7 @@ class MessageManagerOwnerTest {
             ownerRuns()
             asks(app, 100)
         }
-        cell("the sign asks again three seconds into a game: the picture of the hit is the one of the hit (the post at column 12, the starfield where it stood then), not the last it asked for", "00a12p22e2s16") {
+        cell("the sign asks again three seconds into a game: the picture of the hit is the one of the hit (the post at column 12, the starfield where it stood then, the score), not the last it asked for", "00a12p22e2s16n0") {
             val (app, began) = inPlay()
             app.now = began + 3_000
             app.manager.getNextMessage().str
@@ -2957,7 +2873,7 @@ class MessageManagerOwnerTest {
         assertEquals(
             listOf<Pair<String, Any?>>(
                 "after a restart in the middle of a game the sign gets" to STORED,
-                "a first score of 1 is a new best, with its own show" to listOf("X", "NEW${Message.VT}BEST!", "  1   ", ""),
+                "a first score of 1 is a new best, with its own show" to listOf("X", "HIGH SCORE", "  1   ", ""),
                 "a game without a score after the restart" to listOf("SCORE 0", "BEST 1"),
                 "!game reset, and a game without a score" to listOf("SCORE 0", "BEST 0"),
                 "and after a restart" to listOf("SCORE 0", "BEST 0"),
