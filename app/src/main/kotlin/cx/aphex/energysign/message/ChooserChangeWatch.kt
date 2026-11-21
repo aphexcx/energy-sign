@@ -33,7 +33,7 @@ class ChooserChangeWatch(
         }
     }
 
-    /** The two fields the sign draws, and the checksum covers. */
+    /** The two fields the sign draws. */
     private fun shown(): Pair<String, String>? = view()?.let { it.str to it.flashy }
 }
 

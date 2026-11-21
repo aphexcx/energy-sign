@@ -108,9 +108,6 @@ refuses any other serial: a real sign on the computer's USB is never spoken to.
   computer's clock while a recording goes by the sign's: when the firmware emulator does not
   keep up with real time (its live view says how fast it runs), a recorded game plays faster
   than it was. How many frames a second the real sign shows is for the real sign to say.
-- **A push by a break.** The line to the firmware emulator carries bytes, and a break is not
-  bytes: a chooser push that asks for one (`!attn break`) fails here and says so. The push by
-  a run of zeros is bytes and goes through.
 - **The board's Android.** The board runs Android Things, API 27; the virtual device is a
   phone image of API 34 or 35. The app's code is the same, but what Android does around it is
   not: permissions are asked for at run time there (the script grants them at install), the

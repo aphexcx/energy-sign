@@ -15,16 +15,16 @@ package cx.aphex.energysign.uart
  * different lines can be subtracted. The lines:
  *
  *     rx t_us=T n=N bytes=[...] chunks=1 first_us=T empty_us=E
- *         One request read from the sign: N bytes, the last of them `~` or `?` (bytes outside
+ *         One request read from the sign: N bytes, the last of them `~` (bytes outside
  *         printable ASCII as \xNN). T: the read that found it returned. E: the last read before
  *         it that found nothing returned, so the byte became readable between E and T. Two
  *         request bytes in one rx with T - E of a few ms mean the platform delivered them
  *         together: it held the first one back, and nothing in the app can fetch it sooner.
  *         (chunks and first_us are kept for the tool that reads this log; a request is one read.)
- *     tx t_us=T n=W/L kind=report|message|attention call_us=C rx_us=R
+ *     tx t_us=T n=W/L kind=message|attention call_us=C rx_us=R
  *         One frame handed to the transmitter. T: the last write() returned. C: the first was
- *         called. W of L bytes were taken; W below L is a failed write. report is a chooser poll
- *         report, message a full message (a reply or a pushed frame), attention the run of 0x00
+ *         called. W of L bytes were taken; W below L is a failed write. message is a full
+ *         message (a reply or a pushed frame), attention the run of 0x00
  *         bytes that gets the sign's attention for a push. R: the t_us of the latest rx line,
  *         so for a reply T - R is request-to-reply inside the app.
  *     drop t_us=T n=N bytes=[...]
@@ -34,8 +34,9 @@ package cx.aphex.energysign.uart
  *         is old (the link was kept from the wire for longer than the sign listens).
  *     push t_us=T call_us=C break_us=B guard_us=G wanted_us=W n=N
  *         One push of the chooser (contract VERSION 3.1). W: the push began. C: the attention
- *         was asked for (the write of the zeros, whose tx line comes before this one, or
- *         sendBreak). B: that call returned. G: the guard after the attention was over. T: the
+ *         was asked for (the write of the zeros, whose tx line comes before this one). B: that
+ *         call returned (the field keeps its name for the tool that reads this log). G: the
+ *         guard after the attention was over. T: the
  *         frame was handed over (its tx line comes just before this one). N: the bytes of the
  *         frame, 0 for attention alone (leaving chooser mode). A push that failed has no line;
  *         it is tried again.
@@ -104,7 +105,7 @@ class UartTimingLog(
         )
     }
 
-    /** A frame was handed to the transmitter: [wrote] of [of] bytes. [kind]: report, message or attention. */
+    /** A frame was handed to the transmitter: [wrote] of [of] bytes. [kind]: message or attention. */
     fun tx(callNs: Long, returnNs: Long, wrote: Int, of: Int, kind: String) {
         if (!enabled(returnNs)) return
         emit("tx t_us=${returnNs / 1000} n=$wrote/$of kind=$kind call_us=${callNs / 1000} rx_us=${lastRxNs / 1000}")

@@ -27,8 +27,8 @@ class UartTimingLogTest {
 
     @Test
     fun `a read line has its time in microseconds, the count and the bytes`() {
-        log.rx(readNs = 5_000 * us, emptyNs = 3_100 * us, buffer = ascii("?"), count = 1)
-        assertEquals(listOf("rx t_us=5000 n=1 bytes=[?] chunks=1 first_us=5000 empty_us=3100"), lines)
+        log.rx(readNs = 5_000 * us, emptyNs = 3_100 * us, buffer = ascii("~"), count = 1)
+        assertEquals(listOf("rx t_us=5000 n=1 bytes=[~] chunks=1 first_us=5000 empty_us=3100"), lines)
     }
 
     @Test
@@ -39,10 +39,10 @@ class UartTimingLogTest {
 
     @Test
     fun `a write line has the time the write returned, the call, the count and the read it follows`() {
-        log.rx(1_000 * us, 0, ascii("?"), 1)
-        log.tx(callNs = 1_200 * us, returnNs = 1_900 * us, wrote = 11, of = 11, kind = "report")
+        log.rx(1_000 * us, 0, ascii("~"), 1)
+        log.tx(callNs = 1_200 * us, returnNs = 1_900 * us, wrote = 72, of = 72, kind = "attention")
         log.tx(callNs = 3_000 * us, returnNs = 3_500 * us, wrote = 40, of = 47, kind = "message")
-        assertEquals("tx t_us=1900 n=11/11 kind=report call_us=1200 rx_us=1000", lines[1])
+        assertEquals("tx t_us=1900 n=72/72 kind=attention call_us=1200 rx_us=1000", lines[1])
         assertEquals("tx t_us=3500 n=40/47 kind=message call_us=3000 rx_us=1000", lines[2])
     }
 

@@ -204,7 +204,7 @@ sealed class Message {
     ) : Message() {
         override val str: String = currentMessage.str
 
-        /** The count shown beside the text, "<i>/<n>". Part of the JSON and of the chooser checksum. */
+        /** The count shown beside the text, "<i>/<n>". Part of the JSON. */
         val flashy: String = "$currentIndex/${lastIndex}"
         override val type: MSGTYPE = MSGTYPE.CHOOSER
     }

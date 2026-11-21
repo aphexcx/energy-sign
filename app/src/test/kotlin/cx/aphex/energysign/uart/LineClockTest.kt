@@ -45,21 +45,8 @@ class LineClockTest {
     }
 
     @Test
-    fun `a break holds the line for its length from the return of the call`() {
-        clock.low(returnedNs = 201 * ms, millis = 50)
-        assertEquals(251 * ms, clock.freeAtNs)
-    }
-
-    @Test
-    fun `a break behind bytes that are still leaving does not free the line before they are gone`() {
-        clock.wrote(returnedNs = 100 * ms, count = 144) // 100 ms on the line
-        clock.low(returnedNs = 101 * ms, millis = 50)
-        assertEquals(100 * ms + air(144), clock.freeAtNs)
-    }
-
-    @Test
     fun `the quiet is added to whatever is on the line`() {
-        clock.low(returnedNs = 200 * ms, millis = 50)
+        clock.wrote(returnedNs = 200 * ms, count = 72) // 50 ms on the line
         clock.quiet(20)
         assertEquals(270 * ms, clock.freeAtNs)
         clock.wrote(returnedNs = 270 * ms, count = 72)
@@ -128,8 +115,6 @@ class LineClockTest {
         // handed over a millisecond before the wrap: the line is busy until after it, and as numbers
         // that end is the "smaller" one. The bytes go out behind what is leaving all the same.
         late.wrote(returnedNs = Long.MAX_VALUE - 1 * ms, count = 72)
-        assertEquals(Long.MIN_VALUE + 95 * ms - 1, late.freeAtNs)
-        late.low(returnedNs = Long.MIN_VALUE + 20 * ms, millis = 50)
         assertEquals(Long.MIN_VALUE + 95 * ms - 1, late.freeAtNs)
     }
 }

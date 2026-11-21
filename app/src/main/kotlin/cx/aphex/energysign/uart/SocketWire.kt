@@ -1,6 +1,5 @@
 package cx.aphex.energysign.uart
 
-import java.io.IOException
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.nio.channels.SocketChannel
@@ -38,12 +37,6 @@ class SocketWire(
     override fun read(buffer: ByteArray, length: Int): Int = onTheLine { it.read(ByteBuffer.wrap(buffer, 0, length)) }
 
     override fun write(buffer: ByteArray, length: Int): Int = onTheLine { it.write(ByteBuffer.wrap(buffer, 0, length)) }
-
-    /**
-     * A break is not bytes, and this line carries bytes only: a push that asks for one fails here
-     * and says so. (The push that gets the sign's attention, the run of zeros, is bytes.)
-     */
-    override fun sendBreak(millis: Int): Unit = throw IOException("the line to the firmware emulator at $host:$port carries no break")
 
     override fun close() {
         closed = true
