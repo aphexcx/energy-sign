@@ -5,7 +5,7 @@ import cx.aphex.energysign.OptionalStart
 import cx.aphex.energysign.StartWorker
 import cx.aphex.energysign.optional
 import java.util.concurrent.Executor
-import io.ktor.server.engine.ApplicationEngine
+import io.ktor.server.engine.EmbeddedServer
 import cx.aphex.energysign.ext.logD
 import cx.aphex.energysign.ext.logW
 import cx.aphex.energysign.ai.PostedAIAnswer
@@ -34,15 +34,15 @@ internal class BeatLinkListener(
     context: Context,
     private val worker: StartWorker,
     private val nettyWork: Executor = Executor { task -> Thread(task, "beatlink-netty").apply { isDaemon = true }.start() },
-    create: (() -> ApplicationEngine)? = null,
+    create: (() -> EmbeddedServer<*, *>)? = null,
 ) : KoinComponent {
     private val messageManager: MessageManager by inject()
     internal val discovery = DnsSdAnnouncer(context, worker)
     private val createServer = create ?: ::createEngine
-    private var server: ApplicationEngine? = null
+    private var server: EmbeddedServer<*, *>? = null
     private val binding = OptionalStart("BeatLink listener startup", worker, { logW(it) }) { attempt ->
         nettyWork.execute {
-            var engine: ApplicationEngine? = null
+            var engine: EmbeddedServer<*, *>? = null
             val result = runCatching {
                 createServer().also { engine = it; it.start(wait = false) }
             }

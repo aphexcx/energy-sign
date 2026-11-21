@@ -18,6 +18,7 @@ import com.aallam.openai.client.OpenAIHost
 import com.aallam.openai.client.RetryStrategy
 import io.ktor.client.engine.okhttp.OkHttpConfig
 import io.ktor.client.plugins.HttpResponseValidator
+import io.ktor.client.plugins.auth.Auth
 import io.ktor.client.plugins.ResponseException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -101,6 +102,9 @@ class OpenAIReplyGenerator(
         host = baseUrl?.let { OpenAIHost(baseUrl = it) } ?: OpenAIHost.OpenAI,
         retry = RetryStrategy(maxRetries = 0),
         httpClientConfig = {
+            // A rejected key is asked once. The client would send a request that got HTTP 401 a second
+            // time with the same key (its key cannot be renewed), and the answer would be the same.
+            install(Auth) { reAuthorizeOnResponse { false } }
             followRedirects = false
             engine {
                 val okHttp = this as? OkHttpConfig
@@ -159,12 +163,11 @@ class OpenAIReplyGenerator(
             activeCall.set(WireCallContext(request.deadline, minTimeToSend, reservation))
             val ended = try {
                 withTimeoutOrNull(limitMs) { collect(client, request, stream) } != null
-            } catch (e: OpenAITimeoutException) {
-                // A limit of the HTTP client ended it after all: what has come is read the same way.
-                false
             } catch (e: Throwable) {
+                // The wire gate's refusal first: the client wraps it as an OpenAIIOException.
                 WireSendBlockedException.findIn(e)?.let { return noReply(it.reason, it.detail) }
-                throw e
+                // A limit of the HTTP client ended it after all: what has come is read the same way.
+                if (e is OpenAIIOException && (e is OpenAITimeoutException || e.isSocketTimeout())) false else throw e
             } finally {
                 activeCall.set(null)
                 owned?.release()
@@ -175,7 +178,8 @@ class OpenAIReplyGenerator(
         } catch (e: OpenAITimeoutException) {
             noReply(NoReplyReason.TIMEOUT, e.javaClass.simpleName)
         } catch (e: OpenAIIOException) {
-            noReply(NoReplyReason.NETWORK, e.javaClass.simpleName)
+            if (e.isSocketTimeout()) noReply(NoReplyReason.TIMEOUT, "SocketTimeoutException")
+            else noReply(NoReplyReason.NETWORK, e.javaClass.simpleName)
         } catch (e: OpenAIAPIException) {
             // Every HTTP status with an error body, whatever class the client makes of it.
             noReply(NoReplyReason.forHttpStatus(e.statusCode), summary(e))
@@ -191,6 +195,14 @@ class OpenAIReplyGenerator(
             else noReply(NoReplyReason.PROVIDER_ERROR, e.javaClass.simpleName)
         }
     }
+
+    /**
+     * The HTTP client's socket limit ran out while the answer was being read. Since Ktor 3 that
+     * arrives as a failure of the stream with the timeout as its cause, which the OpenAI client
+     * takes for a network failure, not for the timeout it is.
+     */
+    private fun OpenAIIOException.isSocketTimeout(): Boolean =
+        generateSequence(cause) { it.cause }.take(16).any { it is java.net.SocketTimeoutException }
 
     private fun oneShot(body: RequestBody): RequestBody = object : RequestBody() {
         override fun contentType() = body.contentType()

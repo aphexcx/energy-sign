@@ -170,6 +170,11 @@ internal class EnergySignBluetoothGattServer(
             BluetoothGatt.GATT_FAILURE
         }
         if (responseNeeded) {
+            // The SDK (API 37) now says what Android always needed: a response goes to a device.
+            if (device == null) {
+                logW("Write request without a device: there is nobody to answer")
+                return
+            }
             val reply = if (status == BluetoothGatt.GATT_SUCCESS) "Uart Write response".toByteArray() else null
             server?.sendResponse(device, requestId, status, 0, reply)
         }

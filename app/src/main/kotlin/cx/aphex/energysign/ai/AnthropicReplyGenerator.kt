@@ -464,7 +464,7 @@ class AnthropicReplyGenerator(
 
         /** "HTTP 429 RATE_LIMIT_ERROR": the status and the SDK's own name for the error type, nothing from the body. */
         private fun summary(e: AnthropicServiceException): String =
-            "HTTP ${e.statusCode()} ${forLog { e.errorType().map { it.value().name }.orElse(null) } ?: "no error type"}"
+            "HTTP ${e.statusCode()} ${forLog { e.type().map { it.value().name }.orElse(null) } ?: "no error type"}"
 
         /** The kinds of the exceptions in the chain, outermost first. No messages. */
         private fun kinds(failure: Throwable): String =

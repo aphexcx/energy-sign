@@ -237,16 +237,19 @@ class AIHourlyBudgetTest {
             }
 
             // 5. HTTP/2 REFUSED_STREAM with retry ON (Class 1 member 3): gate runs twice, 1 place spent (not 2).
+            // OkHttp 5 retries a refused stream only while the call has another route left: the host has two addresses.
             MockWebServer().use { h2 ->
                 h2.protocols = listOf(Protocol.H2_PRIOR_KNOWLEDGE)
                 h2.enqueue(MockResponse().setSocketPolicy(SocketPolicy.RESET_STREAM_AT_START).setHttp2ErrorCode(ErrorCode.REFUSED_STREAM.httpCode))
                 h2.enqueue(MockResponse().setResponseCode(200).setBody("ok"))
-                h2.start()
+                val loopback = InetAddress.getByName("127.0.0.1")
+                h2.start(loopback, 0)
                 val rH2 = assertNotNull(budget.reserve())
                 val entries = AtomicInteger(0)
                 val h2Client = OkHttpClient.Builder().protocols(listOf(Protocol.H2_PRIOR_KNOWLEDGE)).retryOnConnectionFailure(true)
+                    .dns { listOf(loopback, loopback) }
                     .addNetworkInterceptor { c -> entries.incrementAndGet(); WireBudgetInterceptor().intercept(c) }.build()
-                val h2Req = Request.Builder().url(h2.url("/v1/messages")).post("{}".toRequestBody("application/json".toMediaType()))
+                val h2Req = Request.Builder().url("http://two-routes.test:${h2.port}/v1/messages").post("{}".toRequestBody("application/json".toMediaType()))
                     .tag(WireCallContext::class.java, WireCallContext(okDeadline, Duration.ofSeconds(15), rH2)).build()
                 h2Client.newCall(h2Req).execute().use { assertEquals(200, it.code) }
                 assertEquals(2, entries.get()); assertTrue(rH2.release()); assertEquals(2, budget.usedCount())

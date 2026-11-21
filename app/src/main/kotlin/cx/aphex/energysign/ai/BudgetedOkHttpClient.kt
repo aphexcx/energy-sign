@@ -1,4 +1,6 @@
 // Ported from com.anthropic:anthropic-java-client-okhttp:3.3.0 (OkHttpClient.kt); re-check on SDK upgrades.
+// Read against 3.12.0: same HttpClient and Backend interfaces. Its one change, path segments percent-encoded
+// by the SDK's own table, sends the same bytes for the paths this app calls (v1/messages, v1/models/<id>).
 package cx.aphex.energysign.ai
 
 import com.anthropic.backends.Backend
@@ -19,7 +21,6 @@ import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.Response
 import okio.BufferedSink
-import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.time.Duration
@@ -142,15 +143,15 @@ internal class BudgetedOkHttpClient(
         val headers = Headers.builder().apply {
             for ((name, value) in response.headers) put(name, value)
         }.build()
-        val stream: InputStream = response.body?.let { body ->
-            val inner = body.byteStream()
-            object : InputStream() {
-                override fun read() = inner.read()
-                override fun read(b: ByteArray, off: Int, len: Int) = inner.read(b, off, len)
-                override fun available() = inner.available()
-                override fun close() { try { inner.close() } finally { body.close(); call.cancel() } }
-            }
-        } ?: ByteArrayInputStream(ByteArray(0))
+        // OkHttp 5: a response always has a body (an empty one when nothing came)
+        val body = response.body
+        val inner = body.byteStream()
+        val stream: InputStream = object : InputStream() {
+            override fun read() = inner.read()
+            override fun read(b: ByteArray, off: Int, len: Int) = inner.read(b, off, len)
+            override fun available() = inner.available()
+            override fun close() { try { inner.close() } finally { body.close(); call.cancel() } }
+        }
         return object : HttpResponse {
             override fun statusCode() = response.code
             override fun headers() = headers
