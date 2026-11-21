@@ -18,6 +18,10 @@ import kotlin.random.Random
  * the moment somebody got round to it ([jump]). The same presses at the same moments are the
  * same game, however often and unevenly the sign asks and however late a press is carried out.
  *
+ * Now and then a treat comes ([Rules.treat]): a jump that meets it on the way up eats it, for
+ * [Rules.treatScore] more; about one in three is placed where the jump that eats it loses the
+ * game to the obstacle behind it (the rules in full: the treat's section of the contract note).
+ *
  * No Android in here, no thread and no lock: whoever owns the game calls it from one thread and
  * hands in the time.
  */
@@ -73,9 +77,40 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
          */
         val starsShare: Double = 0.25,
         val starColumns: Int = GAME_STAR_COLUMNS,
+        /**
+         * THE TREAT (es-osx; the contract note's version 8): now and then a small purple thing to
+         * eat, for [treatScore] more. The game counts it as the whole box the sign may light it
+         * in, its left column and the two right of it, rows 5 to 7, whatever LEDs the sign lights.
+         */
+        val treat: Shape = Shape(List(3) { 0b1110000 }),
+        /** One comes in the gap after every so many obstacles, drawn by chance in this range (from 3 up: one treat at a time). */
+        val treatEvery: IntRange = 10..15,
+        /** This share of them is placed as a dilemma ([dilemmaBefore]); the others are free ([freeBefore]). */
+        val dilemmaShare: Double = 1.0 / 3,
+        val treatScore: Int = 3,
+        /** It is sent only while all its columns are at or left of this one, so that it never meets the score: it appears there. */
+        val treatUpTo: Int = 46,
+        /**
+         * A free one: its left column this many columns in front of the next obstacle's, so that
+         * a jump over that obstacle can take it, and every jump that does clears it (3 to 6 do).
+         */
+        val freeBefore: Int = 4,
+        /** After a treat is eaten, the frames sparkle (`e1`) this long. */
+        val sparkleMs: Long = 400,
     ) {
         /** Where the starfield stands when the ground has moved [groundColumns] (before the start: less than none). */
         fun stars(groundColumns: Double): Int = Math.floorMod(Math.floor(groundColumns * starsShare + 1e-6).toInt(), starColumns)
+
+        /**
+         * A dilemma: its left column this many columns in front of the next obstacle's, at
+         * [speed] (columns a second) when it is placed. A jump that eats it begins when its left
+         * column is at 14 to 22 (the eat rule, [JumpGame]); begun then, the jump is too soon for
+         * the obstacle behind it, which the runner comes down on, and after the 900 ms in the air
+         * (the world moves 0.9 x [speed] columns in them) too late to jump it again.
+         * It is a dilemma from 12 to 20 columns at 30 a second, 22 to 29 at 42 and 32 to 37 at
+         * 54; this is the middle of that, a column higher for the speed that grows on the way.
+         */
+        fun dilemmaBefore(speed: Double): Int = Math.round(0.77 * speed - 6.5).toInt()
     }
 
     class Obstacle(val kind: Int, val column: Int)
@@ -86,6 +121,7 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
      * in the game, the colours of the runner and of the obstacles, and an effect. And where the
      * starfield behind it all stands ([Rules.stars]); null: no starfield. And the score, which
      * the sign shows in small digits at the top right; null: none (the intro, the new best's hop).
+     * And the treat's left column; null: none.
      */
     class Frame(
         val rise: Int,
@@ -96,11 +132,15 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
         val effect: Int = 0,
         val stars: Int? = null,
         val score: Int? = null,
+        val treat: Int? = null,
     )
 
     enum class End { HIT, TOO_LONG }
 
     private class Coming(val kind: Int, val shape: Shape, var x: Double, var passed: Boolean = false)
+
+    /** A treat on its way; [touched]: it has met the runner, and was not eaten (it goes on by). */
+    private class Treat(var x: Double, var touched: Boolean = false)
 
     /** The game at one tick: everything that changes while it is played. */
     private class Moment(
@@ -116,8 +156,14 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
         var ended: End? = null,
         /** How many columns the ground has moved since the game began: what the starfield goes by. */
         var ground: Double = 0.0,
+        /** The treat on its way; null: none. And the tick at which the last one was eaten; -1: none yet. */
+        var treat: Treat? = null,
+        var ateAt: Long = -1,
     ) {
-        fun copy() = Moment(ticks, jumpedAt, coming.mapTo(ArrayList()) { Coming(it.kind, it.shape, it.x, it.passed) }, nextAfter, started, score, ended, ground)
+        fun copy() = Moment(
+            ticks, jumpedAt, coming.mapTo(ArrayList()) { Coming(it.kind, it.shape, it.x, it.passed) }, nextAfter, started, score, ended, ground,
+            treat?.let { Treat(it.x, it.touched) }, ateAt,
+        )
     }
 
     private var began = false
@@ -132,8 +178,15 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
      */
     private var lastPress = Moment()
 
-    /** The kind and the extra room of every obstacle so far, by its number: working a stretch out again gives the same obstacles. */
+    /**
+     * The kind and the extra room of every obstacle so far, by its number, and the treat in the
+     * gap after it ([NO_TREAT], [FREE] or [DILEMMA]): working a stretch out again gives the same
+     * obstacles and treats.
+     */
     private val drawn = ArrayList<IntArray>()
+
+    /** The number (from 1) of the obstacle after which the next treat comes; 0 before the first is drawn. */
+    private var treatAfter = 0
 
     val score: Int get() = at.score
 
@@ -150,6 +203,7 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
         began = true
         startedAt = now
         drawn.clear()
+        treatAfter = 0
         at = Moment(nextAfter = rules.firstAfterColumns.toDouble())
         lastPress = at.copy()
     }
@@ -188,7 +242,13 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
     fun picture(): Frame {
         val stride = if (at.jumpedAt >= 0) 0 else ((at.ticks * rules.tickMs / rules.strideMs) % 2).toInt()
         val onTheFace = at.coming.filter { it.x < rules.faceColumns }.map { Obstacle(it.kind, Math.floor(it.x).toInt()) }
-        return Frame(rise().coerceAtMost(rules.rows), stride, onTheFace, stars = rules.stars(at.ground), score = at.score)
+        // the treat only once all its columns are at or left of column 46; then a sparkle for a moment after one is eaten
+        val treat = at.treat?.let { Math.floor(it.x).toInt() }?.takeIf { it + rules.treat.width - 1 <= rules.treatUpTo }
+        val sparkle = at.ateAt >= 0 && (at.ticks - at.ateAt) * rules.tickMs < rules.sparkleMs
+        return Frame(
+            rise().coerceAtMost(rules.rows), stride, onTheFace, effect = if (sparkle) 1 else 0, stars = rules.stars(at.ground), score = at.score,
+            treat = treat,
+        )
     }
 
     /**
@@ -208,7 +268,6 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
         val speed = minOf(rules.topSpeed, rules.startSpeed + rules.fasterEverySecond * elapsedMs / 1000.0)
         val moved = speed * rules.tickMs / 1000.0
         now.ground += moved
-        val runnerEnd = rules.runnerAt + rules.runner.width
         val each = now.coming.iterator()
         while (each.hasNext()) {
             val obstacle = each.next()
@@ -219,23 +278,36 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
             }
             if (obstacle.x + obstacle.shape.width <= 0) each.remove()
         }
+        now.treat?.let { treat ->
+            treat.x -= moved
+            if (treat.x + rules.treat.width <= 0) now.treat = null // off the face: gone
+        }
         now.nextAfter -= moved
         if (now.nextAfter <= 0) {
-            while (drawn.size <= now.started) drawn += intArrayOf(random.nextInt(rules.obstacles.size), random.nextInt(rules.spread + 1))
-            val (kind, extra) = drawn[now.started++]
+            while (drawn.size <= now.started) drawn += draw()
+            val (kind, extra, treat) = drawn[now.started++]
             now.coming += Coming(kind, rules.obstacles[kind], rules.faceColumns.toDouble())
             // room for a whole jump and for pressing again, at the speed of the moment
             now.nextAfter = speed * (rules.jumpMs + rules.reactionMs) / 1000.0 + rules.runner.width + extra
+            // the treat in the gap after this obstacle: so many columns in front of the next one, which begins nextAfter from here
+            if (treat != NO_TREAT) {
+                now.treat = Treat(rules.faceColumns + now.nextAfter - if (treat == DILEMMA) rules.dilemmaBefore(speed) else rules.freeBefore)
+            }
         }
 
         val up = rise()
-        val hit = now.coming.any { obstacle ->
-            val left = Math.floor(obstacle.x).toInt()
-            left < runnerEnd && left + obstacle.shape.width > rules.runnerAt && obstacle.shape.columns.withIndex().any { (i, lit) ->
-                val column = left + i - rules.runnerAt
-                column in 0 until rules.runner.width && (rules.runner.columns[column] shl up) and lit != 0
+        // THE EAT RULE: the first time the treat and the runner have an LED in common, the runner eats it if it is then on its
+        // way up (in the air, before the top of its jump). Met standing, at the top or coming down, it goes on by, uneaten.
+        now.treat?.takeIf { !it.touched && touches(rules.treat, it.x, up) }?.let { treat ->
+            if (up >= 1 && (now.ticks - now.jumpedAt) * rules.tickMs * 2 < rules.jumpMs) {
+                now.score += rules.treatScore
+                now.treat = null
+                now.ateAt = now.ticks
+            } else {
+                treat.touched = true
             }
         }
+        val hit = now.coming.any { touches(it.shape, it.x, up) }
         when {
             hit -> now.ended = End.HIT
             elapsedMs >= rules.longestMs -> now.ended = End.TOO_LONG
@@ -248,6 +320,32 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
         val part = (at.ticks - at.jumpedAt) * rules.tickMs / rules.jumpMs.toDouble()
         return Math.floor(4 * rules.jumpRows * part * (1 - part) + 1e-9).toInt()
     }
+
+    /** Whether [shape], its left column at [x], and the runner [up] rows up have an LED in common: an obstacle's hit, the treat's meeting. */
+    private fun touches(shape: Shape, x: Double, up: Int): Boolean {
+        val left = Math.floor(x).toInt()
+        return shape.columns.withIndex().any { (i, lit) ->
+            val column = left + i - rules.runnerAt
+            column in 0 until rules.runner.width && (rules.runner.columns[column] shl up) and lit != 0
+        }
+    }
+
+    /** The next obstacle's kind and extra room, and the treat in the gap after it: one every [Rules.treatEvery] obstacles. */
+    private fun draw(): IntArray {
+        val number = drawn.size + 1
+        val kind = random.nextInt(rules.obstacles.size)
+        val extra = random.nextInt(rules.spread + 1)
+        if (treatAfter == 0) treatAfter = rules.treatEvery.random(random)
+        if (number < treatAfter) return intArrayOf(kind, extra, NO_TREAT)
+        treatAfter += rules.treatEvery.random(random)
+        return intArrayOf(kind, extra, if (random.nextDouble() < rules.dilemmaShare) DILEMMA else FREE)
+    }
+
+    private companion object {
+        const val NO_TREAT = 0
+        const val FREE = 1
+        const val DILEMMA = 2
+    }
 }
 
 /**
@@ -256,6 +354,7 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
  * (one digit), the picture (one digit), then the obstacles (kind letter and left column), the
  * runner's column when it is not the usual one, the colours and the effect when they are not
  * the usual ones (the sign's own: a blue runner, red obstacles, so a game in play sends none).
+ * The treat goes after the obstacles (`t` and its left column; the note's version 8).
  * Then the starfield's place (`s` and a column: the sign draws its fixed pattern of dim stars
  * shifted left by that much; the note's version 4). Last, the score (`n` and 0 to 999, as
  * written: the sign draws those digits small at the top right; the note's version 6). Whatever
@@ -265,6 +364,8 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
 fun gameFrame(frame: JumpGame.Frame): Message.GameFrame {
     val text = StringBuilder().append(frame.rise.coerceIn(0, 7)).append(frame.picture.coerceIn(0, 1))
     frame.obstacles.filter { it.kind in 0..2 && it.column in -99..99 }.take(4).forEach { text.append('a' + it.kind).append(it.column) }
+    // THE TREAT NEEDS FIRMWARE OF THE NOTE'S VERSION 8 (an older one calls `t` a bad frame), by the same rule as `s` below.
+    frame.treat?.takeIf { it in -99..99 }?.let { text.append('t').append(it) }
     frame.runnerAt?.let { text.append('r').append(it.coerceIn(-99, 99)) }
     frame.colours?.let { (runner, obstacles) -> text.append('p').append(runner.coerceIn(0, 7)).append(obstacles.coerceIn(0, 7)) }
     if (frame.effect in 1..2) text.append('e').append(frame.effect)
@@ -318,11 +419,11 @@ class GameShows(
         },
     )
 
-    /** The picture of the hit ([last], the last frame of the game) stands for a moment, the runner blinking red; the starfield stands where it was, the game's [score] at the top right. */
+    /** The picture of the hit ([last], the last frame of the game) stands for a moment, the runner blinking red; the starfield and a treat stand where they were, the game's [score] at the top right. */
     private fun hit(score: Int, last: JumpGame.Frame?) = Beat.Frames(700) { t ->
         JumpGame.Frame(
             last?.rise ?: 0, 0, last?.obstacles.orEmpty(), colours = (if (t / 100 % 2 == 0L) 2 else 0) to 2, effect = if (t < 100) 2 else 0,
-            stars = last?.stars, score = score,
+            stars = last?.stars, score = score, treat = last?.treat,
         )
     }
 
