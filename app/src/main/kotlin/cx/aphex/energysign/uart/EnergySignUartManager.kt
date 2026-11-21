@@ -19,10 +19,17 @@ import java.io.IOException
 import java.lang.reflect.Method
 
 /**
- * The UART to the sign. It is opened here; from [start] on, the [SignLink] thread is the only
+ * The line to the sign. It is opened here; from [start] on, the [SignLink] thread is the only
  * one that reads, writes or closes it, and the only one that touches the message state
  * ([owner]). Everything that decides anything is in [SignLink]; this class is the Android
  * around it.
+ *
+ * WHICH LINE. On the board it is the UART, as ever ([BoardUart]). The board is known by its
+ * Android Things library: the question is only whether that library's class is there, so the
+ * board needs no setting and reads none. A device without the library has no UART (and could
+ * not install the app while the manifest required the library): it is the Android emulator on
+ * a computer, and the sign is the firmware emulator, whose serial link is a TCP port
+ * ([SocketWire]). Everything above the line is the same code on both.
  *
  * Three switches for measuring on the device, without a rebuild:
  *  - the timing log: `adb shell setprop log.tag.SignUart VERBOSE` (see [UartTimingLog])
@@ -30,6 +37,9 @@ import java.lang.reflect.Method
  *    (read when the chooser next changes; wins over the saved switch while it is set; see [ATTN_PROPERTY])
  *  - the priority of the link thread: `adb shell setprop debug.energysign.nice -16`
  *    (read when the app starts; see [NICE_PROPERTY])
+ * And one for a device without the board's UART:
+ *  - where the firmware emulator's link is: `adb -s emulator-NNNN shell setprop
+ *    debug.energysign.link 10.0.2.2:14401` (read when the app starts; see [LINK_PROPERTY])
  */
 class EnergySignUartManager(
     private val viewModel: MainViewModel,
@@ -39,7 +49,26 @@ class EnergySignUartManager(
     /** Writes a file later, on the saver's thread. */
     saveLater: (write: () -> Unit) -> Unit,
 ) {
-    private val uartDevice: UartDevice = configureUart()
+    /** The line, and its name for the log: the UART's name, or where the firmware emulator is. */
+    private val wire: SignWire
+    private val name: String
+
+    /** Which line it is, said when the manager is built (where the board has always said it). */
+    private val opened: String
+
+    init {
+        if (onTheBoard()) {
+            name = UART_DEVICE_NAME
+            wire = BoardUart.open(name, UART_BAUD_RATE, log = { line -> logD(line) }, failed = { line, e -> logE(line, e) })
+            opened = "UART device $name opened and configured!"
+        } else {
+            val (host, port) = SocketWire.addressOf(property(LINK_PROPERTY).orEmpty()) ?: DEFAULT_LINK
+            name = "$host:$port"
+            // (nothing is connected here, on the main thread: the link thread does it at its first read)
+            wire = SocketWire(host, port) { line -> logD(line) }
+            opened = "No Android Things on this device: the sign is the firmware emulator at $name ($LINK_PROPERTY, default ${DEFAULT_LINK.first}:${DEFAULT_LINK.second})."
+        }
+    }
 
     val receivedBytes: BehaviorSubject<ByteArray> = BehaviorSubject.createDefault(byteArrayOf())
 //    val receivedBytes: Observable<ByteArray> =  energySignBluetoothGattServer.receivedBytes
@@ -51,13 +80,6 @@ class EnergySignUartManager(
         emit = { line -> Log.d(UartTimingLog.TAG, line) },
         threadCpuNanos = { Debug.threadCpuTimeNanos() },
     )
-
-    private val wire = object : SignWire {
-        override fun read(buffer: ByteArray, length: Int): Int = uartDevice.read(buffer, length)
-        override fun write(buffer: ByteArray, length: Int): Int = uartDevice.write(buffer, length)
-        override fun sendBreak(millis: Int) = uartDevice.sendBreak(millis)
-        override fun close() = uartDevice.close()
-    }
 
     /** Whether and how the chooser is pushed. Off unless switched on; says what is in force when it is built. */
     private val attentionSwitch = AttentionSwitch(
@@ -72,7 +94,7 @@ class EnergySignUartManager(
     private val link = SignLink(
         wire = wire,
         baud = UART_BAUD_RATE,
-        name = UART_DEVICE_NAME,
+        name = name,
         events = { stopped ->
             owner.drain(stopped = stopped) { error -> logW("A change to the messages failed: $error", error) }
         },
@@ -88,7 +110,7 @@ class EnergySignUartManager(
     private var linkThread: Thread? = null
 
     init {
-        logD("UART device $UART_DEVICE_NAME opened and configured!")
+        logD(opened)
     }
 
     /** Starts the sign link thread. Everything it calls into must exist by now. */
@@ -103,7 +125,7 @@ class EnergySignUartManager(
             }
             // ScreenLogger's date formatter is thread-local. Its first use belongs here,
             // before getNextMessage logs the first selection inside the reply deadline.
-            logD("Uart device $UART_DEVICE_NAME: sign link thread started (nice $nice)")
+            logD("Uart device $name: sign link thread started (nice $nice)")
             link.run()
         }, LINK_THREAD_NAME).apply {
             isDaemon = true
@@ -121,9 +143,9 @@ class EnergySignUartManager(
             Thread.currentThread().interrupt()
         }
         if (linkThread?.isAlive == true) {
-            logW("Uart device $UART_DEVICE_NAME: sign link thread is still finishing; it closes the port when it is done")
+            logW("Uart device $name: sign link thread is still finishing; it closes the port when it is done")
         } else {
-            logD("Uart device $UART_DEVICE_NAME: sign link thread stopped, port closed")
+            logD("Uart device $name: sign link thread stopped, port closed")
         }
     }
 
@@ -149,29 +171,13 @@ class EnergySignUartManager(
         }
     }
 
-    private fun configureUart(): UartDevice {
+    private fun onTheBoard(): Boolean =
         try {
-            val manager = PeripheralManager.getInstance()
-            val deviceList = manager.uartDeviceList
-            if (deviceList.isEmpty()) {
-                logD("No UART port available on this device.")
-            } else {
-                logD("List of available UART devices: $deviceList")
-            }
-            logD("Opening UART device $UART_DEVICE_NAME")
-            return manager.openUartDevice(UART_DEVICE_NAME).apply {
-                // Configure the UART port
-                logD("Configuring UART device $UART_DEVICE_NAME")
-                setBaudrate(UART_BAUD_RATE)
-                setDataSize(8)
-                setParity(UartDevice.PARITY_NONE)
-                setStopBits(1)
-            }
-        } catch (e: IOException) {
-            logE("Unable to open/configure UART device: $e", e)
-            throw e
+            Class.forName(THINGS_CLASS)
+            true
+        } catch (e: ClassNotFoundException) {
+            false
         }
-    }
 
     /** The system property [key] as it is set now; null when it cannot be read. */
     private fun property(key: String): String? =
@@ -212,6 +218,19 @@ class EnergySignUartManager(
         private const val NICE_PROPERTY: String = "debug.energysign.nice"
         private const val DEFAULT_NICE: Int = Process.THREAD_PRIORITY_URGENT_DISPLAY
 
+        /** A class of the Android Things library: there on the board, nowhere else. */
+        private const val THINGS_CLASS: String = "com.google.android.things.pio.PeripheralManager"
+
+        /**
+         * System property with the firmware emulator's link as an IPv4 address and a port
+         * (`10.0.2.2:14400`; no host name, which would be looked up on the link thread at every
+         * try), read at the start and only on a device without the board's UART. The default is
+         * the emulator's own default port on the computer the Android emulator runs on (10.0.2.2
+         * is that computer's localhost, seen from inside the Android emulator).
+         */
+        private const val LINK_PROPERTY: String = "debug.energysign.link"
+        private val DEFAULT_LINK: Pair<String, Int> = "10.0.2.2" to 14400
+
         /** `android.os.SystemProperties.get(key, default)`: not in the SDK, present on the device. */
         private val SYSTEM_PROPERTY_GET: Method? =
             try {
@@ -219,5 +238,46 @@ class EnergySignUartManager(
             } catch (e: Exception) {
                 null
             }
+    }
+}
+
+/**
+ * The board's UART as the link's line. THE ONLY CODE THAT TOUCHES THE ANDROID THINGS LIBRARY:
+ * the class is loaded when the manager opens it, which it does on the board alone.
+ */
+private class BoardUart(private val uartDevice: UartDevice) : SignWire {
+    override fun read(buffer: ByteArray, length: Int): Int = uartDevice.read(buffer, length)
+    override fun write(buffer: ByteArray, length: Int): Int = uartDevice.write(buffer, length)
+    override fun sendBreak(millis: Int) = uartDevice.sendBreak(millis)
+    override fun close() = uartDevice.close()
+
+    companion object {
+        /**
+         * Opens and configures the UART. [log] and [failed] are the manager's, and the line said
+         * while configuring is the device's own, so every line has the tag it always had.
+         */
+        fun open(name: String, baud: Int, log: (String) -> Unit, failed: (String, Throwable) -> Unit): BoardUart {
+            try {
+                val manager = PeripheralManager.getInstance()
+                val deviceList = manager.uartDeviceList
+                if (deviceList.isEmpty()) {
+                    log("No UART port available on this device.")
+                } else {
+                    log("List of available UART devices: $deviceList")
+                }
+                log("Opening UART device $name")
+                return BoardUart(manager.openUartDevice(name).apply {
+                    // Configure the UART port
+                    logD("Configuring UART device $name")
+                    setBaudrate(baud)
+                    setDataSize(8)
+                    setParity(UartDevice.PARITY_NONE)
+                    setStopBits(1)
+                })
+            } catch (e: IOException) {
+                failed("Unable to open/configure UART device: $e", e)
+                throw e
+            }
+        }
     }
 }
