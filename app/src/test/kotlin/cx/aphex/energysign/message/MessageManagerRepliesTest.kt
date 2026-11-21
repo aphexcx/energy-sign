@@ -784,7 +784,7 @@ class MessageManagerRepliesTest {
 
         replies.asked.single().answer(AIReplyResult.Reply("Loud enough."))
         ownerRuns()
-        phone("!delete") // before the sign's next poll: the person saw MIDDLE
+        phone("!delete") // before the sign's next request: the person saw MIDDLE
 
         assertEquals(listOf("User:${query.str}", "AIReply:LOUD ENOUGH.", "User:NEWEST", "User:OLDEST"), stored())
         assertEquals("OLDEST", assertIs<Message.Chooser>(next()).str)

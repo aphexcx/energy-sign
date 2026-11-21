@@ -41,17 +41,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
     }
     private val beatLink by lazy { BeatLinkListener(application.applicationContext, worker) }
 
-    /**
-     * The UART and its link, and with them the push switch (AttentionSwitch): one for the
-     * process, because this view model is the process's (MainApplication.signViewModel). The
-     * switch is read from its file here, before the link starts; nothing optional is needed for it.
-     */
-    private val energySignUartManager: EnergySignUartManager = EnergySignUartManager(
-        viewModel = this,
-        owner = owner,
-        filesDir = application.filesDir,
-        saveLater = { write -> messageManager.msgRepo.saveLater(write) },
-    )
+    private val energySignUartManager: EnergySignUartManager = EnergySignUartManager(this, owner)
 
     /** The answer to a REQUEST of the sign, and the only way to MessageManager.getNextMessage. */
     private val signResponder = SignResponder(
@@ -75,7 +65,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
         // (it observes LiveData), with the push wired before the link starts. Commands that
         // arrive before the link thread runs wait in the owner's queue.
         messageManager.onChooserChanged = energySignUartManager::requestPush
-        messageManager.onAttentionCommand = { word -> energySignUartManager.setAttention(word) }
         energySignUartManager.start()
     }
 
@@ -94,13 +83,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application), K
         energySignUartManager.stop()
         // MessageManager outlives this view model: it must not keep the stopped link
         messageManager.onChooserChanged = {}
-        messageManager.onAttentionCommand = {}
     }
 
     /**
      * The sign asked for something: [count] request bytes were read into [buffer].
-     * `~` gets the next message; a chooser poll (`?`) in chooser mode gets the checksum of the
-     * current chooser message, which is nothing new for the screen.
+     * `~` gets the next message (in chooser mode the chooser message).
      * Called on the sign link thread.
      */
     fun onSignRequest(buffer: ByteArray, count: Int) {

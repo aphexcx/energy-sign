@@ -19,7 +19,7 @@ import kotlin.test.assertEquals
  *    (what reached it), `hangup`, `ended` (waits for the line to end: gives `ended`)
  *  - of the wire: `read` (one read: gives the text, or `0`), `read!` (reads until there is
  *    something), `looked` (reads, which must all give nothing, until a look for the line that
- *    is under way has ended: gives `0`), `write:<text>` (gives how many bytes were taken), `break`, `close`, and `until:<word>`
+ *    is under way has ended: gives `0`), `write:<text>` (gives how many bytes were taken), `close`, and `until:<word>`
  *    (reads, which must all give nothing, until the wire has logged that word)
  * What the wire logs is in the result too, in brackets, where it was logged.
  */
@@ -53,11 +53,6 @@ class SocketWireTest {
             "listen until:connected accept hangup unlisten until:gone read +500ms looked read +500ms looked read " +
                 "listen +500ms until:connected accept",
             "(connected) accepted (gone) 0 0 0 0 0 (connected) accepted",
-        ),
-        Row(
-            "a break is not bytes: asking for one fails, and the line is as it was",
-            "listen until:connected accept break send:~ read! write:{} got",
-            "(connected) accepted no-break ~ 2 {}",
         ),
         Row(
             "close ends the line for the peer, and for good",
@@ -148,12 +143,6 @@ class SocketWireTest {
                     "looked" -> gave += within { read().takeIf { it != "0" || !wire.looking } } ?: "still looking"
                     "write" -> gave += text.toByteArray().let { wire.write(it, it.size) }.toString()
                     "close" -> wire.close()
-                    "break" -> gave += try {
-                        wire.sendBreak(50)
-                        "a break"
-                    } catch (e: java.io.IOException) {
-                        "no-break"
-                    }
                     "until" -> within {
                         val before = gave.size
                         val read = read()
