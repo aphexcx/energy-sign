@@ -40,6 +40,11 @@ RECORD=""
 FRAMES=""
 DURATION=""
 BOOT_WAIT_S=600
+# How long the firmware emulator waits for the app to connect before the sign boots; a run with no
+# app in that time fails (nothing it would record or report is the app's).
+CLIENT_WAIT_S=60
+# The app's minSdk (app/build.gradle): a virtual device below it cannot install the app.
+MIN_API=27
 
 usage() {
     cat <<EOF
@@ -109,17 +114,27 @@ wait_booted() {
     done
 }
 
+# The newest installed system image of API $MIN_API or above for $abi, of the kind $1 (a glob).
+newest_image() {
+    (cd "$SDK" 2>/dev/null && ls -d system-images/android-[0-9]*/$1/"$abi" 2>/dev/null) | while read -r dir; do
+        api="${dir#system-images/android-}"
+        api="${api%%[!0-9]*}"
+        [ -n "$api" ] && [ "$api" -ge "$MIN_API" ] && echo "$api $dir"
+    done | sort -n | tail -1 | cut -d' ' -f2
+}
+
 # A small virtual device of the sign's own, from a system image that is installed (nothing is
-# downloaded): the newest with Google's APIs for this computer's processor, or else the newest.
+# downloaded): of the images the app installs on (API $MIN_API and above), the newest with Google's
+# APIs for this computer's processor, or else the newest.
 make_avd() {
     local abi arch image api tag dir
     case "$(uname -m)" in
         arm64) abi=arm64-v8a; arch=arm64 ;;
         *) abi=x86_64; arch=x86_64 ;;
     esac
-    image="$(cd "$SDK" 2>/dev/null && ls -d system-images/android-[0-9]*/google_apis/"$abi" 2>/dev/null | sort -t- -k3 -n | tail -1)"
-    [ -n "$image" ] || image="$(cd "$SDK" 2>/dev/null && ls -d system-images/android-[0-9]*/*/"$abi" 2>/dev/null | sort -t- -k3 -n | tail -1)"
-    [ -n "$image" ] || die "no Android system image for $abi is installed in $SDK (install one in Android Studio, or --avd)"
+    image="$(newest_image google_apis)"
+    [ -n "$image" ] || image="$(newest_image '*')"
+    [ -n "$image" ] || die "no Android system image of API $MIN_API or above for $abi is installed in $SDK (install one in Android Studio, or --avd)"
     api="$(echo "$image" | cut -d/ -f2)"
     tag="$(echo "$image" | cut -d/ -f3)"
     dir="$AVD_HOME/$AVD.avd"
@@ -181,8 +196,13 @@ case "$command" in
         said="$(adb_emu shell am broadcast -n "$PACKAGE/.adb.AdbCommandReceiver" -a "$PACKAGE.COMMAND" \
             --es b64 "$(printf '%s' "${words[0]}" | base64 | tr -d '\n')" 2>&1)"
         printf '%s\n' "$said"
-        printf '%s' "$said" | grep -Eq 'result=-1([^0-9]|$)' || die "the app did not take the command (its answer is above)"
-        exit 0
+        case "$(printf '%s' "$said" | sed -n 's/.*result=\(-\{0,1\}[0-9]*\).*/\1/p' | tail -1)" in
+            -1) exit 0 ;;
+            1) die "the app refused the command: nothing was done; it can be sent again" ;;
+            2) die "the command failed in the app: some of it may have been done (its answer is above)" ;;
+            3) echo "sign-on-mac: the app took the command and is still carrying it out: do not send it again" >&2; exit 3 ;;
+            *) die "no answer from the app: the command may or may not have been done" ;;
+        esac
         ;;
     key)
         [ ${#words[@]} -eq 1 ] || die "key takes one key: up, space, enter, esc, or a KEYCODE_ name"
@@ -226,6 +246,12 @@ stop_android() {
 }
 trap stop_android EXIT
 trap 'exit 130' INT TERM
+
+# A port that anything listens on is taken. The firmware's link port first, before anything is
+# started, installed or restarted: the app that this run starts would find whatever listens there
+# (another sign's firmware emulator) and take it from its app.
+holder="$(listener "$LINK_PORT")"
+[ -z "$holder" ] || die "the firmware link port $LINK_PORT is held by process $holder (another sign on this computer?): choose another --link-port; nothing was started, installed or restarted"
 
 if sign_device_runs; then
     echo "sign-on-mac: using the Android emulator of $AVD that runs as $SERIAL"
@@ -304,7 +330,9 @@ THE SIGN IS UP: the app runs in the Android emulator $SERIAL, the firmware in th
 
 EOF
 
-sign=(--speed 1 --port "$LINK_PORT")
+# The sign boots when the app has connected (its clock, the recording and the frames begin then);
+# no app within $CLIENT_WAIT_S s, and the run fails.
+sign=(--speed 1 --port "$LINK_PORT" --wait-client "$CLIENT_WAIT_S")
 [ "$HEADLESS" -eq 0 ] || sign+=(--headless)
 [ -z "$RECORD" ] || sign+=(--record "$RECORD")
 [ -z "$FRAMES" ] || sign+=(--frames "$FRAMES")
@@ -312,6 +340,7 @@ sign=(--speed 1 --port "$LINK_PORT")
 [ "$HEADLESS" -eq 1 ] || sleep 3 # (the view takes the whole terminal: time to read the lines above)
 "$EMU" "${sign[@]}" "$@" "$IMAGE"
 status=$?
+[ "$status" -eq 0 ] || die "the firmware emulator ended with status $status (above): this run is no evidence of the sign"
 [ -z "$RECORD" ] || echo "sign-on-mac: what the sign showed is in $RECORD"
 [ -z "$FRAMES" ] || echo "sign-on-mac: every frame and byte is in $FRAMES"
-exit $status
+exit 0
