@@ -2553,6 +2553,61 @@ class MessageManagerOwnerTest {
     }
 
     @Test
+    fun `a typed line - the game's start, typed and ended with Enter, starts the game, and every other line is what it was`() {
+        /**
+         * [line] typed at the sign's keyboard, [before] done first, and Enter [typedFor] ms after
+         * the first key (a message needs five seconds): what came of it, as the list and the
+         * sign's next request show it.
+         */
+        fun typed(line: String, typedFor: Long = 6_000, before: () -> Unit = {}): String {
+            before()
+            ownerRuns()
+            line.forEach(KeyboardManager::processNewKeyboardKey)
+            ownerRuns()
+            typingStarted(typedFor)
+            KeyboardManager.submitKeyboardInput()
+            ownerRuns()
+            val first = repo.marqueeMessages.first()
+            val next = manager.getNextMessage()
+            return when {
+                first is Message.Marquee.AIQuery -> "a question to RaveGPT"
+                next is Message.KeyboardEcho -> "nothing yet: the echo stays"
+                first.str != "MESSAGE 1" -> "a message"
+                else -> "the sign gets ${next.str}"
+            }.also {
+                phone("!choose") // whatever came of it ends here: the chooser takes the sign, and a game with it
+                ownerRuns()
+                typingOver()
+                fresh()
+            }
+        }
+        // the game's intro begins with this; it is what the sign gets next (the echo is gone)
+        val starts = "the sign gets ${INTRO[0]}"
+        val rows = listOf(
+            // the game's start, in the one spelling the phone's command has
+            Triple("!game", { typed("!game") }, starts),
+            Triple("!game, Enter 2 s after its first key", { typed("!game", typedFor = 2_000) }, starts),
+            // typing takes the sign from a game (the first key ends it): the Enter starts the next one
+            Triple("!game, typed during a game's intro", { typed("!game") { phone("!game") } }, starts),
+            // near misses
+            Triple("!gamex", { typed("!gamex") }, "a question to RaveGPT"),
+            Triple("! game", { typed("! game") }, "a question to RaveGPT"),
+            Triple("!game with a space after it", { typed("!game ") }, "a question to RaveGPT"),
+            Triple("a question that mentions !game", { typed("what is !game") }, "a question to RaveGPT"),
+            // a plain question, and other ! commands: as before
+            Triple("hello", { typed("hello") }, "a question to RaveGPT"),
+            Triple("!choose", { typed("!choose") }, "a question to RaveGPT"),
+            Triple("!game reset", { typed("!game reset") }, "a question to RaveGPT"),
+            Triple("hello, Enter 2 s after its first key", { typed("hello", typedFor = 2_000) }, "nothing yet: the echo stays"),
+        )
+        val wrong = rows.mapNotNull { (what, run, expected) ->
+            val got = run()
+            if (got == expected) null else "$what: $got, not $expected"
+        }
+        assertEquals(emptyList(), wrong, wrong.joinToString("\n"))
+    }
+
+    @Test
     fun `the button and the start, in every state of the game`() {
         val presses: Map<String, (App) -> Unit> = linkedMapOf(
             "!game" to { app -> command(app, "!game") },

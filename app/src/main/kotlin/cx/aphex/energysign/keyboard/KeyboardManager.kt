@@ -17,11 +17,12 @@ object KeyboardManager : KoinComponent {
     private val owner: OwnerQueue by inject()
 
     /**
-     * Gets the text of a message that was submitted with Enter. Called on the owner thread, in
-     * the same step that took the text and ended the input, so nothing can clear it in between.
+     * Gets the text of a message that was submitted with Enter, and when Enter arrived. Called on
+     * the owner thread, in the same step that took the text and ended the input, so nothing can
+     * clear it in between.
      */
     @Volatile
-    var onSubmitted: (String) -> Unit = {}
+    var onSubmitted: (text: String, arrivedAt: Long) -> Unit = { _, _ -> }
 
 
     /**
@@ -36,6 +37,14 @@ object KeyboardManager : KoinComponent {
 
     @Volatile
     var clock: () -> Long = System::currentTimeMillis
+
+    /**
+     * Whether a line ended with Enter is the game's start: it is no message, so it needs none of
+     * the minimum time of typing that keeps spam from RaveGPT. Asked on the owner thread; whoever
+     * owns the game sets it.
+     */
+    @Volatile
+    var isTheGamesStart: (line: String) -> Boolean = { false }
 
     /**
      * WHEN A KEY ARRIVED, on [clock]: the time of its event, not the time somebody got round to
@@ -83,7 +92,8 @@ object KeyboardManager : KoinComponent {
         keyboardStringBuilder.append(key)
     }
 
-    fun submitKeyboardInput(): Unit = owner.post {
+    /** Enter, pressed at [arrivedAt]. Called on the main thread, like every key. */
+    fun submitKeyboardInput(arrivedAt: Long = clock()): Unit = owner.post {
         val totalKeyboardInputTimeElapsed = System.currentTimeMillis() - keyboardInputStartedAtMs
 //        if (keyboardStringBuilder.length < 4) {
 //            // LONGER!\
@@ -96,11 +106,11 @@ object KeyboardManager : KoinComponent {
         if (keyboardStringBuilder.isBlank() || isMessageSubmitted) {
             endKeyboardInput()
         } else {
-            if (totalKeyboardInputTimeElapsed > MINIMUM_INPUT_ENTRY_PERIOD) {
-                val newSubmission = keyboardStringBuilder.toString()
+            val newSubmission = keyboardStringBuilder.toString()
+            if (totalKeyboardInputTimeElapsed > MINIMUM_INPUT_ENTRY_PERIOD || isTheGamesStart(newSubmission)) {
                 isMessageSubmitted = true
                 endKeyboardInput()
-                onSubmitted(newSubmission)
+                onSubmitted(newSubmission, arrivedAt)
             }
         }
     }

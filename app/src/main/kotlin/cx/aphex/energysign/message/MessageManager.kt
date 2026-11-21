@@ -250,11 +250,12 @@ class MessageManager(
 //        pushAdvertisements()
 
         // On the owner thread, in the same step that took the text and ended the input
-        keyboardManager.onSubmitted = { msg ->
+        keyboardManager.onSubmitted = { msg, arrivedAt ->
             logD("Processing new submitted keyboard message: $msg")
             // (the key was posted by KeyboardManager itself, not through change(): this is the
             // owner asking itself, answered at once, and under the chooser watch like every change)
-            toOwner.ask { addNewUserMessage(msg, isQuery = true) }
+            // The game's start, typed, is the game's start; every other line is a question, as ever.
+            toOwner.ask { if (!startsTheGame(msg, arrivedAt)) addNewUserMessage(msg, isQuery = true) }
         }
 
     }
@@ -284,6 +285,7 @@ class MessageManager(
 
     init {
         keyboardManager.clock = nowMs
+        keyboardManager.isTheGamesStart = ::isGameStart
         keyboardManager.takenByTheGame = { key, repeated, arrivedAt -> gameKey(key, repeated, arrivedAt) }
     }
 
@@ -322,6 +324,20 @@ class MessageManager(
 
     /** The keys whose last key-down the game took. Owner thread only. */
     private val heldForTheGame = mutableSetOf<Char>()
+
+    /**
+     * THE GAME'S START COMMAND, the one place that knows it: a line from the phone or the adb
+     * hook (processUartCommand), and a line typed on the sign's keyboard and ended with Enter
+     * (onSubmitted; the keyboard asks it too, for the minimum time of typing).
+     */
+    private fun isGameStart(line: String): Boolean = line == "!game"
+
+    /** True when [line] is the game's start, and then the game was asked to start at [arrivedAt]. */
+    private fun startsTheGame(line: String, arrivedAt: Long): Boolean {
+        if (!isGameStart(line)) return false
+        startGame(arrivedAt)
+        return true
+    }
 
     /** Not while the sign is somebody else's: a game behind the chooser or the echo would be played by nobody. */
     private fun startGame(arrivedAt: Long) {
@@ -660,10 +676,10 @@ class MessageManager(
     }
 
     private fun processUartCommand(value: ByteArray, arrivedAt: Long) {
-        when (val cmd = String(value)) {
-            // (the game gets every one of these with the time the command ARRIVED)
-            "!game" -> startGame(arrivedAt)
-
+        val cmd = String(value)
+        // (the game gets every one of these with the time the command ARRIVED)
+        if (startsTheGame(cmd, arrivedAt)) return
+        when (cmd) {
             "!j",
             "!jump" -> game.jump(arrivedAt)
 
