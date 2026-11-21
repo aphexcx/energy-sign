@@ -34,8 +34,14 @@
         android:name=".MainApplication"
         android:label="@string/app_name"
         android:theme="@style/Theme.AppCompat.NoActionBar">
-        <uses-library android:name="com.google.android.things" />
-        <!--        <uses-library android:name="com.google.android.things" android:required="false"/>-->
+        <!--
+          Not required: the board has the library and the app uses it there as ever. A device
+          without it (the Android emulator) installs the app too, and talks to the firmware
+          emulator in place of the UART (see uart/EnergySignUartManager).
+        -->
+        <uses-library
+            android:name="com.google.android.things"
+            android:required="false" />
 
         <activity
             android:name=".GattServerActivity"

@@ -84,7 +84,8 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
      * What the sign draws: how many rows the runner is up, which of its two pictures, the
      * obstacles on the face. For the shows also: the runner's column when it is not its place
      * in the game, the colours of the runner and of the obstacles, and an effect. And where the
-     * starfield behind it all stands ([Rules.stars]); null: no starfield.
+     * starfield behind it all stands ([Rules.stars]); null: no starfield. And the score, which
+     * the sign shows in small digits at the top right; null: none (the intro, the new best's hop).
      */
     class Frame(
         val rise: Int,
@@ -94,6 +95,7 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
         val colours: Pair<Int, Int>? = null,
         val effect: Int = 0,
         val stars: Int? = null,
+        val score: Int? = null,
     )
 
     enum class End { HIT, TOO_LONG }
@@ -186,7 +188,7 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
     fun picture(): Frame {
         val stride = if (at.jumpedAt >= 0) 0 else ((at.ticks * rules.tickMs / rules.strideMs) % 2).toInt()
         val onTheFace = at.coming.filter { it.x < rules.faceColumns }.map { Obstacle(it.kind, Math.floor(it.x).toInt()) }
-        return Frame(rise().coerceAtMost(rules.rows), stride, onTheFace, stars = rules.stars(at.ground))
+        return Frame(rise().coerceAtMost(rules.rows), stride, onTheFace, stars = rules.stars(at.ground), score = at.score)
     }
 
     /**
@@ -250,14 +252,15 @@ class JumpGame(val rules: Rules = Rules(), private val random: Random = Random.D
 
 /**
  * A frame as the message the sign reads. THE ONE PLACE that knows the wire format of a frame:
- * the contract note of the firmware's half (game-contract.md, version 1). The text is the rise
+ * the contract note of the firmware's half (game-contract.md, version 6). The text is the rise
  * (one digit), the picture (one digit), then the obstacles (kind letter and left column), the
  * runner's column when it is not the usual one, the colours and the effect when they are not
  * the usual ones (the sign's own: a blue runner, red obstacles, so a game in play sends none).
- * Last, the starfield's place (`s` and a column: the sign draws its fixed pattern of dim stars
- * shifted left by that much; the note's version 4). Whatever a frame holds,
- * what is written here is a frame the sign can read: the sign draws nothing of a frame with a
- * fifth obstacle or a number out of range.
+ * Then the starfield's place (`s` and a column: the sign draws its fixed pattern of dim stars
+ * shifted left by that much; the note's version 4). Last, the score (`n` and 0 to 999, as
+ * written: the sign draws those digits small at the top right; the note's version 6). Whatever
+ * a frame holds, what is written here is a frame the sign can read: the sign draws nothing of
+ * a frame with a fifth obstacle or a number out of range.
  */
 fun gameFrame(frame: JumpGame.Frame): Message.GameFrame {
     val text = StringBuilder().append(frame.rise.coerceIn(0, 7)).append(frame.picture.coerceIn(0, 1))
@@ -270,6 +273,9 @@ fun gameFrame(frame: JumpGame.Frame): Message.GameFrame {
     // here, by the owner's rule (one code path: no switch, no fallback for an older firmware): the
     // app with the starfield and the firmware with it go on the sign together and come off together.
     frame.stars?.let { text.append('s').append(Math.floorMod(it, GAME_STAR_COLUMNS)) }
+    // THE SCORE NEEDS FIRMWARE OF THE NOTE'S VERSION 6 (an older one calls `n` a bad frame), by the same rule.
+    // A score above 999 is sent as 999: the sign has room for three digits.
+    frame.score?.let { text.append('n').append(it.coerceIn(0, 999)) }
     return Message.GameFrame(text.toString())
 }
 
@@ -312,16 +318,16 @@ class GameShows(
         },
     )
 
-    /** The picture of the hit ([last], the last frame of the game) stands for a moment, the runner blinking red; the starfield stands where it was. */
-    private fun hit(last: JumpGame.Frame?) = Beat.Frames(700) { t ->
+    /** The picture of the hit ([last], the last frame of the game) stands for a moment, the runner blinking red; the starfield stands where it was, the game's [score] at the top right. */
+    private fun hit(score: Int, last: JumpGame.Frame?) = Beat.Frames(700) { t ->
         JumpGame.Frame(
             last?.rise ?: 0, 0, last?.obstacles.orEmpty(), colours = (if (t / 100 % 2 == 0L) 2 else 0) to 2, effect = if (t < 100) 2 else 0,
-            stars = last?.stars,
+            stars = last?.stars, score = score,
         )
     }
 
     fun over(score: Int, best: Int, last: JumpGame.Frame?): List<Beat> = listOf(
-        hit(last),
+        hit(score, last),
         Beat.Once(Message.ColorMessage.IconInvaders.Explosion(crashColour)),
         flash("GAME${Message.VT}OVER"),
         Beat.Once(Message.ColorMessage.OneByOneMessage("SCORE $score", scoreColour)),
@@ -330,9 +336,12 @@ class GameShows(
     )
 
     fun newBest(score: Int, last: JumpGame.Frame?): List<Beat> = listOf(
-        hit(last),
+        hit(score, last),
         Beat.Once(Message.ColorMessage.IconInvaders.Explosion(crashColour)),
-        flash("NEW${Message.VT}BEST!"),
+        // HIGH SCORE in the big font, wider than a face (88 columns of 60): the sign holds its start
+        // ("HIGH SC") 600 ms, slides it a column every 35 ms to its end ("H SCORE"; 28 columns,
+        // 0.98 s), as it does a chonky ad, and holds that for this second before the score comes
+        Beat.Once(Message.ColorMessage.ChonkySlide("HIGH SCORE", scoreColour, delayMs = 1000)),
         // the score in the big font with its colour wave, in the middle of the six places
         Beat.Once(Message.ColorMessage.ChonkySlide(score.toString().let { it.padStart((6 + it.length) / 2).padEnd(6) }, scoreColour, delayMs = 1500)),
         // two seconds of the runner hopping across the face through all the colours, with stars.
@@ -349,14 +358,9 @@ class GameShows(
     )
 }
 
-/** What the game keeps across a restart, in the app's files: whether it is switched on, and the best score. Loading never writes. */
+/** What the game keeps across a restart, in the app's files: the best score. Loading never writes. */
 class GameStore(private val dir: File, private val warn: (String) -> Unit = {}) {
-    fun loadOn(): Boolean = read(SWITCH_FILE_NAME) != "off"
-
     fun loadBest(): Int = read(BEST_FILE_NAME)?.toIntOrNull()?.coerceAtLeast(0) ?: 0
-
-    @Throws(IOException::class)
-    fun saveOn(on: Boolean) = write(SWITCH_FILE_NAME, if (on) "on" else "off")
 
     @Throws(IOException::class)
     fun saveBest(best: Int) = write(BEST_FILE_NAME, best.toString())
@@ -372,7 +376,6 @@ class GameStore(private val dir: File, private val warn: (String) -> Unit = {}) 
         File(dir, name).replaceContent(SaveSteps(), warn) { it.write(text.toByteArray()) }
 
     companion object {
-        const val SWITCH_FILE_NAME = "game.txt"
         const val BEST_FILE_NAME = "game-best.txt"
     }
 }
@@ -390,7 +393,6 @@ class GameStore(private val dir: File, private val warn: (String) -> Unit = {}) 
 class GameOnTheSign(
     private val shows: GameShows,
     private var best: Int = 0,
-    on: Boolean = true,
     private val say: (String) -> Unit = {},
     /** The best has changed (a new best, or none any more): for whoever keeps it. */
     private val bestIs: (Int) -> Unit = {},
@@ -407,10 +409,6 @@ class GameOnTheSign(
 
     /** When the press arrived that the next frame answers; -1 when none is waiting for its frame. */
     private var pressedAt = -1L
-    private var saidItIsOff = false
-
-    var on: Boolean = on
-        private set
 
     /** Whether a game is being played right now (not its intro, not a closing show). */
     val playing: Boolean get() = stage == Stage.PLAY
@@ -439,14 +437,6 @@ class GameOnTheSign(
         bestIs(best)
     }
 
-    /** The switch. Off ends whatever of a game there is. */
-    fun switch(to: Boolean, at: Long) {
-        on = to
-        saidItIsOff = false
-        if (!to) end("it was switched off", at)
-        say("Game: switched ${if (to) "on" else "off"}.")
-    }
-
     /** There is no best any more: the next score above none is one. */
     fun forgetBest(at: Long) {
         settle(at)
@@ -464,11 +454,6 @@ class GameOnTheSign(
     fun start(at: Long): Boolean {
         settle(at)
         if (closedAfter(at)) return false // (a game was being played when this arrived: nothing starts twice)
-        if (!on) {
-            if (!saidItIsOff) say("Game: it is switched off (!game on); nothing is started.")
-            saidItIsOff = true
-            return false
-        }
         if (stage == Stage.INTRO || stage == Stage.PLAY) return false
         show(shows.intro()) // a closing show that was still on makes way
         stage = Stage.INTRO
@@ -502,7 +487,7 @@ class GameOnTheSign(
         pressedAt = at
     }
 
-    /** Somebody else takes the sign (the chooser, a typist) at [at], or the game is switched off: no game, no show. A game that had ended before [at] keeps its score. */
+    /** Somebody else takes the sign (the chooser, a typist) at [at]: no game, no show. A game that had ended before [at] keeps its score. */
     fun end(why: String, at: Long) {
         settle(at)
         if (closedAfter(at)) takeBackTheBest() // (it was ended by this, before its hit: no score)

@@ -167,18 +167,18 @@ class JumpGameTest {
                     game.frame(30_000)?.stars
                 }
             },
-            // THE FRAME on the wire: two keys, the text of the note with the starfield's place behind it, 35 bytes at most in play
+            // THE FRAME on the wire: two keys, the text of the note with the starfield's place and the score behind it, 36 bytes at most in play
             row("every frame of that minute as the sign reads it: longest in bytes, and how many are not of the note's form", listOf(true, 0)) {
                 val game = game()
-                val form = Regex("""\{"str":"[0-7][01]([abc]-?\d{1,2}){0,4}s[1-5]?\d","type":"G"\}""")
+                val form = Regex("""\{"str":"[0-7][01]([abc]-?\d{1,2}){0,4}s[1-5]?\dn(0|[1-9]\d{0,2})","type":"G"\}""")
                 val frames = (pressed.map { it to true } + every(10, minute).map { it to false }).sortedBy { it.first }.mapNotNull { (now, press) ->
                     if (press) game.jump(now)
                     game.frame(now)?.let { SignResponder.GSON.toJson(gameFrame(it)) }
                 }
-                listOf(frames.maxOf { it.length } in 25..35, frames.count { !form.matches(it) })
+                listOf(frames.maxOf { it.length } in 27..36, frames.count { !form.matches(it) })
             },
             // THE RUNNER IS BLUE, by the sign's own default: in play and when it runs in no colour is sent; where a show names its colour, it begins blue (6)
-            row("the first frame of the run-in, of a game, and of the new best's hop", listOf("00r-12e1s56", "00s0", "00r2p62e1s0")) {
+            row("the first frame of the run-in, of a game, and of the new best's hop", listOf("00r-12e1s56", "00s0n0", "00r2p62e1s0")) {
                 val shows = GameShows(0, 0, 0)
                 listOf((shows.intro().last() as Beat.Frames).at(0), game().frame(0)!!, (shows.newBest(1, null)[4] as Beat.Frames).at(0)).map { gameFrame(it).str }
             },
@@ -191,9 +191,9 @@ class JumpGameTest {
                 val hop = shows.newBest(1, null)[4] as Beat.Frames
                 listOf(runIn.at(0), runIn.at(250), runIn.at(499), hit.at(0), hit.at(650), hop.at(1_000), hop.at(2_000)).map { it.stars }
             },
-            row("a frame with more than the sign can read is cut to what it can: four obstacles, every number in its range", "71a10b20c30a-99r99p70e2s10") {
+            row("a frame with more than the sign can read is cut to what it can: four obstacles, every number in its range", "71a10b20c30a-99r99p70e2s10n0") {
                 val obstacles = listOf(0 to 150, 1 to -120, 7 to 3, 0 to 10, 1 to 20, 2 to 30, 0 to -99, 1 to 50).map { JumpGame.Obstacle(it.first, it.second) }
-                gameFrame(JumpGame.Frame(rise = 12, picture = 5, obstacles = obstacles, runnerAt = 300, colours = 9 to -1, effect = 2, stars = 130)).str
+                gameFrame(JumpGame.Frame(rise = 12, picture = 5, obstacles = obstacles, runnerAt = 300, colours = 9 to -1, effect = 2, stars = 130, score = -3)).str
             },
             row("the least room between two obstacles on a face in that minute, in columns: a jump and time to press again", true) {
                 val game = game()
@@ -205,6 +205,65 @@ class JumpGameTest {
                     columns.zipWithNext().forEach { (a, b) -> least = minOf(least, b - a) }
                 }
                 least in 53..65 // (two are on a face only when they are that close; the least there can be is 30 x 1.35 + 13)
+            },
+        )
+
+        assertEquals(emptyList(), wrong(rows))
+    }
+
+    /**
+     * THE SCORE (es-96d): small digits at the top right of the face, `n` and the score on the
+     * wire (the contract note's version 6). Every frame of play carries it, and so does the
+     * picture of the hit after a game; the run-in and the new best's hop do not. A new best
+     * says HIGH SCORE in the big font.
+     */
+    @Test
+    fun `the score is in every frame of play and in the picture of the hit, and a new best says HIGH SCORE`() {
+        val shows = GameShows(runnerColour = 1, crashColour = 2, scoreColour = 3)
+        fun withScore(score: Int, obstacles: List<JumpGame.Obstacle> = emptyList(), stars: Int? = null) =
+            gameFrame(JumpGame.Frame(0, 0, obstacles, stars = stars, score = score)).str
+        /** The score item of a frame as the sign reads it; null: none. */
+        fun n(frame: JumpGame.Frame?): String? = frame?.let { Regex("n\\d*").find(gameFrame(it).str)?.value }
+        /** What a show is, beat by beat: frames, or a message's kind and text (and for the big font its colour, its hold and whether it is nudged). */
+        fun says(beats: List<Beat>): List<String> = beats.map { beat ->
+            when (val message = (beat as? Beat.Once)?.message) {
+                null -> "frames"
+                is Message.ColorMessage.ChonkySlide ->
+                    "big '${message.str}', colour ${message.colorCycle}, ${message.delayMs} ms${if (message.shouldScrollToLastLetter) ", nudged" else ""}"
+                else -> "${message.javaClass.simpleName} '${message.str}'"
+            }
+        }
+        val last = JumpGame.Frame(0, 0, listOf(JumpGame.Obstacle(1, 9)), stars = 17)
+        val rows = listOf(
+            row("as written, without leading zeros, 999 at the most: 0, 9, 10, 99, 100, 999, 1,000, 12,345",
+                listOf("00n0", "00n9", "00n10", "00n99", "00n100", "00n999", "00n999", "00n999")) {
+                listOf(0, 9, 10, 99, 100, 999, 1_000, 12_345).map { withScore(it) }
+            },
+            row("beside obstacles and the starfield", listOf("00a-4c51s59n7", "00b30s0n120")) {
+                listOf(withScore(7, listOf(JumpGame.Obstacle(0, -4), JumpGame.Obstacle(2, 51)), stars = 59), withScore(120, listOf(JumpGame.Obstacle(1, 30)), stars = 0))
+            },
+            row("the frames of a game carry the score it has: at its start, and once its first post is cleared", listOf("n0", "n1")) {
+                val game = game(JumpGame.Rules(obstacles = listOf(JumpGame.Rules().obstacles[1])))
+                val first = n(game.frame(0))
+                game.jump(2_110)
+                listOf(first, n(game.frame(3_000)))
+            },
+            row("the picture of the hit at 0 and 650 ms, after a game of 12 that is not a new best and after one that is", List(4) { "n12" }) {
+                listOf(shows.over(12, 30, last), shows.newBest(12, last)).flatMap { show -> listOf(0L, 650).map { n((show.first() as Beat.Frames).at(it)) } }
+            },
+            row("no score in the run-in (at 0 and 499 ms) nor in the new best's hop (at 0 and 1,999 ms)", List(4) { null }) {
+                val runIn = shows.intro().last() as Beat.Frames
+                val hop = shows.newBest(12, last)[4] as Beat.Frames
+                listOf(runIn.at(0), runIn.at(499), hop.at(0), hop.at(1_999)).map { n(it) }
+            },
+            // HIGH SCORE is wider than a face: the sign holds its start, slides it to its end as it does a chonky ad, and holds that a second
+            row("a new best: the hit, the explosion, HIGH SCORE in the big font, the score in it, the hop, the stars",
+                listOf("frames", "Explosion 'X'", "big 'HIGH SCORE', colour 3, 1000 ms", "big '  12  ', colour 3, 1500 ms", "frames", "Starfield ''")) {
+                says(shows.newBest(12, last))
+            },
+            row("not a new best: as it was, GAME OVER, the score and BEST",
+                listOf("frames", "Explosion 'X'", "CustomFlashyAnnouncement 'GAME${Message.VT}OVER'", "OneByOneMessage 'SCORE 12'", "OneByOneMessage 'BEST 30'", "Starfield ''")) {
+                says(shows.over(12, 30, last))
             },
         )
 

@@ -261,7 +261,7 @@ class MessageManager(
 
     private var usrMsgCount: Int = 0
 
-    /** The jump game's switch and its best score, kept across a restart. */
+    /** The jump game's best score, kept across a restart. */
     private val gameStore = GameStore(filesDir, warn = { logW(it) })
 
     /**
@@ -277,14 +277,12 @@ class MessageManager(
             rules = jumpGame.rules,
         ),
         best = gameStore.loadBest(),
-        on = gameStore.loadOn(),
         say = { logD(it) },
         bestIs = { best -> saveOfTheGame("the best score") { gameStore.saveBest(best) } },
         game = jumpGame,
     )
 
     init {
-        logD("Game: switched ${if (game.on) "on" else "off"} at the start.")
         keyboardManager.clock = nowMs
         keyboardManager.takenByTheGame = { key, repeated, arrivedAt -> gameKey(key, repeated, arrivedAt) }
     }
@@ -670,13 +668,6 @@ class MessageManager(
             "!jump" -> game.jump(arrivedAt)
 
             "!game reset" -> game.forgetBest(arrivedAt)
-
-            "!game on",
-            "!game off" -> {
-                game.switch(cmd == "!game on", arrivedAt)
-                val on = game.on
-                saveOfTheGame("the switch") { gameStore.saveOn(on) }
-            }
 
             "!c",
             "!choose" -> {
