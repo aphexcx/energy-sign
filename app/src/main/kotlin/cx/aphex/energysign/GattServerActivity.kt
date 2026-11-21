@@ -109,7 +109,7 @@ class GattServerActivity : AppCompatActivity() {
             val arrived = keyboardManager.arrivedAt(event.eventTime, SystemClock.uptimeMillis())
             logD("Keypress! $key")
             when {
-                event.keyCode == KeyEvent.KEYCODE_ENTER -> keyboardManager.submitKeyboardInput()
+                event.keyCode == KeyEvent.KEYCODE_ENTER -> keyboardManager.submitKeyboardInput(arrived)
                 event.keyCode == KeyEvent.KEYCODE_DEL -> keyboardManager.deleteKey()
                 event.keyCode == KeyEvent.KEYCODE_ESCAPE -> keyboardManager.escapeKey()
                 // (the two keys the game may take say whether they are a repeat of a key held down)
