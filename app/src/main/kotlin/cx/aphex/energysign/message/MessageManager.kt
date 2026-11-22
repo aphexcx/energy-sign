@@ -729,7 +729,10 @@ class MessageManager(
 
             "!ec",
             "!endchoose" -> {
-                isInChooserMode = false
+                // THE PHONE'S MIDDLE BUTTON IS THE GAME'S BUTTON while anything of a game is on: the jump of
+                // "!j", as the keyboard's key has it (gameKey). A game is never on in chooser mode ("!choose"
+                // ends it and startGame starts none there), so there this leaves the chooser as it always did.
+                if (game.busy) game.jump(arrivedAt) else isInChooserMode = false
             }
 
             "!p",
