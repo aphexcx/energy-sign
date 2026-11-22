@@ -2613,27 +2613,30 @@ class MessageManagerOwnerTest {
             "!game" to { app -> command(app, "!game") },
             "!jump" to { app -> command(app, "!jump") },
             "!j" to { app -> command(app, "!j") },
+            // THE PHONE'S MIDDLE BUTTON: the jump of !j while anything of a game is on, and otherwise what it was
+            "!endchoose" to { app -> command(app, "!endchoose") },
+            "!ec" to { app -> command(app, "!ec") },
             "the up arrow" to { _ -> KeyboardManager.upArrow(); ownerRuns() },
             "the space bar" to { _ -> KeyboardManager.processNewKeyboardKey(' '); ownerRuns() },
             // A HELD KEY IS ONE PRESS for the game: its repeats are nothing. Typing keeps its repeats.
             "the up arrow, held down (a repeat)" to { _ -> KeyboardManager.upArrow(repeated = true); ownerRuns() },
             "the space bar, held down (a repeat)" to { _ -> KeyboardManager.processNewKeyboardKey(' ', repeated = true); ownerRuns() },
         )
-        // what the sign's next request gets, for !game, !jump, !j, the up arrow, the space bar, and the repeats of the two keys
+        // what the sign's next request gets, for !game, !jump, !j, !endchoose, !ec, the up arrow, the space bar, and the repeats of the two keys
         val jumps = "frame, in the air"
         val expected = mapOf(
-            // !game and the up arrow start a game; a jump without a game is nothing; a space is typed
-            "no game" to listOf("D", STORED, STORED, "D", "echo  _", STORED, "echo  _"),
+            // !game and the up arrow start a game; a jump without a game is nothing (!endchoose starts none); a space is typed
+            "no game" to listOf("D", STORED, STORED, STORED, STORED, "D", "echo  _", STORED, "echo  _"),
             // nothing starts twice and nobody jumps before the game: the intro goes on, whatever is pressed
-            "the intro" to List(7) { "READY?" },
+            "the intro" to List(9) { "READY?" },
             // a second !game is nothing; the space bar is the button while a game is on, and types nothing
-            "a game, on the ground" to listOf("frame", jumps, jumps, jumps, jumps, "frame", "frame"),
-            "a game, in the air" to List(7) { jumps },
+            "a game, on the ground" to listOf("frame", jumps, jumps, jumps, jumps, jumps, jumps, "frame", "frame"),
+            "a game, in the air" to List(9) { jumps },
             // !game is the next game at once; a jump that comes a moment after the hit is nothing, on any key
-            "the closing show" to listOf("D") + List(6) { GAME_OVER[1] },
-            // the sign is somebody else's: no game begins behind it, not later either
-            "the chooser" to listOf(STORED, STORED, STORED, STORED, "echo  _", STORED, "echo  _"),
-            "somebody typing" to listOf("", "", "", "", "echo x _", "", "echo x _"),
+            "the closing show" to listOf("D") + List(8) { GAME_OVER[1] },
+            // the sign is somebody else's: no game begins behind it, not later either; !endchoose gives it back itself
+            "the chooser" to listOf(STORED, STORED, STORED, STORED, STORED, STORED, "echo  _", STORED, "echo  _"),
+            "somebody typing" to listOf("", "", "", "", "", "", "echo x _", "", "echo x _"),
         )
         val wrong = mutableListOf<String>()
         for ((state, reach) in gameStates) presses.entries.forEachIndexed { i, (press, pressed) ->
@@ -2642,7 +2645,8 @@ class MessageManagerOwnerTest {
                 reach(app)
                 pressed(app)
                 // what was taken by somebody else is given back first: was a game started behind it?
-                if (state == "the chooser") command(app, "!endchoose")
+                // (!endchoose and !ec give the chooser back themselves: the sign's next request shows that they did)
+                if (state == "the chooser" && press != "!endchoose" && press != "!ec") command(app, "!endchoose")
                 if (state == "somebody typing" && !press.startsWith("the space bar")) endTyping()
                 val got = asks(app)
                 if (got != expected.getValue(state)[i]) wrong += "$state, $press: the sign gets '$got', not '${expected.getValue(state)[i]}'"
@@ -2749,6 +2753,8 @@ class MessageManagerOwnerTest {
         }
         val presses: Map<String, (App) -> Unit> = linkedMapOf(
             "!jump from the phone" to { app -> app.phone("!jump") },
+            // (also once the sign was answered past the hit and the game closed: its closing show is part of game.busy)
+            "!endchoose from the phone" to { app -> app.phone("!endchoose") },
             "the up arrow" to { _ -> KeyboardManager.upArrow() },
             "the space bar" to { _ -> KeyboardManager.processNewKeyboardKey(' ') },
         )
